@@ -5882,9 +5882,10 @@ class BashToolExecutor(ToolExecutor):
         # Expand braces - may need multiple passes for nested
         max_iterations = 10
         for _ in range(max_iterations):
-            # Pattern: {content}
+            # Pattern: {content} but NOT ${var...}
             # Match innermost braces first (non-greedy)
-            pattern = r'\{([^{}]+)\}'
+            # FIX #7: Use negative lookbehind to exclude ${var...} parameter expansion
+            pattern = r'(?<!\$)\{([^{}]+)\}'
             new_command = re.sub(pattern, expand_single_brace, command)
             
             if new_command == command:
@@ -6425,6 +6426,147 @@ EXPAND_DELIMITER'''
         command = re.sub(array_pattern, r'$\1', command)
 
         # ================================================================
+        # FIX #7: Advanced Parameter Expansion
+        # ================================================================
+        # ${var#pattern}  - remove shortest prefix
+        # ${var##pattern} - remove longest prefix
+        # ${var%pattern}  - remove shortest suffix
+        # ${var%%pattern} - remove longest suffix
+        # ${var/pattern/string}  - replace first
+        # ${var//pattern/string} - replace all
+        # ${var^^} - uppercase all
+        # ${var,,} - lowercase all
+        # ${var^}  - uppercase first
+        # ${#var}  - string length
+
+        # 5a. String length: ${#var}
+        length_pattern = r'\$\{#(\w+)\}'
+
+        def expand_length(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            return str(len(value))
+
+        command = re.sub(length_pattern, expand_length, command)
+
+        # 5b. Remove prefix: ${var#pattern} and ${var##pattern}
+        # Pattern: ${var#pattern} or ${var##pattern}
+        prefix_pattern = r'\$\{(\w+)(#{1,2})([^}]+)\}'
+
+        def expand_remove_prefix(match):
+            var_name = match.group(1)
+            op = match.group(2)  # # or ##
+            pattern = match.group(3)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern)
+
+            # Convert bash glob to regex and match from start
+            regex_pattern = '^' + regex_pattern.rstrip('\\Z')
+
+            if op == '#':  # Remove shortest prefix (non-greedy)
+                # Make pattern non-greedy by adding '?' after '*'
+                regex_pattern_ng = regex_pattern.replace('*', '*?')
+                match_obj = re.match(regex_pattern_ng, value)
+                if match_obj:
+                    return value[len(match_obj.group(0)):]
+            else:  # ## Remove longest prefix (greedy - default)
+                # fnmatch patterns are already greedy by default
+                match_obj = re.match(regex_pattern, value)
+                if match_obj:
+                    return value[len(match_obj.group(0)):]
+
+            return value
+
+        command = re.sub(prefix_pattern, expand_remove_prefix, command)
+
+        # 5c. Remove suffix: ${var%pattern} and ${var%%pattern}
+        suffix_pattern = r'\$\{(\w+)(%{1,2})([^}]+)\}'
+
+        def expand_remove_suffix(match):
+            var_name = match.group(1)
+            op = match.group(2)  # % or %%
+            pattern = match.group(3)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex and match from end
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern)
+            regex_pattern = regex_pattern.rstrip('\\Z') + '$'
+
+            if op == '%':  # Remove shortest suffix (non-greedy)
+                # Iterate from right to left to find rightmost (shortest) match
+                for i in range(len(value), -1, -1):
+                    match_obj = re.search(regex_pattern, value[i:])
+                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
+                        # Found shortest suffix at position i
+                        return value[:i]
+            else:  # %% Remove longest suffix (greedy)
+                # Iterate from left to right to find leftmost (longest) match
+                for i in range(len(value) + 1):
+                    match_obj = re.search(regex_pattern, value[i:])
+                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
+                        # Found longest suffix at position i
+                        return value[:i]
+
+            return value
+
+        command = re.sub(suffix_pattern, expand_remove_suffix, command)
+
+        # 5d. String substitution: ${var/pattern/string} and ${var//pattern/string}
+        subst_pattern = r'\$\{(\w+)(/{1,2})([^/}]+)/([^}]*)\}'
+
+        def expand_substitution(match):
+            var_name = match.group(1)
+            op = match.group(2)  # / or //
+            pattern = match.group(3)
+            replacement = match.group(4)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern).rstrip('\\Z')
+
+            if op == '/':  # Replace first
+                return re.sub(regex_pattern, replacement, value, count=1)
+            else:  # // Replace all
+                return re.sub(regex_pattern, replacement, value)
+
+        command = re.sub(subst_pattern, expand_substitution, command)
+
+        # 5e. Case conversion: ${var^^}, ${var,,}, ${var^}
+        case_pattern = r'\$\{(\w+)(\^{1,2}|,{1,2})\}'
+
+        def expand_case(match):
+            var_name = match.group(1)
+            op = match.group(2)
+            value = os.environ.get(var_name, '')
+
+            if op == '^^':  # Uppercase all
+                return value.upper()
+            elif op == ',,':  # Lowercase all
+                return value.lower()
+            elif op == '^':  # Uppercase first
+                return value[0].upper() + value[1:] if value else ''
+            elif op == ',':  # Lowercase first
+                return value[0].lower() + value[1:] if value else ''
+
+            return value
+
+        command = re.sub(case_pattern, expand_case, command)
+
+        # ================================================================
         # ARTIGIANO: Simple Variable Expansion
         # ================================================================
         # CRITICAL: Must expand basic $VAR and ${VAR} forms!
@@ -6559,8 +6701,10 @@ EXPAND_DELIMITER'''
         """
         import re
         
-        # Pattern: { cmd1; cmd2; }
-        grouping_pattern = r'\{\s*([^}]+)\s*\}'
+        # Pattern: { cmd1; cmd2; } but NOT ${var...}
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        # FIX #7: Prevent matching ${var#pattern}, ${var%pattern}, ${var/pattern/repl}, etc.
+        grouping_pattern = r'(?<!\$)\{\s*([^}]+)\s*\}'
         
         def expand_grouping(match):
             # Return inner commands
