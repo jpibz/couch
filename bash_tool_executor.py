@@ -599,24 +599,43 @@ class CommandExecutor:
     def _intelligent_fallback(self, command: str, parts: List[str]) -> Tuple[str, bool]:
         """
         Fallback for unknown command patterns.
-        
+
         Tries multiple strategies in order.
+
+        FIX #14: Recognize PowerShell cmdlets and powershell command itself
         """
         cmd_name = parts[0]
-        
+
+        # FIX #14: Detect PowerShell cmdlets and commands
+        POWERSHELL_CMDLETS = {
+            'Get-Content', 'Set-Content', 'Get-ChildItem', 'Get-Item',
+            'Select-String', 'Select-Object', 'ForEach-Object', 'Where-Object',
+            'Measure-Object', 'Sort-Object', 'Get-Unique', 'Group-Object',
+            'Compare-Object', 'Test-Path', 'New-Item', 'Remove-Item',
+            'Copy-Item', 'Move-Item', 'Rename-Item',
+            'Write-Host', 'Write-Output', 'Read-Host',
+            'powershell', 'pwsh'  # PowerShell executables themselves
+        }
+
+        # Check if this is a PowerShell cmdlet
+        if cmd_name in POWERSHELL_CMDLETS:
+            self.logger.debug(f"PowerShell cmdlet detected: {cmd_name}")
+            # Return command as-is but flag for PowerShell execution
+            return command, True
+
         # Try Git Bash as fallback
         if self.git_bash_exe:
             bash_cmd = self._execute_with_gitbash(command)
             if bash_cmd:
                 self.logger.debug(f"Fallback: Git Bash for {cmd_name}")
                 return bash_cmd, False
-        
+
         # Delegate to CommandTranslator for simple 1:1 mappings
         if self.command_translator:
             result = self._delegate_to_translator(command, parts)
             if result:
                 return result
-        
+
         # Last resort - pass through as-is
         self.logger.warning(f"Unknown command: {cmd_name} - passing through")
         return command, False

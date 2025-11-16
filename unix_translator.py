@@ -663,9 +663,11 @@ class CommandTranslator:
         # Commands managed by CommandExecutor - pass through RAW
         # These commands have complex emulations in CommandExecutor._execute_*
         # and need to reach execute_bash() BEFORE translation for strategy selection
+        # FIX #16: Removed sort, uniq, grep - they have working translators and MUST work in pipelines
+        # grep ESPECIALLY critical for pipelines and command substitution
         EXECUTOR_MANAGED = {
-            'find', 'curl', 'sed', 'diff', 'sort', 'uniq', 'awk', 'split',
-            'grep', 'join', 'ln', 'sha256sum', 'sha1sum', 'md5sum',
+            'find', 'curl', 'sed', 'diff', 'awk', 'split',
+            'join', 'ln', 'sha256sum', 'sha1sum', 'md5sum',
             'gzip', 'gunzip', 'tar', 'zip', 'unzip', 'hexdump', 'strings',
             'base64', 'timeout', 'watch', 'column', 'jq', 'wget', 'paste',
             'comm'
@@ -797,8 +799,14 @@ class CommandTranslator:
         if number_lines and not (number_nonblank or squeeze_blank or show_ends or show_tabs or show_all or show_nonprinting):
             return f'findstr /n "^" {" ".join(files)}', True
         
+        # FIX #15: Always use Get-Content for cat (not type)
+        # Get-Content is PowerShell native and more reliable
         if not any([number_lines, number_nonblank, squeeze_blank, show_ends, show_tabs, show_all, show_nonprinting]):
-            return f'type {" ".join(files)}', True
+            if len(files) == 1:
+                return f'Get-Content {files[0]}', False
+            else:
+                # Multiple files
+                return f'Get-Content {",".join(files)}', False
         
         # Complex flags → PowerShell with full implementation
         ps_operations = []
@@ -1181,24 +1189,38 @@ class CommandTranslator:
             return f'{force_cmd}mklink /H "{link_name}" "{target}"', True
     
     def _translate_grep(self, cmd: str, parts):
-        """Translate grep with FULL flag support - ALL flags implemented"""
+        """Translate grep with FULL flag support - ALL flags implemented
+
+        FIX #17: Handle combined flags like -rn, -ri, -rnH, etc.
+        """
         if len(parts) < 2:
             return 'echo Error: grep requires pattern', True
-        
-        case_insensitive = '-i' in parts
-        invert = '-v' in parts
-        recursive = '-r' in parts or '-R' in parts
-        line_numbers = '-n' in parts
-        count = '-c' in parts
-        extended_regex = '-E' in parts
-        whole_word = '-w' in parts
-        exact_line = '-x' in parts
-        only_matching = '-o' in parts
-        quiet = '-q' in parts or '--quiet' in parts
-        no_filename = '-h' in parts
-        with_filename = '-H' in parts
-        files_with_matches = '-l' in parts
-        files_without_matches = '-L' in parts
+
+        # FIX #17: Expand combined flags (-rn → -r -n)
+        # Check all parts for combined single-letter flags
+        def has_flag(flag_char):
+            """Check if a flag character is present (handles both -r and -rn)"""
+            for part in parts:
+                if part.startswith('-') and not part.startswith('--'):
+                    # Single dash - could be combined flags
+                    if flag_char in part[1:]:
+                        return True
+            return False
+
+        case_insensitive = has_flag('i')
+        invert = has_flag('v')
+        recursive = has_flag('r') or has_flag('R')
+        line_numbers = has_flag('n')
+        count = has_flag('c')
+        extended_regex = has_flag('E')
+        whole_word = has_flag('w')
+        exact_line = has_flag('x')
+        only_matching = has_flag('o')
+        quiet = has_flag('q') or '--quiet' in parts
+        no_filename = has_flag('h')
+        with_filename = has_flag('H')
+        files_with_matches = has_flag('l')
+        files_without_matches = has_flag('L')
         
         # Context lines
         before_context = 0
