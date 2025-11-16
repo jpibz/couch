@@ -824,22 +824,57 @@ class CommandExecutor:
         
         # Build Windows command
         win_path = path  # Already translated
-        
-        # Build PowerShell find implementation
+
+        # FIX #18: For simple cases, use direct Get-ChildItem | Where-Object (more readable)
+        # Complex cases use full script
+        is_simple = (
+            len(tests) <= 2 and  # Only name and/or type tests
+            not actions and  # No actions (no -exec, -delete)
+            max_depth is None and
+            min_depth is None and
+            all(test[0] in ['name', 'type'] for test in tests)
+        )
+
+        if is_simple:
+            # Simple case: Get-ChildItem | Where-Object
+            get_cmd = f'Get-ChildItem -Path "{win_path}" -Recurse -ErrorAction SilentlyContinue'
+
+            where_conditions = []
+            for test_type, test_arg, test_flag in tests:
+                if test_type == 'name':
+                    if test_flag:  # case-insensitive
+                        where_conditions.append(f'$_.Name -like "{test_arg}"')
+                    else:
+                        where_conditions.append(f'$_.Name -clike "{test_arg}"')
+                elif test_type == 'type':
+                    if test_arg == 'f':
+                        where_conditions.append('-not $_.PSIsContainer')
+                    elif test_arg == 'd':
+                        where_conditions.append('$_.PSIsContainer')
+
+            if where_conditions:
+                where_clause = ' -and '.join(where_conditions)
+                ps_cmd = f'{get_cmd} | Where-Object {{ {where_clause} }} | ForEach-Object {{ $_.FullName }}'
+            else:
+                ps_cmd = f'{get_cmd} | ForEach-Object {{ $_.FullName }}'
+
+            return ps_cmd, True
+
+        # Complex case: Build full PowerShell script
         ps_script = f'''
             $path = "{win_path}"
             $maxDepth = {max_depth if max_depth else 999}
             $minDepth = {min_depth if min_depth else 0}
-            
+
             Get-ChildItem -Path $path -Recurse -ErrorAction SilentlyContinue | ForEach-Object {{
                 $item = $_
                 $depth = ($item.FullName.Substring($path.Length) -split '\\\\|/').Length - 1
-                
+
                 # Depth filtering
                 if ($depth -gt $maxDepth -or $depth -lt $minDepth) {{
                     return
                 }}
-                
+
                 $match = $true
         '''
         
