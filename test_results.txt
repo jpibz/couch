@@ -1,0 +1,735 @@
+================================================================================
+BASH TOOL EXECUTOR - ACROBATIC COMMAND TEST SUITE
+================================================================================
+
+Initializing BashToolExecutor...
+✓ BashToolExecutor initialized
+  TESTMODE: True
+  Git Bash: C:\Program Files\Git\bin\bash.exe
+
+================================================================================
+TEST: grep with -E (extended regex)
+DESC: Extended regex pattern matching
+CMD:  grep -E "def.*execute" bash_tool_executor.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -E "def.*execute" bash_tool_executor.py"
+
+SUBPROCESS CALLS (7):
+  [1] where diff.exe
+  [2] where tar.exe
+  [3] where awk.exe
+  [4] where sed.exe
+  [5] where grep.exe
+  [6] where jq.exe
+  [7] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -E "def.*execute" bash_tool_executor.py"
+
+================================================================================
+TEST: grep with -C (context lines)
+DESC: Show 5 lines of context around matches
+CMD:  grep -C 5 "class CommandExecutor" bash_tool_executor.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -C 5 "class CommandExecutor" bash_tool_executor.py"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -C 5 "class CommandExecutor" bash_tool_executor.
+
+================================================================================
+TEST: grep with -i (case insensitive)
+DESC: Case-insensitive search
+CMD:  grep -i "error" logfile.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -i "error" logfile.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -i "error" logfile.txt"
+
+================================================================================
+TEST: grep with -v (invert match)
+DESC: Show lines NOT matching pattern
+CMD:  grep -v "^#" config.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -v "^#" config.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -v "^#" config.txt"
+
+================================================================================
+TEST: grep with -n (line numbers)
+DESC: Show line numbers with matches
+CMD:  grep -n "TODO" source.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -n "TODO" source.py"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -n "TODO" source.py"
+
+================================================================================
+TEST: awk field extraction
+DESC: Extract first field from lines with "def"
+CMD:  awk '/def/ {print $1}' file.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk '/def/ print $1' file.py"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk '/def/ print $1' file.py"
+
+================================================================================
+TEST: awk with custom delimiter
+DESC: Use : as field separator
+CMD:  awk -F ':' '{print $2}' /etc/passwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk -F ':' 'print $2' /etc/passwd"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk -F ':' 'print $2' /etc/passwd"
+
+================================================================================
+TEST: awk with NR (line number)
+DESC: Print lines after line 10
+CMD:  awk 'NR > 10 {print}' file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk 'NR > 10 print' file.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk 'NR > 10 print' file.txt"
+
+================================================================================
+TEST: head with -N shorthand
+DESC: First 10 lines (shorthand syntax)
+CMD:  head -10 file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                    if (Test-Path "file.txt") {
+                        Get-Content "file.txt" -TotalCount 10
+                    } else {
+                        Write-Error "head: file.txt: No such file or directory"
+                        exit 1
+                    }
+                "
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                    if (Test-Pa
+
+================================================================================
+TEST: head with -n flag
+DESC: First 20 lines (long syntax)
+CMD:  head -n 20 file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                    if (Test-Path "file.txt") {
+                        Get-Content "file.txt" -TotalCount 20
+                    } else {
+                        Write-Error "head: file.txt: No such file or directory"
+                        exit 1
+                    }
+                "
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                    if (Test-Pa
+
+================================================================================
+TEST: tail with -N shorthand
+DESC: Last 50 lines
+CMD:  tail -50 logfile.log
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                        if (Test-Path "logfile.log") {
+                            Get-Content "logfile.log" -Tail 50
+                        } else {
+                            Write-Error "tail: logfile.log: No such file or directory"
+                            exit 1
+                        }
+                    "
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                        if (Tes
+
+================================================================================
+TEST: wc -l (line count)
+DESC: Count lines in file
+CMD:  wc -l file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                if (-not (Test-Path "file.txt")) {
+                    Write-Error "wc: file.txt: No such file or directory"
+                    exit 1
+                }
+
+                $content = Get-Content "file.txt"
+                $lineCount = $content.Count
+                $wordCount = 0
+                $charCount = 0
+
+                foreach ($line in $content) {
+                    if ($line -ne $null) {
+                        $words = $line -split '\s+'
+                        $wordCount += ($words | Where-Object { $_ -ne '' }).Count
+                        $charCount += $line.Length + 1
+                    }
+                }
+
+                $output = @()
+            
+$output += $lineCount
+$output += "file.txt"
+Write-Output ($output -join "  ")"
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                if (-not (Test-
+
+================================================================================
+TEST: wc with glob pattern
+DESC: Count lines in all Python files
+CMD:  wc -l *.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: powershell -Command "
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @("*.py")) {
+                    if ($pattern -match '[*?\[\]]') {
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {
+                            $expandedFiles += $matched.FullName
+                        }
+                    } else {
+                        if (Test-Path $pattern) {
+                            $expandedFiles += $pattern
+                        } else {
+                            Write-Error "wc: $pattern: No such file or directory"
+                            exit 1
+                        }
+                    }
+                }
+
+                if ($expandedFiles.Count -eq 0) {
+                    Write-Error "wc: No files matched"
+                    exit 1
+                }
+
+                # Count stats for each file
+                $totalLines = 0
+                $totalWords = 0
+                $totalChars = 0
+
+                foreach ($file in $expandedFiles) {
+                    $content = Get-Content $file
+                    $lineCount = $content.Count
+                    $wordCount = 0
+                    $charCount = 0
+
+                    foreach ($line in $content) {
+                        if ($line -ne $null) {
+                            $words = $line -split '\s+'
+                            $wordCount += ($words | Where-Object { $_ -ne '' }).Count
+                            $charCount += $line.Length + 1
+                        }
+                    }
+
+                    $totalLines += $lineCount
+                    $totalWords += $wordCount
+                    $totalChars += $charCount
+
+                    $output = @()
+            
+                    $output += $lineCount
+                    $output += $file
+                    Write-Output ($output -join "  ")
+                }
+                if ($expandedFiles.Count -gt 1) {
+                    $output = @()
+            
+                    $output += $totalLines
+                    $output += "total"
+                    Write-Output ($output -join "  ")
+                }"
+
+SUBPROCESS CALLS (1):
+  [1] powershell -Command "
+                # Expand glob patterns
+                $expandedFiles = @()
+  
+
+================================================================================
+TEST: cat with quoted heredoc (no expansion)
+DESC: Heredoc with quoted delimiter (literal)
+CMD:  cat <<'EOF'
+This is text with $VAR that should NOT expand
+EOF
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                        $files = @("<","/tmp/heredoc_139402796114048_0.tmp")
+                        foreach ($file in $files) {
+                            if (Test-Path $file) {
+                                Get-Content $file
+                            } else {
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }
+                        }
+                    "
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                        $files 
+
+================================================================================
+TEST: cat with unquoted heredoc (expansion)
+DESC: Heredoc with unquoted delimiter (expands variables)
+CMD:  cat <<EOF
+HOME is: $HOME
+USER is: $USER
+EOF
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command powershell -Command "
+                        $files = @("<","/tmp/heredoc_139402796114048_0.tmp")
+                        foreach ($file in $files) {
+                            if (Test-Path $file) {
+                                Get-Content $file
+                            } else {
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }
+                        }
+                    "
+
+SUBPROCESS CALLS (2):
+  [1] C:\Program Files\Git\bin\bash.exe -c cat <<EXPAND_DELIMITER
+HOME is: $HOME
+USER is: $USER
+EXPAND_DEL
+  [2] powershell -NoProfile -NonInteractive -Command powershell -Command "
+                        $files 
+
+================================================================================
+TEST: git log | head
+DESC: Pipeline: git log into head
+CMD:  git log --oneline | head -10
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "git log --oneline | head -10"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "git log --oneline | head -10"
+
+================================================================================
+TEST: grep | wc
+DESC: Pipeline: grep into wc for counting
+CMD:  grep "ERROR" logfile.txt | wc -l
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep "ERROR" logfile.txt | wc -l"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep "ERROR" logfile.txt | wc -l"
+
+================================================================================
+TEST: cat | grep | wc
+DESC: Multi-stage pipeline
+CMD:  cat file.txt | grep "pattern" | wc -l
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cat file.txt | grep "pattern" | wc -l"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cat file.txt | grep "pattern" | wc -l"
+
+================================================================================
+TEST: ls | grep
+DESC: List files and filter
+CMD:  ls -la | grep ".py"
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs -la | grep ".py""
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs -la | grep ".py""
+
+================================================================================
+TEST: Simple $VAR expansion
+DESC: Expand $HOME environment variable
+CMD:  echo $HOME
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root"
+
+================================================================================
+TEST: ${VAR} expansion
+DESC: Expand ${PATH} with braces
+CMD:  echo ${PATH}
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root/.local/bi/n/root/.cargo/bin:/usr/local/go/bin:/opt/node22/bin:/opt/maven/bin:/opt/gradle/bin:/opt/rbenv/bin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root/.local/bi/n/root/.cargo/bin:/usr/local/go/
+
+================================================================================
+TEST: ${VAR:-default} expansion
+DESC: Variable with default value
+CMD:  echo ${MISSING_VAR:-/default/path}
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo :-/default/path"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo :-/default/path"
+
+================================================================================
+TEST: Tilde expansion
+DESC: Expand ~ to home directory
+CMD:  ls ~/Documents
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs /home/testuser/Documents"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs /home/testuser/Documents"
+
+================================================================================
+TEST: Simple $(command)
+DESC: Command substitution with $()
+CMD:  echo "Date is $(date)"
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo "Date is ""
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo "Date is ""
+
+================================================================================
+TEST: Nested $($(...))
+DESC: Nested command substitution
+CMD:  echo $(echo $(whoami))
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[POWERSHELL] -NoProfile -NonInteractive -Command "C:\Program Files\Git\bin\bash.exe" -c "echo  $(whoami)"
+
+SUBPROCESS CALLS (1):
+  [1] powershell -NoProfile -NonInteractive -Command "C:\Program Files\Git\bin\bash.exe" -c "echo  $(whoam
+
+================================================================================
+TEST: $(cat file)
+DESC: Substitute file contents
+CMD:  echo $(cat version.txt)
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo  version.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo  version.txt"
+
+================================================================================
+TEST: Command chain with &&
+DESC: Chain with AND operator
+CMD:  mkdir test_dir && cd test_dir && pwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir test_dir && cd test_dir && pwd"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir test_dir && cd test_dir && pwd"
+
+================================================================================
+TEST: Command chain with ||
+DESC: Chain with OR operator
+CMD:  test -f missing.txt || echo "File not found"
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "test -f missing.txt || echo "File not found""
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "test -f missing.txt || echo "File not found""
+
+================================================================================
+TEST: Command chain with ;
+DESC: Sequential commands
+CMD:  echo "First"; echo "Second"; echo "Third"
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo "First"; echo "Second"; echo "Third""
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo "First"; echo "Second"; echo "Third""
+
+================================================================================
+TEST: ls with flags
+DESC: List files with all details
+CMD:  ls -la /tmp
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs -la /tmp"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ls -CFs -la /tmp"
+
+================================================================================
+TEST: cd to directory
+DESC: Change directory
+CMD:  cd /tmp
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cd /tmp"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cd /tmp"
+
+================================================================================
+TEST: pwd (print working directory)
+DESC: Get current directory
+CMD:  pwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "pwd"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "pwd"
+
+================================================================================
+TEST: mkdir (create directory)
+DESC: Create nested directories
+CMD:  mkdir -p /tmp/test/nested
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir -p /tmp/test/nested"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir -p /tmp/test/nested"
+
+================================================================================
+TEST: rm with flags
+DESC: Remove directory recursively
+CMD:  rm -rf /tmp/test
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "rm -rf /tmp/test"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "rm -rf /tmp/test"
+
+================================================================================
+TEST: cp (copy)
+DESC: Copy file
+CMD:  cp file1.txt file2.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cp file1.txt file2.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cp file1.txt file2.txt"
+
+================================================================================
+TEST: mv (move)
+DESC: Rename/move file
+CMD:  mv oldname.txt newname.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mv oldname.txt newname.txt"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mv oldname.txt newname.txt"
+
+================================================================================
+TEST: STDERR to file
+DESC: Redirect stderr to file
+CMD:  command 2> errors.log
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2> errors.log"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2> errors.log"
+
+================================================================================
+TEST: STDERR to STDOUT
+DESC: Merge stderr into stdout
+CMD:  command 2>&1
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1"
+
+================================================================================
+TEST: Pipeline with stderr
+DESC: Pipe both stdout and stderr
+CMD:  command 2>&1 | grep ERROR
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1 | grep ERROR"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1 | grep ERROR"
+
+================================================================================
+TEST: find with -exec
+DESC: Find files and execute command on each
+CMD:  find . -name "*.py" -exec grep "TODO" {} \;
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "Get-ChildItem . -Recurse | ForEach-Object { grep "TODO" $_.FullName }"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "Get-ChildItem . -Recurse | ForEach-Object { grep "TOD
+
+================================================================================
+TEST: Complex pipeline with awk
+DESC: Process list → filter → extract PID
+CMD:  ps aux | grep python | awk '{print $2}'
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ps aux | grep python | awk 'print $2'"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "ps aux | grep python | awk 'print $2'"
+
+================================================================================
+TEST: sed substitution
+DESC: Global string replacement
+CMD:  s/old/new/g
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "s/old/new/g"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "s/old/new/g"
+
+================================================================================
+TEST: tar create archive
+DESC: Create compressed tar archive
+CMD:  tar -czf archive.tar.gz directory/
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -czf archive.tar.gz directory/"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -czf archive.tar.gz directory/"
+
+================================================================================
+TEST: tar extract archive
+DESC: Extract compressed tar archive
+CMD:  tar -xzf archive.tar.gz
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -xzf archive.tar.gz"
+
+SUBPROCESS CALLS (1):
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -xzf archive.tar.gz"
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total tests: 44
+Passed: 44
+Failed: 0
+Success rate: 100.0%

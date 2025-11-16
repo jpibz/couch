@@ -331,11 +331,18 @@ class PathTranslator:
 class CommandTranslator:
     """
     Unix→Windows command translation with pipe/redirect/concatenation support
-    
+
     Supports 35+ commands with full parameter handling
+
+    ARCHITECTURE NOTE:
+    path_translator parameter is LEGACY and NOT USED!
+    CommandTranslator translates COMMANDS, not PATHS.
+    Path translation happens in BashToolExecutor.execute() BEFORE
+    commands reach this layer.
     """
-    
-    def __init__(self, path_translator: PathTranslator):
+
+    def __init__(self, path_translator: PathTranslator = None):
+        # NOTE: path_translator not used, kept for backward compatibility only
         self.path_translator = path_translator
 
         # Command map with all translators (73 commands)

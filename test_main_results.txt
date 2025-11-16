@@ -1,0 +1,362 @@
+================================================================================
+BASH TOOL EXECUTOR - TEST MAIN
+================================================================================
+
+================================================================================
+TEST: grep with extended regex
+CMD:  grep -E 'def.*execute' file.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -E 'def.*execute' file.py"
+
+[DEBUG] Subprocess calls made: 7
+  [1] where diff.exe
+  [2] where tar.exe
+  [3] where awk.exe
+  [4] where sed.exe
+  [5] where grep.exe
+  [6] where jq.exe
+  [7] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -E 'def.*execute' file.py"
+
+================================================================================
+TEST: grep with context lines
+CMD:  grep -C 5 'class' file.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -C 5 'class' file.py"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep -C 5 'class' file.py"
+
+================================================================================
+TEST: awk field extraction
+CMD:  awk '/def/ {print $1}' file.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk '/def/ print $1' file.py"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk '/def/ print $1' file.py"
+
+================================================================================
+TEST: awk with delimiter
+CMD:  awk -F ':' '{print $2}' /etc/passwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk -F ':' 'print $2' /etc/passwd"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "awk -F ':' 'print $2' /etc/passwd
+
+================================================================================
+TEST: head shorthand syntax
+CMD:  head -10 file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-Content "file.txt" -Head 10""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-Content 
+
+================================================================================
+TEST: tail shorthand syntax
+CMD:  tail -20 logfile.log
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-Content "logfile.log" -Tail 10""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-Content 
+
+================================================================================
+TEST: wc line count
+CMD:  wc -l file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "find /c /v "" "file.txt""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "find /c /v "" "file.txt""
+
+================================================================================
+TEST: wc with glob pattern
+CMD:  wc -l *.py
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "find /c /v "" "*.py""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "find /c /v "" "*.py""
+
+================================================================================
+TEST: cat heredoc quoted (no expansion)
+CMD:  cat <<'EOF'
+Text with $VAR that should NOT expand
+EOF
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo Error: cat requires filename < /tmp/heredoc_139255165673600_0.tmp"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo Error: cat requires filename
+
+================================================================================
+TEST: cat heredoc unquoted (with expansion)
+CMD:  cat <<EOF
+HOME is: $HOME
+USER is: $USER
+EOF
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo Error: cat requires filename < /tmp/heredoc_139255165673600_0.tmp"
+
+[DEBUG] Subprocess calls made: 2
+  [1] C:\Program Files\Git\bin\bash.exe -c cat <<EXPAND_DELIMITER
+HOME is: $HOME
+USER 
+  [2] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo Error: cat requires filename
+
+================================================================================
+TEST: pipeline: ls | grep
+CMD:  ls -la | grep '.py'
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildItem * -Format List | ForEach-Object { if($_.PSIsContainer) {$_.Name + "/"} else {$_.Name} }" | grep '.py'"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildIte
+
+================================================================================
+TEST: pipeline: grep | wc
+CMD:  grep 'ERROR' log.txt | wc -l
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep 'ERROR' log.txt | echo Error: wc requires filename"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "grep 'ERROR' log.txt | echo Error
+
+================================================================================
+TEST: simple $VAR expansion
+CMD:  echo $HOME
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root"
+
+================================================================================
+TEST: braced ${VAR} expansion
+CMD:  echo ${PATH}
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root/.local/bi/n/root/.cargo/bin:/usr/local/go/bin:/opt/node22/bin:/opt/maven/bin:/opt/gradle/bin:/opt/rbenv/bin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo /root/.local/bi/n/root/.carg
+
+================================================================================
+TEST: tilde expansion
+CMD:  ls ~/Documents
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildItem /home/testuser/Documents  | ForEach-Object { if($_.PSIsContainer) {$_.Name + "/"} else {$_.Name} }""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildIte
+
+================================================================================
+TEST: command substitution $(date)
+CMD:  echo $(date)
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo."
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo."
+
+================================================================================
+TEST: command substitution $(cat)
+CMD:  echo $(cat version.txt)
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo version.txt"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "echo version.txt"
+
+================================================================================
+TEST: command chain with &&
+CMD:  mkdir test && cd test && pwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir test && cd /d "test" && cd"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir test && cd /d "test" && cd"
+
+================================================================================
+TEST: command chain with ||
+CMD:  test -f missing.txt || echo 'Not found'
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "if exist "missing.txt" (exit /b 0) else (exit /b 1) || echo 'Not found'"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "if exist "missing.txt" (exit /b 0
+
+================================================================================
+TEST: ls with flags
+CMD:  ls -la /tmp
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildItem /tmp -Format List | ForEach-Object { if($_.PSIsContainer) {$_.Name + "/"} else {$_.Name} }""
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "powershell -Command "Get-ChildIte
+
+================================================================================
+TEST: print working directory
+CMD:  pwd
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cd"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "cd"
+
+================================================================================
+TEST: mkdir nested
+CMD:  mkdir -p /tmp/test/nested
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir /tmp/test/nested"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "mkdir /tmp/test/nested"
+
+================================================================================
+TEST: stderr to file
+CMD:  command 2> errors.log
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2> errors.log"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2> errors.log"
+
+================================================================================
+TEST: stderr to stdout
+CMD:  command 2>&1
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1"
+
+================================================================================
+TEST: stderr in pipeline
+CMD:  command 2>&1 | grep ERROR
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1 | grep ERROR"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "command 2>&1 | grep ERROR"
+
+================================================================================
+TEST: find with -exec
+CMD:  find . -name '*.py' -exec grep 'TODO' {} \;
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "Get-ChildItem . -Recurse | ForEach-Object { grep 'TODO' $_.FullName }"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "Get-ChildItem . -Recurse | ForEac
+
+================================================================================
+TEST: tar create archive
+CMD:  tar -czf archive.tar.gz dir/
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -czf archive.tar.gz dir/"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "tar -czf archive.tar.gz dir/"
+
+================================================================================
+TEST: sed substitution
+CMD:  sed 's/old/new/g' file.txt
+--------------------------------------------------------------------------------
+RESULT:
+Exit code: 0
+
+[TEST MODE] Would execute: cmd /c "C:\Program Files\Git\bin\bash.exe" -c "sed 's/old/new/g' file.txt"
+
+[DEBUG] Subprocess calls made: 1
+  [1] cmd /c "C:\Program Files\Git\bin\bash.exe" -c "sed 's/old/new/g' file.txt"
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total tests: 28
+Passed: 28
+Failed: 0
+Success rate: 100.0%
+================================================================================
