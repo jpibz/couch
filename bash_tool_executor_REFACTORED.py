@@ -404,6 +404,36 @@ class CommandExecutor:
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
         has_process_subst = '<(' in command or '>(' in command
+        has_stderr_redir = '2>' in command or '|&' in command or re.search(r'2>&1', command)
+
+        # ================================================================
+        # STDERR REDIRECTION - 2>, 2>&1, |&
+        # ================================================================
+        # CRITICAL: Stderr redirection operators are SHELL syntax, not command args
+        # - 2>file        redirect stderr to file
+        # - 2>&1          merge stderr to stdout
+        # - |&            pipe both stdout and stderr (bash shorthand for 2>&1 |)
+        # - 2>/dev/null   suppress error messages
+        #
+        # PowerShell emulation of these is UNRELIABLE:
+        # - _execute_grep(), _execute_awk(), etc. DON'T parse redirection
+        # - Redirection operators are treated as regular arguments
+        # - Result: syntax errors or silent failures
+        #
+        # ARTIGIANO: Don't emulate redirection. Pass to bash.exe.
+
+        if has_stderr_redir:
+            if self.git_bash_exe:
+                self.logger.debug(f"STDERR redirection detected (2>, 2>&1, |&) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # No bash.exe for stderr redirection
+                # Attempt PowerShell but warn - semantics may be wrong
+                self.logger.warning(f"STDERR redirection in command but bash.exe not available: {command[:100]}")
+                self.logger.warning("PowerShell stderr semantics differ from bash - results may be incorrect")
+                # Continue to emulation attempt
 
         # ================================================================
         # PROCESS SUBSTITUTION - <(...) >(...)
@@ -4669,7 +4699,7 @@ class BashToolExecutor(ToolExecutor):
        - Credential manager: "None" ✓
        
        Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\Program Files\Git\usr\bin (automatic)
+       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
        
        Verify:
          diff --version
@@ -4962,20 +4992,21 @@ class BashToolExecutor(ToolExecutor):
         
         for match in reversed(matches):
             strip_tabs = match.group(1) == '-'
+            quote_char = match.group(2)  # Captures ' or " if delimiter was quoted
             delimiter = match.group(3)
             heredoc_start = match.end()
-            
+
             # Find content after heredoc operator
             remaining = result_command[heredoc_start:]
-            
+
             # Split into lines
             lines = remaining.split('\n')
-            
+
             # Find delimiter closing line
             content_lines = []
             delimiter_found = False
             delimiter_line_index = -1
-            
+
             # Start from line 1 (line 0 is usually empty after <<EOF)
             for i in range(1, len(lines)):
                 if lines[i].rstrip() == delimiter:
@@ -4983,23 +5014,93 @@ class BashToolExecutor(ToolExecutor):
                     delimiter_line_index = i
                     break
                 content_lines.append(lines[i])
-            
+
             if not delimiter_found:
                 self.logger.warning(f"Heredoc delimiter '{delimiter}' not found")
                 # Use all remaining lines as content
                 content_lines = lines[1:] if len(lines) > 1 else []
                 delimiter_line_index = len(lines) - 1
-            
+
             # Build content
             content = '\n'.join(content_lines)
-            
+
             # Strip leading tabs if <<- was used
             if strip_tabs:
                 content = '\n'.join(line.lstrip('\t') for line in content_lines)
-            
+
+            # ================================================================
+            # ARTIGIANO: Heredoc Variable Expansion
+            # ================================================================
+            # CRITICAL: In bash, heredocs expand variables and commands UNLESS
+            # the delimiter is quoted (<<"EOF" or <<'EOF')
+            #
+            # <<EOF          → Expand $VAR, $(cmd), `cmd`, $((expr))
+            # <<"EOF"        → NO expansion (literal)
+            # <<'EOF'        → NO expansion (literal)
+            #
+            # BEHAVIOR:
+            # - Unquoted delimiter → Use bash.exe to expand content
+            # - Quoted delimiter → Write content literally
+            # - No bash.exe → Write literally + warning
+            #
+            # This ensures heredoc-generated configs/scripts have correct values.
+
+            should_expand = (quote_char == '')  # Empty = unquoted delimiter
+
+            if should_expand:
+                # Attempt variable expansion via bash.exe
+                if self.git_bash_exe:
+                    try:
+                        # Use bash to expand the content
+                        # We pass content via echo to let bash do expansion
+                        # Use printf for better control over newlines and special chars
+
+                        # Escape content for bash heredoc (preserve literal backslashes)
+                        # We'll use bash itself to expand, via a heredoc to bash
+                        expansion_script = f'''cat <<'EXPAND_DELIMITER'
+{content}
+EXPAND_DELIMITER'''
+
+                        # But wait - we WANT expansion, so use UNquoted delimiter
+                        expansion_script = f'''cat <<EXPAND_DELIMITER
+{content}
+EXPAND_DELIMITER'''
+
+                        # Execute via bash.exe
+                        bash_path = self.git_bash_exe
+                        result = subprocess.run(
+                            [bash_path, '-c', expansion_script],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=str(self.scratch_dir),
+                            env=self._setup_environment(),
+                            errors='replace',
+                            encoding='utf-8'
+                        )
+
+                        if result.returncode == 0:
+                            # Use expanded content
+                            content = result.stdout
+                            self.logger.debug(f"Heredoc expanded via bash.exe (delimiter: {delimiter})")
+                        else:
+                            # Expansion failed - use literal
+                            self.logger.warning(f"Heredoc expansion failed (exit {result.returncode}), using literal content")
+                            self.logger.debug(f"Bash stderr: {result.stderr}")
+
+                    except Exception as e:
+                        # Expansion error - use literal
+                        self.logger.warning(f"Heredoc expansion error: {e}, using literal content")
+
+                else:
+                    # No bash.exe for expansion - CRITICAL
+                    self.logger.warning(f"Heredoc with unquoted delimiter '{delimiter}' should expand variables")
+                    self.logger.warning("bash.exe not available - writing LITERAL content (may be incorrect)")
+                    # Continue with literal content
+
             # Create temp file
             temp_file = self.scratch_dir / f'heredoc_{threading.get_ident()}_{len(temp_files)}.tmp'
-            
+
             try:
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(content)
@@ -5369,7 +5470,44 @@ class BashToolExecutor(ToolExecutor):
         # Full array support would require state tracking
         array_pattern = r'\$\{(\w+)\[@\]\}'
         command = re.sub(array_pattern, r'$\1', command)
-        
+
+        # ================================================================
+        # ARTIGIANO: Simple Variable Expansion
+        # ================================================================
+        # CRITICAL: Must expand basic $VAR and ${VAR} forms!
+        # Previous code only handled ${VAR:-default}, missing simple expansion.
+        #
+        # This BROKE commands like:
+        #   cd $HOME        → cd $HOME (literal! Wrong!)
+        #   echo $PATH      → echo $PATH (literal!)
+        #   cp file $USER/  → cp file $USER/ (fails!)
+        #
+        # 6. Simple ${VAR} expansion
+        simple_brace_pattern = r'\$\{(\w+)\}'
+
+        def expand_simple_brace(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${{{var_name}}} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_brace_pattern, expand_simple_brace, command)
+
+        # 7. Simple $VAR expansion (without braces)
+        # Must be AFTER ${VAR} to avoid double-expansion
+        # Match $VAR but NOT $((, ${, $@, $*, $#, $?, $$, $!, $0-9
+        simple_var_pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
+
+        def expand_simple_var(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${var_name} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_var_pattern, expand_simple_var, command)
+
         return command
     
     def _preprocess_test_commands(self, command: str) -> str:
