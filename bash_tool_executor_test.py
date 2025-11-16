@@ -20,39 +20,8 @@ from bash_tool_executor_REFACTORED import CommandExecutor
 
 
 # ============================================================================
-# FAKE TRANSLATORS FOR TEST MODE
+# FAKE SUBPROCESS RESULT FOR TEST MODE
 # ============================================================================
-
-class FakePathTranslator:
-    """Minimal fake PathTranslator for testing"""
-    def __init__(self):
-        self.workspace_root = Path("/tmp/test_workspace")
-
-    def translate_paths_in_string(self, text, direction='to_windows'):
-        """No-op translation in test mode"""
-        return text
-
-    def get_claude_home_unix(self):
-        """Return fake home directory"""
-        return "/home/testuser"
-
-    def get_tool_scratch_directory(self, tool_name):
-        """Return fake scratch dir"""
-        return Path("/tmp/test_scratch")
-
-
-class FakeCommandTranslator:
-    """Minimal fake CommandTranslator for testing"""
-    def __init__(self, path_translator):
-        self.path_translator = path_translator
-
-    def translate(self, command):
-        """
-        Fake translation - just return command as-is.
-        In test mode, we want to see what CommandExecutor does.
-        """
-        return command, False, 'pass_through'
-
 
 class FakeSubprocessResult:
     """Fake subprocess.CompletedProcess result"""
@@ -74,8 +43,8 @@ class CommandExecutorTest(CommandExecutor):
     results are faked to simulate successful execution.
     """
 
-    def __init__(self, path_translator=None, command_translator=None,
-                 git_bash_exe=None, logger=None):
+    def __init__(self, command_translator=None,
+                 git_bash_exe=None, claude_home_unix="/home/testuser", logger=None):
         """Initialize test executor with subprocess mocking"""
         self.logger = logger or logging.getLogger('CommandExecutorTest')
         self.subprocess_calls = []  # Track all subprocess calls for debugging
@@ -85,7 +54,7 @@ class CommandExecutorTest(CommandExecutor):
         self._patch_subprocess()
 
         # Now call parent init which will use our patched subprocess
-        super().__init__(path_translator, command_translator, git_bash_exe, logger)
+        super().__init__(command_translator, git_bash_exe, claude_home_unix, logger)
 
     def _patch_subprocess(self):
         """Monkey-patch subprocess.run to use our fake version"""
