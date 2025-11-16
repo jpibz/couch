@@ -25,17 +25,29 @@ def test_command(description, command, category=""):
     print("-" * 80)
 
     try:
-        result = executor.execute(command)
-        print(f"RESULT: Exit code {result.returncode}")
-        if result.returncode == 0:
+        result = executor.execute({'command': command, 'description': description})
+
+        # Check if result indicates an error
+        is_error = any([
+            result.startswith("Error:"),
+            result.startswith("SECURITY VIOLATION:"),
+            "Exception:" in result,
+            "Traceback" in result,
+        ])
+
+        if not is_error:
             print("✓ PASSED")
+            if result and len(result) < 200:
+                print(f"OUTPUT: {result[:200]}")
+            return True
         else:
             print("✗ FAILED")
-            if result.stderr:
-                print(f"STDERR: {result.stderr[:500]}")
-        return result.returncode == 0
+            print(f"ERROR: {result[:500]}")
+            return False
     except Exception as e:
         print(f"✗ EXCEPTION: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
