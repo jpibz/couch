@@ -5613,70 +5613,123 @@ class BashToolExecutor(ToolExecutor):
             RuntimeError: If Python not found and python_executable not provided
         """
         super().__init__('bash_tool', enabled)
-        
+
+        # ====================================================================
+        # TESTMODE FLAG - HARDCODED FOR TESTING
+        # ====================================================================
+        # When True: Uses CommandExecutorTest with faked subprocess calls
+        # Allows testing command translation without executing anything
+        TESTMODE = False  # <-- SET TO TRUE FOR TESTING
+        # ====================================================================
+
+        self.TESTMODE = TESTMODE
         self.working_dir = Path(working_dir)
         self.default_timeout = default_timeout
         self.python_timeout = python_timeout
         self.use_git_bash = use_git_bash
-        
+
         # Initialize components
-        self.path_translator = PathTranslator()
-        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
-        self.command_translator = CommandTranslator(self.path_translator)
+        if TESTMODE:
+            # TEST MODE: Use fake translators
+            self.logger.warning("="*80)
+            self.logger.warning("TESTMODE ENABLED - Subprocess calls will be faked")
+            self.logger.warning("="*80)
+            # Import fake translators
+            from bash_tool_executor_test import FakePathTranslator, FakeCommandTranslator
+            self.path_translator = FakePathTranslator()
+            self.sandbox_validator = None  # Skip sandbox in test mode
+            self.command_translator = FakeCommandTranslator(self.path_translator)
+        else:
+            # PRODUCTION MODE: Normal initialization
+            self.path_translator = PathTranslator()
+            self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
+            self.command_translator = CommandTranslator(self.path_translator)
         
         # Initialize CommandExecutor (execution strategy layer)
         # Will be fully initialized after Git Bash detection
         self.command_executor = None
-        
+
         # Create tool-specific scratch directory
-        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
-        
+        if TESTMODE:
+            # TEST MODE: Use temp directory
+            import tempfile
+            self.scratch_dir = Path(tempfile.mkdtemp(prefix='bash_test_'))
+            self.logger.info(f"TEST MODE: Using temp scratch dir: {self.scratch_dir}")
+        else:
+            # PRODUCTION MODE: Normal scratch dir
+            self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
+
         # Git Bash detection (if enabled)
         self.git_bash_exe = None
         if use_git_bash:
-            self.git_bash_exe = self._detect_git_bash()
-            if self.git_bash_exe:
-                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+            if TESTMODE:
+                # TEST MODE: Fake git bash path
+                self.git_bash_exe = r"C:\Program Files\Git\bin\bash.exe"
+                self.logger.info(f"TEST MODE: Faking Git Bash path: {self.git_bash_exe}")
             else:
-                self.logger.warning("Git Bash not found - falling back to command translation")
+                # PRODUCTION MODE: Real detection
+                self.git_bash_exe = self._detect_git_bash()
+                if self.git_bash_exe:
+                    self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+                else:
+                    self.logger.warning("Git Bash not found - falling back to command translation")
         
         # Python executable - CRITICAL DEPENDENCY
-        try:
-            if python_executable:
-                # Validate provided executable
-                result = subprocess.run(
-                    [python_executable, '--version'],
-                    capture_output=True,
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
-                
-                self.python_executable = python_executable
-                self.logger.info(f"Using provided Python: {python_executable}")
-            else:
-                # Auto-detect (may raise RuntimeError)
-                self.python_executable = self._detect_system_python()
-        
-        except RuntimeError as e:
-            # Python detection failed - tool disabled
-            self.python_executable = None
+        if TESTMODE:
+            # TEST MODE: Skip Python detection
+            self.python_executable = "python.exe"
             self.virtual_env = None
-            self.logger.error(f"BashToolExecutor initialization failed: {e}")
-            raise
-        
-        # Virtual environment - only if Python available
-        self.virtual_env = self._setup_virtual_env(virtual_env)
-        
+            self.logger.info("TEST MODE: Skipping Python detection")
+        else:
+            # PRODUCTION MODE: Real Python detection
+            try:
+                if python_executable:
+                    # Validate provided executable
+                    result = subprocess.run(
+                        [python_executable, '--version'],
+                        capture_output=True,
+                        timeout=2,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Invalid Python executable: {python_executable}")
+
+                    self.python_executable = python_executable
+                    self.logger.info(f"Using provided Python: {python_executable}")
+                else:
+                    # Auto-detect (may raise RuntimeError)
+                    self.python_executable = self._detect_system_python()
+
+            except RuntimeError as e:
+                # Python detection failed - tool disabled
+                self.python_executable = None
+                self.virtual_env = None
+                self.logger.error(f"BashToolExecutor initialization failed: {e}")
+                raise
+
+            # Virtual environment - only if Python available
+            self.virtual_env = self._setup_virtual_env(virtual_env)
+
         # Initialize CommandExecutor with all dependencies now available
-        self.command_executor = CommandExecutor(
-            path_translator=self.path_translator,
-            command_translator=self.command_translator,
-            git_bash_exe=self.git_bash_exe,
-            logger=self.logger
-        )
+        if TESTMODE:
+            # TEST MODE: Use CommandExecutorTest with faked subprocess
+            from bash_tool_executor_test import CommandExecutorTest
+            self.command_executor = CommandExecutorTest(
+                path_translator=self.path_translator,
+                command_translator=self.command_translator,
+                git_bash_exe=self.git_bash_exe,
+                logger=self.logger
+            )
+            self.logger.warning("TEST MODE: Using CommandExecutorTest (faked subprocess)")
+        else:
+            # PRODUCTION MODE: Normal CommandExecutor
+            self.command_executor = CommandExecutor(
+                path_translator=self.path_translator,
+                command_translator=self.command_translator,
+                git_bash_exe=self.git_bash_exe,
+                logger=self.logger
+            )
         
         self.logger.info(
             f"BashToolExecutor initialized: Python={self.python_executable}, "
@@ -6959,9 +7012,13 @@ EXPAND_DELIMITER'''
                 self.logger.debug(f"Translated: {translated_cmd[:100]}")
 
             # STEP 5: Validate command
-            is_safe, reason = self.sandbox_validator.validate_command(translated_cmd)
-            if not is_safe:
-                return f"Error: Security - {reason}"
+            if self.sandbox_validator:
+                is_safe, reason = self.sandbox_validator.validate_command(translated_cmd)
+                if not is_safe:
+                    return f"Error: Security - {reason}"
+            else:
+                # TEST MODE: Skip validation
+                self.logger.debug("TEST MODE: Skipping sandbox validation")
             
             # Working directory
             cwd = self.scratch_dir
