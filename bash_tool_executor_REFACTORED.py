@@ -4837,62 +4837,143 @@ class CommandExecutor:
                 # In PowerShell pipeline, this is implicit
                 return '$input', True
 
-        # Files specified
-        if len(files) == 1:
-            # Single file
-            file = files[0]
+        # ================================================================
+        # ARTIGIANO: Glob Pattern Expansion
+        # ================================================================
+        # CRITICAL: PowerShell scripts must expand globs BEFORE using files
+        # If we pass "*.txt" directly to Get-Content, it's LITERAL, not expanded!
+        #
+        # Detect glob patterns: *, ?, [ ]
+        # Use Get-ChildItem to expand, then process expanded files
+
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            # Build glob-aware PowerShell script
+            files_patterns = ','.join(f'"{f}"' for f in files)
+
             if number_lines:
                 ps_script = f'''
-                    if (Test-Path "{file}") {{
-                        $lineNum = 1
-                        Get-Content "{file}" | ForEach-Object {{
+                    # Expand glob patterns
+                    $expandedFiles = @()
+                    foreach ($pattern in @({files_patterns})) {{
+                        if ($pattern -match '[*?\\[\\]]') {{
+                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                            if ($matched) {{
+                                $expandedFiles += $matched.FullName
+                            }}
+                        }} else {{
+                            if (Test-Path $pattern) {{
+                                $expandedFiles += $pattern
+                            }} else {{
+                                Write-Error "cat: $pattern: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    }}
+
+                    if ($expandedFiles.Count -eq 0) {{
+                        Write-Error "cat: No files matched"
+                        exit 1
+                    }}
+
+                    # Process files with line numbers
+                    $lineNum = 1
+                    foreach ($file in $expandedFiles) {{
+                        Get-Content $file | ForEach-Object {{
                             Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
                             $lineNum++
                         }}
-                    }} else {{
-                        Write-Error "cat: {file}: No such file or directory"
-                        exit 1
                     }}
                 '''
             else:
                 ps_script = f'''
-                    if (Test-Path "{file}") {{
-                        Get-Content "{file}"
-                    }} else {{
-                        Write-Error "cat: {file}: No such file or directory"
+                    # Expand glob patterns
+                    $expandedFiles = @()
+                    foreach ($pattern in @({files_patterns})) {{
+                        if ($pattern -match '[*?\\[\\]]') {{
+                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                            if ($matched) {{
+                                $expandedFiles += $matched.FullName
+                            }}
+                        }} else {{
+                            if (Test-Path $pattern) {{
+                                $expandedFiles += $pattern
+                            }} else {{
+                                Write-Error "cat: $pattern: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    }}
+
+                    if ($expandedFiles.Count -eq 0) {{
+                        Write-Error "cat: No files matched"
                         exit 1
+                    }}
+
+                    # Concatenate files
+                    foreach ($file in $expandedFiles) {{
+                        Get-Content $file
                     }}
                 '''
         else:
-            # Multiple files - concatenate
-            if number_lines:
-                ps_script = '''
-                    $files = @({})
-                    $lineNum = 1
-                    foreach ($file in $files) {{
-                        if (Test-Path $file) {{
-                            Get-Content $file | ForEach-Object {{
+            # No globs - direct file access (original logic)
+            # Files specified
+            if len(files) == 1:
+                # Single file
+                file = files[0]
+                if number_lines:
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            $lineNum = 1
+                            Get-Content "{file}" | ForEach-Object {{
                                 Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
                                 $lineNum++
                             }}
                         }} else {{
-                            Write-Error "cat: $file: No such file or directory"
+                            Write-Error "cat: {file}: No such file or directory"
                             exit 1
                         }}
-                    }}
-                '''.format(','.join(f'"{f}"' for f in files))
-            else:
-                ps_script = '''
-                    $files = @({})
-                    foreach ($file in $files) {{
-                        if (Test-Path $file) {{
-                            Get-Content $file
+                    '''
+                else:
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            Get-Content "{file}"
                         }} else {{
-                            Write-Error "cat: $file: No such file or directory"
+                            Write-Error "cat: {file}: No such file or directory"
                             exit 1
                         }}
-                    }}
-                '''.format(','.join(f'"{f}"' for f in files))
+                    '''
+            else:
+                # Multiple files - concatenate
+                if number_lines:
+                    ps_script = '''
+                        $files = @({})
+                        $lineNum = 1
+                        foreach ($file in $files) {{
+                            if (Test-Path $file) {{
+                                Get-Content $file | ForEach-Object {{
+                                    Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                                    $lineNum++
+                                }}
+                            }} else {{
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    '''.format(','.join(f'"{f}"' for f in files))
+                else:
+                    ps_script = '''
+                        $files = @({})
+                        foreach ($file in $files) {{
+                            if (Test-Path $file) {{
+                                Get-Content $file
+                            }} else {{
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    '''.format(','.join(f'"{f}"' for f in files))
 
         return f'powershell -Command "{ps_script}"', True
 
