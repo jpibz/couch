@@ -6824,20 +6824,33 @@ EXPAND_DELIMITER'''
     def _needs_powershell(self, command: str) -> bool:
         """
         Detect if command needs PowerShell instead of cmd.exe.
-        
+
         PowerShell required for:
         - Command substitution: $(...)
         - Backticks: `...`
         - Process substitution: <(...)
         - Complex variable expansion
-        
+        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
+
         Returns:
             True if PowerShell required, False if cmd.exe sufficient
         """
+        # PowerShell cmdlets
+        powershell_cmdlets = [
+            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
+            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
+            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
+            '$input', '$_'  # PowerShell variables
+        ]
+
+        for cmdlet in powershell_cmdlets:
+            if cmdlet in command:
+                return True
+
         # Command substitution patterns
         if '$(' in command:
             return True
-        
+
         # Backtick command substitution
         if '`' in command:
             # Check it's not just in a string
@@ -6854,11 +6867,11 @@ EXPAND_DELIMITER'''
                         quote_char = None
                 elif char == '`' and not in_quotes:
                     return True
-        
+
         # Process substitution
         if '<(' in command or '>(' in command:
             return True
-        
+
         return False
     
     def _adapt_for_powershell(self, command: str) -> str:
