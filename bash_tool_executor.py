@@ -4176,6 +4176,53 @@ class CommandExecutor:
     
 
 # ======== zip (2434-2503) ========
+    def _execute_wget(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute wget - Simple wrapper converting to curl.
+
+        wget is traditionally a download tool, curl is more versatile but can do the same.
+        For complex wget scenarios, this delegates to curl implementation.
+
+        Common flags:
+        - -O file: output to specified file
+        - URL: download URL
+
+        Strategy: Convert to curl and delegate to _execute_curl()
+
+        Examples:
+          wget http://example.com/file.zip
+          wget -O output.html http://example.com
+        """
+        if len(parts) < 2:
+            return 'echo Error: wget requires URL', True
+
+        # Extract URL and output filename
+        urls = [p for p in parts[1:] if 'http://' in p or 'https://' in p]
+        output = None
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-O' and i + 1 < len(parts):
+                output = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        if not urls:
+            return 'echo Error: wget requires URL', True
+
+        # Convert to curl command
+        if output:
+            curl_cmd = f'curl -o "{output}" "{urls[0]}"'
+            curl_parts = ['curl', '-o', output, urls[0]]
+        else:
+            # wget default: save with remote filename
+            curl_cmd = f'curl -O "{urls[0]}"'
+            curl_parts = ['curl', '-O', urls[0]]
+
+        # Delegate to curl implementation for full feature support
+        return self._execute_curl(curl_cmd, curl_parts)
+
     def _execute_zip(self, cmd: str, parts):
         """
         Translate zip - create compressed archives.
