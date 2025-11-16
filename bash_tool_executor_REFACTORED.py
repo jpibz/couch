@@ -404,6 +404,36 @@ class CommandExecutor:
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
         has_process_subst = '<(' in command or '>(' in command
+        has_stderr_redir = '2>' in command or '|&' in command or re.search(r'2>&1', command)
+
+        # ================================================================
+        # STDERR REDIRECTION - 2>, 2>&1, |&
+        # ================================================================
+        # CRITICAL: Stderr redirection operators are SHELL syntax, not command args
+        # - 2>file        redirect stderr to file
+        # - 2>&1          merge stderr to stdout
+        # - |&            pipe both stdout and stderr (bash shorthand for 2>&1 |)
+        # - 2>/dev/null   suppress error messages
+        #
+        # PowerShell emulation of these is UNRELIABLE:
+        # - _execute_grep(), _execute_awk(), etc. DON'T parse redirection
+        # - Redirection operators are treated as regular arguments
+        # - Result: syntax errors or silent failures
+        #
+        # ARTIGIANO: Don't emulate redirection. Pass to bash.exe.
+
+        if has_stderr_redir:
+            if self.git_bash_exe:
+                self.logger.debug(f"STDERR redirection detected (2>, 2>&1, |&) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # No bash.exe for stderr redirection
+                # Attempt PowerShell but warn - semantics may be wrong
+                self.logger.warning(f"STDERR redirection in command but bash.exe not available: {command[:100]}")
+                self.logger.warning("PowerShell stderr semantics differ from bash - results may be incorrect")
+                # Continue to emulation attempt
 
         # ================================================================
         # PROCESS SUBSTITUTION - <(...) >(...)
