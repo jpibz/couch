@@ -403,6 +403,32 @@ class CommandExecutor:
         
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
+        has_process_subst = '<(' in command or '>(' in command
+
+        # ================================================================
+        # PROCESS SUBSTITUTION - <(...) >(...)
+        # ================================================================
+        # CRITICAL: Process substitution creates named pipes/file descriptors
+        # - <(cmd) runs cmd, creates FD with output
+        # - >(cmd) creates FD, runs cmd on data written to it
+        # - Sub-commands can be COMPLEX (pipelines, chains)
+        # - NO PowerShell equivalent
+        # - bash.exe handles natively and perfectly
+        #
+        # ARTIGIANO: Don't emulate. Pass to bash.exe.
+
+        if has_process_subst:
+            if self.git_bash_exe:
+                self.logger.debug(f"Process substitution detected <(...) or >(...) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # NO bash.exe for process substitution - CRITICAL FAILURE
+                self.logger.error(f"Process substitution REQUIRES bash.exe: {command[:100]}")
+                self.logger.error("bash.exe not available - command will FAIL")
+                # Cannot emulate process substitution reliably
+                return f'echo "ERROR: Process substitution requires bash.exe (not available)"', True
 
         # ================================================================
         # COMMAND CHAINS - && || ;
@@ -701,9 +727,20 @@ class CommandExecutor:
     
     def _execute_find(self, cmd: str, parts: List[str]) -> Tuple[str, bool]:
         """
-        Execute find with COMPLETE test support - FULL EMULATION.
-        
-        Tests supported:
+        Execute find with COMPLETE test support - STRATEGIC DISPATCH.
+
+        ARTIGIANO STRATEGY:
+        - Simple find → PowerShell emulation
+        - Complex -exec → bash.exe (perfect emulation)
+        - Complex tests → bash.exe
+
+        Complexity triggers (bash.exe required):
+        - -exec with sh/bash invocation
+        - -exec with pipes/redirects
+        - -exec with complex quoting
+        - Advanced tests (-printf, -execdir, etc.)
+
+        Tests supported (PowerShell emulation):
         - -name PATTERN: filename pattern (wildcards)
         - -iname PATTERN: case-insensitive name
         - -type f|d|l: file type (file, directory, link)
@@ -714,16 +751,70 @@ class CommandExecutor:
         - -newer FILE: modified more recently than FILE
         - -maxdepth N: descend at most N levels
         - -mindepth N: descend at least N levels
-        - -exec CMD {} \;: execute command on each file
+        - -exec CMD {} \;: execute command (simple only)
         - -delete: delete matched files
         - -print: print matched files (default)
         - -print0: print with null separator
-        
+
         Examples:
-          find . -name "*.py" -mtime -7
-          find /tmp -type f -size +100M -delete
-          find . -name "*.log" -mtime +30 -exec rm {} \;
+          find . -name "*.py" -mtime -7                           # PowerShell OK
+          find /tmp -type f -size +100M -delete                   # PowerShell OK
+          find . -name "*.log" -mtime +30 -exec rm {} \;          # PowerShell OK
+          find . -exec sh -c 'echo "$1"' _ {} \;                  # bash.exe REQUIRED
+          find . -name "*.txt" -exec grep pattern {} \; | wc -l   # bash.exe REQUIRED
         """
+
+        # ================================================================
+        # ARTIGIANO: Complexity detection BEFORE parsing
+        # ================================================================
+
+        def is_complex_exec(exec_cmd):
+            """Detect if -exec is too complex for PowerShell"""
+            # sh/bash invocation
+            if 'sh -c' in exec_cmd or 'bash -c' in exec_cmd:
+                return True
+            # Pipe/redirect inside -exec command
+            if any(op in exec_cmd for op in ['|', '>', '<', '2>', '&&', '||']):
+                return True
+            # Complex quoting (nested quotes)
+            single_quotes = exec_cmd.count("'")
+            double_quotes = exec_cmd.count('"')
+            if single_quotes > 2 or double_quotes > 2:
+                return True
+            return False
+
+        # Check for complex -exec in command
+        if '-exec' in cmd:
+            # Extract -exec portion
+            exec_start = cmd.find('-exec')
+            exec_portion = cmd[exec_start:]
+            if is_complex_exec(exec_portion):
+                # Complex -exec → bash.exe REQUIRED
+                if self.git_bash_exe:
+                    self.logger.debug("find with complex -exec → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.error("Complex find -exec requires bash.exe (not available)")
+                    return 'echo "ERROR: Complex find -exec requires bash.exe"', True
+
+        # Advanced find features not supported in PowerShell emulation
+        unsupported_flags = ['-printf', '-execdir', '-ok', '-okdir', '-prune', '-quit',
+                            '-fprint', '-fprint0', '-fprintf', '-ls', '-fls']
+        for flag in unsupported_flags:
+            if flag in cmd:
+                if self.git_bash_exe:
+                    self.logger.debug(f"find with {flag} → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.warning(f"find flag {flag} not supported in emulation")
+
+        # ================================================================
+        # PowerShell emulation for SIMPLE find
+        # ================================================================
         # Parse find arguments
         path = '.'
         tests = []
