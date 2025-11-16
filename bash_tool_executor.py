@@ -5475,28 +5475,39 @@ class BashToolExecutor(ToolExecutor):
     def _process_xargs(self, command: str) -> str:
         """
         Process xargs patterns: cmd | xargs other_cmd
-        
+
+        FIX #19: Translate the command inside xargs
+
         Converts to PowerShell ForEach-Object or cmd.exe for loop.
         """
         import re
-        
+
         if 'xargs' not in command:
             return command
-        
+
         # Pattern: ... | xargs cmd
         xargs_pattern = r'(.+?)\|\s*xargs\s+(.+)'
-        
+
         match = re.match(xargs_pattern, command)
         if not match:
             return command
-        
+
         input_cmd = match.group(1).strip()
         xargs_cmd = match.group(2).strip()
-        
-        # Convert to PowerShell ForEach-Object
-        # input_cmd | ForEach-Object { xargs_cmd $_ }
-        ps_command = f"{input_cmd} | ForEach-Object {{ {xargs_cmd} $_ }}"
-        
+
+        # FIX #19: Translate the xargs command (grep → Select-String, wc → Measure-Object, etc.)
+        translated_xargs, _, _ = self.command_translator.translate(xargs_cmd, force_translate=True)
+
+        # Clean up cmd /c wrapper if present
+        if translated_xargs.startswith('cmd /c '):
+            translated_xargs = translated_xargs[7:]
+        elif translated_xargs.startswith('cmd.exe /c '):
+            translated_xargs = translated_xargs[11:]
+
+        # Replace placeholder $_ in translated command
+        # Note: xargs passes the input as argument, represented by $_
+        ps_command = f"{input_cmd} | ForEach-Object {{ {translated_xargs} $_ }}"
+
         return ps_command
     
     def _process_find_exec(self, command: str) -> str:
