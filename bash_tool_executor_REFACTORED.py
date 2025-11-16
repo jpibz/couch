@@ -743,7 +743,9 @@ class CommandExecutor:
             'watch': self._execute_watch,
             'column': self._execute_column,
             'jq': self._execute_jq,
-            
+            'head': self._execute_head,
+            'tail': self._execute_tail,
+
             # Network
             'wget': self._execute_wget,
         }
@@ -4603,6 +4605,183 @@ class CommandExecutor:
 
         # Delegate to curl implementation for full feature support
         return self._execute_curl(curl_cmd, curl_parts)
+
+    def _execute_head(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute head - output first N lines of file(s).
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content with -TotalCount (native, fast)
+        - Supports pipeline input via stdin
+        - Multiple files
+
+        Flags:
+        - -n N: number of lines (default 10)
+        - -N: short form for -n N
+        - -c N: first N bytes (not commonly used, skip for now)
+
+        Usage:
+          head file.txt           → first 10 lines
+          head -n 20 file.txt     → first 20 lines
+          head -5 file.txt        → first 5 lines
+          cat file | head -10     → from pipeline
+        """
+        line_count = 10  # Default
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-n' and i + 1 < len(parts):
+                line_count = int(parts[i + 1])
+                i += 2
+            elif parts[i].startswith('-') and parts[i][1:].isdigit():
+                # Short form: -20
+                line_count = int(parts[i][1:])
+                i += 1
+            elif parts[i] == '-c':
+                # Byte mode - skip for now, not commonly used
+                i += 2
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # PowerShell: Select-Object -First N
+            return f'Select-Object -First {line_count}', True
+
+        if len(files) == 1:
+            # Single file
+            ps_script = f'''
+                if (Test-Path "{files[0]}") {{
+                    Get-Content "{files[0]}" -TotalCount {line_count}
+                }} else {{
+                    Write-Error "head: {files[0]}: No such file or directory"
+                    exit 1
+                }}
+            '''
+        else:
+            # Multiple files - show filename headers like Unix head
+            ps_script = '''
+                $files = @({})
+                $first = $true
+                foreach ($file in $files) {{
+                    if (Test-Path $file) {{
+                        if (-not $first) {{ Write-Output "" }}
+                        Write-Output "==> $file <=="
+                        Get-Content $file -TotalCount {}
+                        $first = $false
+                    }} else {{
+                        Write-Error "head: $file: No such file or directory"
+                    }}
+                }}
+            '''.format(','.join(f'"{f}"' for f in files), line_count)
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_tail(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute tail - output last N lines of file(s).
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content with -Tail (native, fast)
+        - Supports pipeline input
+        - Follow mode (-f) with Get-Content -Wait
+
+        Flags:
+        - -n N: number of lines (default 10)
+        - -N: short form for -n N
+        - -f: follow mode (watch file for changes)
+        - -c N: last N bytes (not commonly used, skip for now)
+
+        Usage:
+          tail file.txt           → last 10 lines
+          tail -n 20 file.txt     → last 20 lines
+          tail -5 file.txt        → last 5 lines
+          tail -f log.txt         → follow file
+          cat file | tail -10     → from pipeline
+        """
+        line_count = 10  # Default
+        follow = False
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-n' and i + 1 < len(parts):
+                line_count = int(parts[i + 1])
+                i += 2
+            elif parts[i].startswith('-') and parts[i][1:].isdigit():
+                # Short form: -20
+                line_count = int(parts[i][1:])
+                i += 1
+            elif parts[i] == '-f':
+                follow = True
+                i += 1
+            elif parts[i] == '-c':
+                # Byte mode - skip for now
+                i += 2
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # PowerShell: Select-Object -Last N
+            return f'Select-Object -Last {line_count}', True
+
+        if len(files) == 1:
+            # Single file
+            file = files[0]
+            if follow:
+                # Follow mode - continuously monitor file
+                ps_script = f'''
+                    if (Test-Path "{file}") {{
+                        Get-Content "{file}" -Tail {line_count} -Wait
+                    }} else {{
+                        Write-Error "tail: {file}: No such file or directory"
+                        exit 1
+                    }}
+                '''
+            else:
+                # Normal mode - just last N lines
+                ps_script = f'''
+                    if (Test-Path "{file}") {{
+                        Get-Content "{file}" -Tail {line_count}
+                    }} else {{
+                        Write-Error "tail: {file}: No such file or directory"
+                        exit 1
+                    }}
+                '''
+        else:
+            # Multiple files - show filename headers
+            if follow:
+                # Follow mode with multiple files - complex, use bash.exe if available
+                if self.git_bash_exe:
+                    return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
+                else:
+                    return 'echo "tail -f with multiple files requires bash.exe"', True
+
+            # Normal mode with multiple files
+            ps_script = '''
+                $files = @({})
+                $first = $true
+                foreach ($file in $files) {{
+                    if (Test-Path $file) {{
+                        if (-not $first) {{ Write-Output "" }}
+                        Write-Output "==> $file <=="
+                        Get-Content $file -Tail {}
+                        $first = $false
+                    }} else {{
+                        Write-Error "tail: $file: No such file or directory"
+                    }}
+                }}
+            '''.format(','.join(f'"{f}"' for f in files), line_count)
+
+        return f'powershell -Command "{ps_script}"', True
 
     def _execute_zip(self, cmd: str, parts):
         """
