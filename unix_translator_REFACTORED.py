@@ -445,7 +445,7 @@ class CommandTranslator:
             'watch': self._translate_watch,       # 58 lines - FALLBACK
         }
     
-    def translate(self, unix_command: str):
+    def translate(self, unix_command: str, force_translate=False):
         """
         Translate Unix command → Windows with operator support.
 
@@ -454,6 +454,10 @@ class CommandTranslator:
         - Translate simple commands via _translate_single_command()
         - BYPASS complex commands (EXECUTOR_MANAGED) for CommandExecutor strategy selection
         - Handle operator-specific transformations (&> → > ... 2>&1)
+
+        Args:
+            unix_command: Command to translate
+            force_translate: If True, translate even EXECUTOR_MANAGED commands (for use in $())
 
         FLOW:
         1. Parse command into segments: [("command", "ls -la"), ("operator", "|"), ...]
@@ -503,7 +507,7 @@ class CommandTranslator:
                     translated_segments.append(seg_content)
                 else:
                     # Full command translation
-                    trans_cmd, _, method = self._translate_single_command(seg_content)
+                    trans_cmd, _, method = self._translate_single_command(seg_content, force_translate=force_translate)
                     translated_segments.append(trans_cmd)
                     if method == 'mapped':
                         overall_method = 'mapped'
@@ -629,8 +633,13 @@ class CommandTranslator:
         
         return segments
     
-    def _translate_single_command(self, unix_command: str):
-        """Translate a single command (no operators)"""
+    def _translate_single_command(self, unix_command: str, force_translate=False):
+        """Translate a single command (no operators)
+
+        Args:
+            unix_command: Command to translate
+            force_translate: If True, translate even EXECUTOR_MANAGED commands
+        """
         parts = unix_command.strip().split()
         if not parts:
             return unix_command, True, 'passthrough'
@@ -648,8 +657,9 @@ class CommandTranslator:
             'comm', 'cat', 'head', 'tail', 'wc', 'test'
         }
 
-        if base_cmd in EXECUTOR_MANAGED:
+        if base_cmd in EXECUTOR_MANAGED and not force_translate:
             # Pass through - CommandExecutor will handle strategy selection
+            # UNLESS force_translate=True (e.g., when inside $() )
             return unix_command, True, 'executor_managed'
 
         # Check translator for simple 1:1 translations

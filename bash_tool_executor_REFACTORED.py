@@ -6227,9 +6227,12 @@ EXPAND_DELIMITER'''
         
         # Find all top-level substitutions (not nested)
         substitutions = find_substitutions(command)
-        
+
         if not substitutions:
             return command
+
+        for start, end, content in substitutions:
+            print(f"  - Position {start}-{end}: '{content}'")
         
         # Process substitutions from END to START (avoid index shifting)
         substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
@@ -6336,15 +6339,17 @@ EXPAND_DELIMITER'''
         # - Redirections
         # - Command concatenation (&&, ||, ;)
         # - All individual commands
-        translated, use_shell, method = self.command_translator.translate(content)
-        
+        # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
+        # Inside $(), there's no "strategy selection" - must translate immediately
+        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
+
         # STEP 4: Clean up for PowerShell context
         # Command translator might wrap in cmd /c - remove that for $(...) context
         if translated.startswith('cmd /c '):
             translated = translated[7:]
         elif translated.startswith('cmd.exe /c '):
             translated = translated[11:]
-        
+
         # PowerShell $(...) expects bare commands, not cmd wrappers
         return translated
     
