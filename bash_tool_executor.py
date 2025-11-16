@@ -5017,10 +5017,11 @@ class BashToolExecutor(ToolExecutor):
         # STEP 3: Translate commands
         # Use command_translator which handles:
         # - Pipe chains
-        # - Redirections  
+        # - Redirections
         # - Command concatenation (&&, ||, ;)
         # - All individual commands
-        translated, use_shell, method = self.command_translator.translate(content_with_paths)
+        # FIX #3: Use force_translate=True to ensure commands inside $() are translated
+        translated, use_shell, method = self.command_translator.translate(content_with_paths, force_translate=True)
         
         # STEP 4: Clean up for PowerShell context
         # Command translator might wrap in cmd /c - remove that for $(...) context
@@ -5159,23 +5160,28 @@ class BashToolExecutor(ToolExecutor):
     def _process_subshell(self, command: str) -> str:
         """
         Process subshell execution: (command)
-        
+
         Subshell in bash creates new environment.
         In our case, just execute command normally.
+
+        IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
+        IMPORTANT: Do NOT match <(...) or >(...) - that's process substitution!
         """
         import re
-        
-        # Pattern: (command) at start of line or after operator
-        # Simple implementation: remove parentheses
-        subshell_pattern = r'\(([^)]+)\)'
-        
+
+        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command)
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        #                          (?<!<) = "not preceded by <"
+        #                          (?<!>) = "not preceded by >"
+        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)\(([^)]+)\)'
+
         def remove_subshell(match):
             # Just return inner command
             # Full subshell would need environment isolation
             return match.group(1)
-        
+
         command = re.sub(subshell_pattern, remove_subshell, command)
-        
+
         return command
     
     def _process_command_grouping(self, command: str) -> str:
@@ -5461,20 +5467,33 @@ class BashToolExecutor(ToolExecutor):
     def _needs_powershell(self, command: str) -> bool:
         """
         Detect if command needs PowerShell instead of cmd.exe.
-        
+
         PowerShell required for:
         - Command substitution: $(...)
         - Backticks: `...`
         - Process substitution: <(...)
         - Complex variable expansion
-        
+        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
+
         Returns:
             True if PowerShell required, False if cmd.exe sufficient
         """
+        # PowerShell cmdlets
+        powershell_cmdlets = [
+            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
+            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
+            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
+            '$input', '$_'  # PowerShell variables
+        ]
+
+        for cmdlet in powershell_cmdlets:
+            if cmdlet in command:
+                return True
+
         # Command substitution patterns
         if '$(' in command:
             return True
-        
+
         # Backtick command substitution
         if '`' in command:
             # Check it's not just in a string
@@ -5491,11 +5510,11 @@ class BashToolExecutor(ToolExecutor):
                         quote_char = None
                 elif char == '`' and not in_quotes:
                     return True
-        
+
         # Process substitution
         if '<(' in command or '>(' in command:
             return True
-        
+
         return False
     
     def _adapt_for_powershell(self, command: str) -> str:
