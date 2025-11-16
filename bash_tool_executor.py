@@ -4442,16 +4442,16 @@ class BashToolExecutor(ToolExecutor):
        - Credential manager: "None" ✓
        
        Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\Program Files\Git\usr\bin (automatic)
-       
+       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
+
        Verify:
          diff --version
          awk --version
-    
+
     2. JQ (JSON processor)
        Download: https://github.com/jqlang/jq/releases/latest
        Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
+       Install: Copy to C:\\Windows\\System32 (already in PATH)
        
        Verify:
          jq --version
@@ -4473,7 +4473,7 @@ class BashToolExecutor(ToolExecutor):
                  **kwargs):
         """
         Initialize BashToolExecutor
-        
+
         Args:
             working_dir: Tool working directory (from ConfigurationManager)
             enabled: Tool enabled state
@@ -4482,16 +4482,19 @@ class BashToolExecutor(ToolExecutor):
             default_timeout: Default command timeout
             python_timeout: Python script timeout
             use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
-            
+
         Raises:
             RuntimeError: If Python not found and python_executable not provided
         """
         super().__init__('bash_tool', enabled)
-        
+
         self.working_dir = Path(working_dir)
         self.default_timeout = default_timeout
         self.python_timeout = python_timeout
         self.use_git_bash = use_git_bash
+
+        # TESTMODE: Set to True to simulate execution without running commands
+        self.testmode = False
         
         # Initialize components
         self.path_translator = PathTranslator()
@@ -5683,8 +5686,20 @@ class BashToolExecutor(ToolExecutor):
             
             # Setup environment
             env = self._setup_environment()
-            
+
             # STEP 6: Execute
+            # TESTMODE: Simulate execution without running commands
+            if self.testmode:
+                # Create mock result
+                from types import SimpleNamespace
+                result = SimpleNamespace(
+                    returncode=0,
+                    stdout=f"[TEST MODE] Would execute: {translated_cmd[:200]}",
+                    stderr=""
+                )
+                self.logger.info(f"[TESTMODE] Simulated: {command[:100]}")
+                return self._format_result(result, command, translated_cmd, method)
+
             if 'powershell' in translated_cmd.lower() and '-File' in translated_cmd:
                 # Already a PowerShell script command (from control structures)
                 # Execute directly without additional wrapping

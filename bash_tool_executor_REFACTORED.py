@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, CommandTranslator
+from unix_translator_REFACTORED import PathTranslator, CommandTranslator
 
 
 class SandboxValidator:
@@ -5624,7 +5624,7 @@ class BashToolExecutor(ToolExecutor):
         # ====================================================================
         # When True: Uses CommandExecutorTest with faked subprocess calls
         # Allows testing command translation without executing anything
-        TESTMODE = False  # <-- SET TO TRUE FOR TESTING
+        TESTMODE = True  # <-- SET TO TRUE FOR TESTING
         # ====================================================================
 
         self.TESTMODE = TESTMODE
@@ -6154,33 +6154,34 @@ EXPAND_DELIMITER'''
             return unix_temp
         
         # Replace all input substitutions
+        matches = list(re.finditer(input_pattern, command))
         command = re.sub(input_pattern, replace_input_substitution, command)
-        
+
         # Replace all output substitutions
         command = re.sub(output_pattern, replace_output_substitution, command)
-        
+
         return command, temp_files
     
     def _process_command_substitution_recursive(self, command: str) -> str:
         """
         Process command substitution $(...) with RECURSIVE translation.
-        
+
         ARTISAN IMPLEMENTATION:
         - Parses nested $(...)
         - Recursively translates Unix commands inside substitution
         - Preserves PowerShell $(...) syntax for output
         - Handles multiple substitutions in single command
-        
+
         Examples:
             $(grep pattern file.txt)
             → $(Select-String -Pattern "pattern" -Path "file.txt")
-            
+
             $(cat file | wc -l)
             → $(Get-Content file | Measure-Object -Line)
-            
+
             Nested: $(echo $(cat file))
             → $(Write-Host $(Get-Content file))
-        
+
         Returns:
             Command with all $(..  .) recursively translated
         """
@@ -6227,9 +6228,12 @@ EXPAND_DELIMITER'''
         
         # Find all top-level substitutions (not nested)
         substitutions = find_substitutions(command)
-        
+
         if not substitutions:
             return command
+
+        for start, end, content in substitutions:
+            print(f"  - Position {start}-{end}: '{content}'")
         
         # Process substitutions from END to START (avoid index shifting)
         substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
@@ -6239,7 +6243,7 @@ EXPAND_DELIMITER'''
             try:
                 # RECURSIVE: content might have nested $(...)
                 translated_content = self._translate_substitution_content(content)
-                
+
                 # Replace in command (preserve $(...) wrapper for PowerShell)
                 replacement = f"$({translated_content})"
                 command = command[:start] + replacement + command[end:]
@@ -6336,15 +6340,17 @@ EXPAND_DELIMITER'''
         # - Redirections
         # - Command concatenation (&&, ||, ;)
         # - All individual commands
-        translated, use_shell, method = self.command_translator.translate(content)
-        
+        # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
+        # Inside $(), there's no "strategy selection" - must translate immediately
+        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
+
         # STEP 4: Clean up for PowerShell context
         # Command translator might wrap in cmd /c - remove that for $(...) context
         if translated.startswith('cmd /c '):
             translated = translated[7:]
         elif translated.startswith('cmd.exe /c '):
             translated = translated[11:]
-        
+
         # PowerShell $(...) expects bare commands, not cmd wrappers
         return translated
     
@@ -6512,23 +6518,27 @@ EXPAND_DELIMITER'''
     def _process_subshell(self, command: str) -> str:
         """
         Process subshell execution: (command)
-        
+
         Subshell in bash creates new environment.
         In our case, just execute command normally.
+
+        IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
         """
         import re
-        
-        # Pattern: (command) at start of line or after operator
-        # Simple implementation: remove parentheses
-        subshell_pattern = r'\(([^)]+)\)'
-        
+
+        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command)
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        #                          (?<!<) = "not preceded by <"
+        #                          (?<!>) = "not preceded by >"
+        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)\(([^)]+)\)'
+
         def remove_subshell(match):
             # Just return inner command
             # Full subshell would need environment isolation
             return match.group(1)
-        
+
         command = re.sub(subshell_pattern, remove_subshell, command)
-        
+
         return command
     
     def _process_command_grouping(self, command: str) -> str:
@@ -6938,7 +6948,8 @@ EXPAND_DELIMITER'''
         """Execute bash command with FULL pattern emulation"""
         command = tool_input.get('command', '')
         description = tool_input.get('description', '')
-        
+
+
         if not command:
             return "Error: command parameter is required"
         
@@ -6952,7 +6963,8 @@ EXPAND_DELIMITER'''
         
         try:
             # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
-            
+
+
             # STEP 0.0: Expand aliases (ll, la, etc.)
             command = self._expand_aliases(command)
             
@@ -6984,10 +6996,10 @@ EXPAND_DELIMITER'''
             
             # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
             command = self._expand_variables(command)
-            
+
             # STEP 0.8: xargs patterns
             command = self._process_xargs(command)
-            
+
             # STEP 0.9: find ... -exec patterns
             command = self._process_find_exec(command)
             
