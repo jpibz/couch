@@ -4973,7 +4973,7 @@ class BashToolExecutor(ToolExecutor):
         
         return command, temp_files
     
-    def _process_command_substitution_recursive(self, command: str) -> str:
+    def _process_command_substitution_recursive(self, command: str) -> Tuple[str, Dict[str, str]]:
         """
         Process command substitution $(...) with RECURSIVE translation.
 
@@ -4983,6 +4983,7 @@ class BashToolExecutor(ToolExecutor):
         - Preserves PowerShell $(...) syntax for output
         - Handles multiple substitutions in single command
         - FIX #10: Does NOT process $(...)  inside single quotes
+        - FIX #21: Returns placeholders to prevent double-translation
 
         Examples:
             $(grep pattern file.txt)
@@ -4997,10 +4998,10 @@ class BashToolExecutor(ToolExecutor):
             'literal $(date)' → 'literal $(date)' (preserved)
 
         Returns:
-            Command with all $(..  .) recursively translated
+            Tuple[str, Dict]: (command_with_placeholders, {placeholder: translated_content})
         """
         if '$(' not in command:
-            return command
+            return command, {}
 
         def is_in_single_quotes(text: str, pos: int) -> bool:
             """Check if position is inside single quotes"""
@@ -5062,29 +5063,38 @@ class BashToolExecutor(ToolExecutor):
         
         # Find all top-level substitutions (not nested)
         substitutions = find_substitutions(command)
-        
+
         if not substitutions:
-            return command
-        
+            return command, {}
+
+        # FIX #21: Use placeholders to prevent double-translation
         # Process substitutions from END to START (avoid index shifting)
         substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
-        
+        placeholder_map = {}
+        placeholder_counter = [0]  # Use list to allow modification in nested function
+
         for start, end, content in substitutions_reversed:
             # Translate the content
             try:
                 # RECURSIVE: content might have nested $(...)
                 translated_content = self._translate_substitution_content(content)
-                
-                # Replace in command (preserve $(...) wrapper for PowerShell)
-                replacement = f"$({translated_content})"
-                command = command[:start] + replacement + command[end:]
-                
+
+                # Create placeholder for translated content
+                placeholder = f"__CMD_SUBST_{placeholder_counter[0]}__"
+                placeholder_counter[0] += 1
+
+                # Store the translated content with $(...) wrapper
+                placeholder_map[placeholder] = f"$({translated_content})"
+
+                # Replace with placeholder in command
+                command = command[:start] + placeholder + command[end:]
+
             except Exception as e:
                 self.logger.error(f"Command substitution translation failed: {e}")
                 # Keep original on error
                 continue
-        
-        return command
+
+        return command, placeholder_map
     
     def _translate_substitution_content(self, content: str) -> str:
         """
@@ -6010,7 +6020,8 @@ class BashToolExecutor(ToolExecutor):
             command = self._process_find_exec(command)
             
             # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
-            command = self._process_command_substitution_recursive(command)
+            # FIX #21: Returns placeholders to prevent double-translation
+            command, cmd_subst_map = self._process_command_substitution_recursive(command)
             
             # STEP 1: Detect if PowerShell needed (if not already set by control structures)
             if 'use_powershell' not in locals():
@@ -6021,20 +6032,31 @@ class BashToolExecutor(ToolExecutor):
             
             # STEP 2: Translate Unix paths → Windows paths
             command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
-            
+
             # STEP 3: Translate Unix commands → Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(
                 command_with_win_paths
             )
-            
+
+            # FIX #21: Restore command substitution placeholders
+            # This prevents double-translation of already-translated $(...) content
+            for placeholder, subst_content in cmd_subst_map.items():
+                translated_cmd = translated_cmd.replace(placeholder, subst_content)
+
             # STEP 3.5: Execute bash - Strategy selection (NUOVO!)
             # CommandExecutor decide: bash.exe? native binary? PowerShell emulation?
             # Parse command into parts for executor
-            parts = translated_cmd.split() if translated_cmd else []
+            # FIX #21: Use shlex.split() to properly handle quotes in translated PowerShell commands
+            import shlex
+            try:
+                parts = shlex.split(translated_cmd) if translated_cmd else []
+            except ValueError:
+                # Fallback to simple split if parsing fails
+                parts = translated_cmd.split() if translated_cmd else []
             executable_cmd, executor_needs_ps = self.command_executor.execute_bash(
                 translated_cmd, parts
             )
-            
+
             # Update command and PowerShell flag based on executor decision
             translated_cmd = executable_cmd
             if executor_needs_ps:

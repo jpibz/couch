@@ -4,6 +4,7 @@ import json
 import re
 import logging
 import threading
+import shlex  # FIX #20: Quote-aware command parsing
 # import tiktoken  # Not needed for testing
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -654,7 +655,14 @@ class CommandTranslator:
             unix_command: Command to translate
             force_translate: If True, translate even EXECUTOR_MANAGED commands
         """
-        parts = unix_command.strip().split()
+        # FIX #20: Use shlex.split() for quote-aware parsing
+        # This keeps quoted strings together: "def execute" stays as one argument
+        try:
+            parts = shlex.split(unix_command.strip())
+        except ValueError:
+            # Fallback to simple split if quotes are malformed
+            parts = unix_command.strip().split()
+
         if not parts:
             return unix_command, True, 'passthrough'
 
@@ -1328,27 +1336,56 @@ class CommandTranslator:
     
     def _translate_find(self, cmd: str, parts):
         """
-        Translate find - BASIC SYNTAX MAPPING ONLY.
-        
+        Translate find with basic -name and -type support.
+
+        FIX #21 (enhanced): Handle common patterns for command substitution context.
+
         EMULATION moved to BashToolExecutor._execute_find().
-        This method only provides basic Windows equivalent.
-        
-        Simple translation:
-        find . → Get-ChildItem . -Recurse
-        
+        This method provides translation for force_translate=True context (inside $(...)).
+
+        Handles:
+        - find . -name "*.py" → Get-ChildItem . -Recurse -Filter "*.py"
+        - find . -type f → Get-ChildItem . -Recurse -File
+        - find . -type d → Get-ChildItem . -Recurse -Directory
+
         Complex emulation (tests, actions) handled by executor.
         """
         if len(parts) < 2:
             # Basic recursive listing
             return 'Get-ChildItem -Recurse', False
-        
+
         # Extract path if provided
         path = '.'
         if len(parts) > 1 and not parts[1].startswith('-'):
             path = parts[1]
-        
-        # Basic mapping - emulation happens in executor
-        return f'Get-ChildItem -Path "{path}" -Recurse', False
+
+        # Check for -name pattern
+        name_pattern = None
+        file_type = None
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-name' and i + 1 < len(parts):
+                name_pattern = parts[i + 1]
+                i += 2
+            elif parts[i] == '-type' and i + 1 < len(parts):
+                file_type = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        # Build Get-ChildItem command
+        cmd_parts = [f'Get-ChildItem -Path "{path}" -Recurse']
+
+        if name_pattern:
+            cmd_parts.append(f'-Filter "{name_pattern}"')
+
+        if file_type == 'f':
+            cmd_parts.append('-File')
+        elif file_type == 'd':
+            cmd_parts.append('-Directory')
+
+        return ' '.join(cmd_parts), False
     
     def _translate_which(self, cmd: str, parts):
         if len(parts) < 2:
