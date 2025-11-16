@@ -747,6 +747,7 @@ class CommandExecutor:
             'tail': self._execute_tail,
             'cat': self._execute_cat,
             'wc': self._execute_wc,
+            'test': self._execute_test,
 
             # Network
             'wget': self._execute_wget,
@@ -5320,6 +5321,155 @@ class CommandExecutor:
                 ps_script += '\n$output += "total"\nWrite-Output ($output -join "  ")'
 
         return f'powershell -Command "{ps_script}"', True
+
+    def _execute_test(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute test - evaluate conditional expressions.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Test-Path for file/dir checks
+        - PowerShell operators for comparisons
+        - Exit code 0 (success) or 1 (failure)
+
+        Common tests:
+        - -f file: file exists and is regular file
+        - -d dir: directory exists
+        - -e path: path exists (any type)
+        - -z string: string is empty
+        - -n string: string is not empty
+        - -eq, -ne, -lt, -le, -gt, -ge: numeric comparisons
+        - =, !=: string comparisons
+
+        Usage:
+          test -f file.txt          → check if file exists
+          test -d mydir             → check if directory exists
+          test "a" = "b"            → string comparison
+          [ -f file.txt ]           → same (converted by preprocessor)
+        """
+        if len(parts) < 2:
+            # Empty test is false
+            return 'exit 1', False
+
+        # File/directory tests
+        if parts[1] == '-f' and len(parts) >= 3:
+            file_path = parts[2]
+            ps_cmd = f'''
+                if ((Test-Path "{file_path}") -and -not (Test-Path "{file_path}" -PathType Container)) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-d' and len(parts) >= 3:
+            dir_path = parts[2]
+            ps_cmd = f'''
+                if (Test-Path "{dir_path}" -PathType Container) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-e' and len(parts) >= 3:
+            path = parts[2]
+            ps_cmd = f'''
+                if (Test-Path "{path}") {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # String tests
+        if parts[1] == '-z' and len(parts) >= 3:
+            # String is empty
+            string = parts[2]
+            ps_cmd = f'''
+                if ([string]::IsNullOrEmpty("{string}")) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-n' and len(parts) >= 3:
+            # String is NOT empty
+            string = parts[2]
+            ps_cmd = f'''
+                if (-not [string]::IsNullOrEmpty("{string}")) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # Numeric comparisons (3 args: val1 op val2)
+        if len(parts) >= 4:
+            val1 = parts[1]
+            op = parts[2]
+            val2 = parts[3]
+
+            # Map bash operators to PowerShell
+            if op == '-eq':
+                ps_op = '-eq'
+            elif op == '-ne':
+                ps_op = '-ne'
+            elif op == '-lt':
+                ps_op = '-lt'
+            elif op == '-le':
+                ps_op = '-le'
+            elif op == '-gt':
+                ps_op = '-gt'
+            elif op == '-ge':
+                ps_op = '-ge'
+            elif op == '=':
+                # String equality
+                ps_cmd = f'''
+                    if ("{val1}" -eq "{val2}") {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            elif op == '!=':
+                # String inequality
+                ps_cmd = f'''
+                    if ("{val1}" -ne "{val2}") {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            else:
+                # Unknown operator - fail
+                return 'exit 1', False
+
+            # Numeric comparison
+            ps_cmd = f'''
+                try {{
+                    $v1 = [int]"{val1}"
+                    $v2 = [int]"{val2}"
+                    if ($v1 {ps_op} $v2) {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                }} catch {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # Unknown test format - fail
+        return 'exit 1', False
 
     def _execute_zip(self, cmd: str, parts):
         """
