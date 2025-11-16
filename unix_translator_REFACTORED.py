@@ -1339,13 +1339,21 @@ class CommandTranslator:
                 i += 1
         
         if not files:
-            return 'echo Error: head requires filename', True
-        
+            # No file arguments: assume stdin (pipeline context)
+            # Use PowerShell: $input | Select-Object -First N
+            if bytes_count:
+                # Bytes mode with stdin
+                ps_cmd = f'$input | Select-Object -First {bytes_count}'
+            else:
+                # Lines mode with stdin
+                ps_cmd = f'$input | Select-Object -First {lines}'
+            return f'powershell -Command "{ps_cmd}"', True
+
         # Verbose: print filename header
         header_cmd = ''
         if verbose and len(files) >= 1:
             header_cmd = f'echo ==> {files[0]} <== && '
-        
+
         if bytes_count:
             # Read first N bytes
             ps_cmd = f'Get-Content {files[0]} -Encoding Byte -TotalCount {bytes_count}'
@@ -1353,11 +1361,11 @@ class CommandTranslator:
         else:
             # Read first N lines
             ps_cmd = f'Get-Content {files[0]} -Head {lines}'
-            
+
             # Quiet: suppress filename when multiple files
             if not quiet and len(files) > 1:
                 return f'{header_cmd}powershell -Command "{ps_cmd}"', True
-            
+
             return f'powershell -Command "{ps_cmd}"', True
     
     def _translate_tail(self, cmd: str, parts):
@@ -1394,13 +1402,24 @@ class CommandTranslator:
                 i += 1
         
         if not files:
-            return 'echo Error: tail requires filename', True
-        
+            # No file arguments: assume stdin (pipeline context)
+            # Use PowerShell: $input | Select-Object -Last N
+            if bytes_count:
+                # Bytes mode with stdin
+                ps_cmd = f'$input | Select-Object -Last {bytes_count}'
+            elif follow:
+                # Follow mode not supported with stdin
+                return 'echo Error: tail -f requires filename', True
+            else:
+                # Lines mode with stdin
+                ps_cmd = f'$input | Select-Object -Last {lines}'
+            return f'powershell -Command "{ps_cmd}"', True
+
         # Verbose: print filename header
         header_cmd = ''
         if verbose and len(files) >= 1:
             header_cmd = f'echo ==> {files[0]} <== && '
-        
+
         if bytes_count:
             ps_cmd = f'Get-Content {files[0]} -Encoding Byte -Tail {bytes_count}'
             return f'{header_cmd}powershell -Command "{ps_cmd}"', True
@@ -1428,12 +1447,25 @@ class CommandTranslator:
         max_line_length = '-L' in parts
         
         files = [p for p in parts[1:] if not p.startswith('-')]
-        
+
         if not files:
-            return 'echo Error: wc requires filename', True
-        
+            # No file arguments: assume stdin (pipeline context)
+            # Use PowerShell: $input | Measure-Object
+            if lines_only:
+                ps_cmd = '($input | Measure-Object -Line).Lines'
+            elif words_only:
+                ps_cmd = '($input | Measure-Object -Word).Words'
+            elif bytes_only or chars_only:
+                ps_cmd = '($input | Measure-Object -Character).Characters'
+            elif max_line_length:
+                ps_cmd = '($input | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum'
+            else:
+                # Full wc output
+                ps_cmd = '$input | Measure-Object -Line -Word -Character'
+            return f'powershell -Command "{ps_cmd}"', True
+
         win_path = files[0]  # Already translated
-        
+
         if lines_only:
             # Count lines using find
             return f'find /c /v "" "{win_path}"', True
