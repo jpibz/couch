@@ -440,9 +440,39 @@ class CommandTranslator:
     
     def translate(self, unix_command: str):
         """
-        Translate Unix command → Windows with operator support
-        
-        Supports: pipes (|), redirects (>, >>, <, 2>), concatenation (&&, ||, ;)
+        Translate Unix command → Windows with operator support.
+
+        RESPONSIBILITY:
+        - Parse operators (|, &&, >, etc.) into segments
+        - Translate simple commands via _translate_single_command()
+        - BYPASS complex commands (EXECUTOR_MANAGED) for CommandExecutor strategy selection
+        - Handle operator-specific transformations (&> → > ... 2>&1)
+
+        FLOW:
+        1. Parse command into segments: [("command", "ls -la"), ("operator", "|"), ...]
+        2. For each command segment:
+           - If EXECUTOR_MANAGED → pass through RAW (bypass)
+           - Else → translate via command_map[cmd]()
+        3. Recombine segments with operators
+
+        OPERATORS SUPPORTED:
+        - Pipes: |
+        - Redirects: >, >>, <, <<, 2>, 2>&1, 1>&2, &>
+        - Concatenation: &&, ||, ;
+
+        SPECIAL CASES:
+        - &> (bash redirect both) → converted to > file 2>&1
+        - Redirect targets (filenames) → not translated, paths already handled
+
+        Args:
+            unix_command: Full Unix command with possible operators
+
+        Returns:
+            Tuple[str, bool, str]: (translated_command, use_shell, method)
+            - translated_command: Command ready for execution
+            - use_shell: Always True (legacy, not used)
+            - method: 'mapped' if translated, 'passthrough' if unchanged,
+                     'executor_managed' if bypassed to executor
         """
         
         # Parse command structure (handle operators)
@@ -505,10 +535,41 @@ class CommandTranslator:
         return translated, True, overall_method
     
     def _parse_command_structure(self, command: str):
-        """Parse command into segments: command/operator
-        
-        Supports: pipes (|), redirects (>, >>, <, <<, 2>, 2>&1, 1>&2, &>), 
-                  concatenation (&&, ||, ;)
+        """
+        Parse command into segments: command/operator.
+
+        This is the OPERATOR PARSER - splits command on operators while preserving
+        operator order and structure.
+
+        ALGORITHM:
+        1. Scan command string character by character
+        2. Match longest operator at each position (2>&1 before 2>)
+        3. Split on operators, preserving both commands and operators as segments
+        4. Skip whitespace after operators
+
+        OPERATOR PRECEDENCE (longest match first):
+        - 2>&1, 1>&2 (must match before 2>, >)
+        - <<, >> (must match before <, >)
+        - &> (bash stderr+stdout redirect)
+        - &&, || (logical operators)
+        - 2> (stderr redirect)
+        - |, >, <, ; (single char operators)
+
+        Args:
+            command: Full command string possibly containing operators
+
+        Returns:
+            List[Tuple[str, str]]: Segments as [("command"|"operator", content), ...]
+
+        Example:
+            Input: "find . -name '*.py' | grep test > out.txt"
+            Output: [
+                ("command", "find . -name '*.py'"),
+                ("operator", "|"),
+                ("command", "grep test"),
+                ("operator", ">"),
+                ("command", "out.txt")
+            ]
         """
         # Operator list - ORDERED for longest-match parsing
         operators = [
