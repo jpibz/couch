@@ -545,11 +545,15 @@ class CommandTranslator:
         This is the OPERATOR PARSER - splits command on operators while preserving
         operator order and structure.
 
+        FIX #13: Respect quoted strings - don't split on operators inside quotes
+
         ALGORITHM:
         1. Scan command string character by character
-        2. Match longest operator at each position (2>&1 before 2>)
-        3. Split on operators, preserving both commands and operators as segments
-        4. Skip whitespace after operators
+        2. Track quote state (inside ' or " or not)
+        3. Match longest operator at each position (2>&1 before 2>)
+        4. ONLY split on operators if NOT inside quotes
+        5. Split on operators, preserving both commands and operators as segments
+        6. Skip whitespace after operators
 
         OPERATOR PRECEDENCE (longest match first):
         - 2>&1, 1>&2 (must match before 2>, >)
@@ -566,19 +570,16 @@ class CommandTranslator:
             List[Tuple[str, str]]: Segments as [("command"|"operator", content), ...]
 
         Example:
-            Input: "find . -name '*.py' | grep test > out.txt"
+            Input: "grep -E 'class|def' file.py"
             Output: [
-                ("command", "find . -name '*.py'"),
-                ("operator", "|"),
-                ("command", "grep test"),
-                ("operator", ">"),
-                ("command", "out.txt")
+                ("command", "grep -E 'class|def' file.py")
             ]
+            Note: | inside quotes is NOT treated as pipe operator
         """
         # Operator list - ORDERED for longest-match parsing
         operators = [
             '2>&1',  # stderr to stdout redirect (must be before 2>)
-            '1>&2',  # stdout to stderr redirect  
+            '1>&2',  # stdout to stderr redirect
             '<<',    # heredoc input
             '>>',    # append redirect
             '&>',    # redirect both stdout+stderr (bash)
@@ -590,40 +591,60 @@ class CommandTranslator:
             '<',     # stdin redirect
             ';'      # command separator
         ]
-        
+
         segments = []
         current_cmd = []
         i = 0
-        
+        in_single_quote = False
+        in_double_quote = False
+
         while i < len(command):
-            # Check for operator match
-            found_op = None
-            for op in operators:
-                if command[i:i+len(op)] == op:
-                    found_op = op
-                    break
-            
-            if found_op:
-                # Save accumulated command
-                if current_cmd:
-                    segments.append(('command', ''.join(current_cmd).strip()))
-                    current_cmd = []
-                
-                # Save operator
-                segments.append(('operator', found_op))
-                i += len(found_op)
-                
-                # Skip whitespace after operator
-                while i < len(command) and command[i] in ' \t':
-                    i += 1
-            else:
-                current_cmd.append(command[i])
+            char = command[i]
+
+            # FIX #13: Track quote state
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current_cmd.append(char)
                 i += 1
-        
+                continue
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current_cmd.append(char)
+                i += 1
+                continue
+
+            # FIX #13: Only check operators if NOT inside quotes
+            if not in_single_quote and not in_double_quote:
+                # Check for operator match
+                found_op = None
+                for op in operators:
+                    if command[i:i+len(op)] == op:
+                        found_op = op
+                        break
+
+                if found_op:
+                    # Save accumulated command
+                    if current_cmd:
+                        segments.append(('command', ''.join(current_cmd).strip()))
+                        current_cmd = []
+
+                    # Save operator
+                    segments.append(('operator', found_op))
+                    i += len(found_op)
+
+                    # Skip whitespace after operator
+                    while i < len(command) and command[i] in ' \t':
+                        i += 1
+                    continue
+
+            # Not an operator (or inside quotes) - add to current command
+            current_cmd.append(command[i])
+            i += 1
+
         # Save final command segment
         if current_cmd:
             segments.append(('command', ''.join(current_cmd).strip()))
-        
+
         return segments
     
     def _translate_single_command(self, unix_command: str, force_translate=False):

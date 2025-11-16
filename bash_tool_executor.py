@@ -4827,20 +4827,42 @@ class BashToolExecutor(ToolExecutor):
         env = self._setup_environment()
         
         def replace_input_substitution(match):
-            """Replace <(cmd) with temp file containing cmd output"""
+            """Replace <(cmd) with temp file containing cmd output
+
+            FIX #12: Handle testmode and proper shell selection
+            """
             cmd = match.group(1)
-            
+
+            # Create temp file path
+            temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
+            temp_files.append(temp_file)
+
+            # FIX #12: If in testmode, don't execute, just create placeholder
+            if self.testmode:
+                # Create empty temp file for testing
+                temp_file.write_text(f"[TESTMODE] Process substitution: <({cmd})")
+                unix_temp = f"/tmp/{temp_file.name}"
+                return unix_temp
+
             # Translate and execute command
             try:
                 # Translate paths in sub-command
                 cmd_with_paths = self.path_translator.translate_paths_in_string(cmd, 'to_windows')
-                
+
                 # Translate command
                 translated, _, _ = self.command_translator.translate(cmd_with_paths)
-                
+
+                # FIX #12: Detect if PowerShell command or cmd command
+                if 'Get-ChildItem' in translated or 'Select-String' in translated or 'Measure-Object' in translated:
+                    # PowerShell command
+                    shell_cmd = ['powershell', '-Command', translated]
+                else:
+                    # CMD command
+                    shell_cmd = ['cmd', '/c', translated]
+
                 # Execute
                 result = subprocess.run(
-                    ['cmd', '/c', translated],
+                    shell_cmd,
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -4848,19 +4870,15 @@ class BashToolExecutor(ToolExecutor):
                     env=env,
                     errors='replace'
                 )
-                
-                # Create temp file with output
-                temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
-                
+
+                # Write output to temp file
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(result.stdout)
-                
-                temp_files.append(temp_file)
-                
+
                 # Return Unix path for substitution
                 unix_temp = f"/tmp/{temp_file.name}"
                 return unix_temp
-            
+
             except Exception as e:
                 self.logger.error(f"Process substitution failed for <({cmd}): {e}")
                 # Return original if failed
@@ -5430,28 +5448,43 @@ class BashToolExecutor(ToolExecutor):
     def _process_find_exec(self, command: str) -> str:
         """
         Process find ... -exec patterns
-        
+
+        FIX #11: Translate the command inside -exec (grep → Select-String, etc.)
+
         Converts to PowerShell Get-ChildItem with ForEach-Object.
         """
         import re
-        
+
         if 'find' not in command or '-exec' not in command:
             return command
-        
+
         # Pattern: find path -exec cmd {} \;
         exec_pattern = r'find\s+([^\s]+)\s+.*?-exec\s+(.+?)\s*\{\}\s*\\;'
-        
+
         match = re.search(exec_pattern, command)
         if not match:
             return command
-        
+
         path = match.group(1)
         exec_cmd = match.group(2).strip()
-        
+
+        # FIX #11: TRANSLATE the exec_cmd (grep → Select-String, wc → Measure-Object, etc.)
+        # Use command_translator to translate the command
+        translated_exec, _, _ = self.command_translator.translate(exec_cmd, force_translate=True)
+
+        # Clean up cmd /c wrapper if present (not needed inside PowerShell)
+        if translated_exec.startswith('cmd /c '):
+            translated_exec = translated_exec[7:]
+        elif translated_exec.startswith('cmd.exe /c '):
+            translated_exec = translated_exec[11:]
+
         # Convert to PowerShell
-        # Get-ChildItem path -Recurse | ForEach-Object { exec_cmd $_.FullName }
-        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {exec_cmd} $_.FullName }}"
-        
+        # Get-ChildItem path -Recurse | ForEach-Object { translated_exec $_.FullName }
+        # Replace {} placeholder in translated command with $_.FullName
+        ps_exec_cmd = translated_exec.replace('{}', '$_.FullName')
+
+        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {ps_exec_cmd} }}"
+
         return ps_command
     
     def _process_escape_sequences(self, command: str) -> str:
