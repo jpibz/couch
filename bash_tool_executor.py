@@ -5479,7 +5479,7 @@ class BashToolExecutor(ToolExecutor):
             
             # STEP 3: Translate Unix commands → Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(
-                command_with_win_paths, 'bash_tool'
+                command_with_win_paths
             )
             
             # STEP 3.5: Execute bash - Strategy selection (NUOVO!)

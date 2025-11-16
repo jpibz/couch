@@ -551,10 +551,25 @@ class CommandTranslator:
         parts = unix_command.strip().split()
         if not parts:
             return unix_command, True, 'passthrough'
-        
+
         base_cmd = parts[0]
-        
-        # Check translator
+
+        # Commands managed by CommandExecutor - pass through RAW
+        # These commands have complex emulations in CommandExecutor._execute_*
+        # and need to reach execute_bash() BEFORE translation for strategy selection
+        EXECUTOR_MANAGED = {
+            'find', 'curl', 'sed', 'diff', 'sort', 'uniq', 'awk', 'split',
+            'grep', 'join', 'ln', 'sha256sum', 'sha1sum', 'md5sum',
+            'gzip', 'gunzip', 'tar', 'zip', 'unzip', 'hexdump', 'strings',
+            'base64', 'timeout', 'watch', 'column', 'jq', 'wget', 'paste',
+            'comm'
+        }
+
+        if base_cmd in EXECUTOR_MANAGED:
+            # Pass through - CommandExecutor will handle strategy selection
+            return unix_command, True, 'executor_managed'
+
+        # Check translator for simple 1:1 translations
         if base_cmd in self.command_map:
             translator = self.command_map[base_cmd]
             try:
@@ -562,13 +577,13 @@ class CommandTranslator:
                 return translated, use_shell, 'mapped'
             except Exception:
                 pass
-        
+
         # Python3 → Python (Windows doesn't have python3)
         if base_cmd == 'python3':
             # Replace ALL occurrences, not just first
             translated = unix_command.replace('python3', 'python')
-            return translated, True, 'mapped' 
-        
+            return translated, True, 'mapped'
+
         return unix_command, True, 'passthrough'
     
     # Translator functions for all 35+ commands
