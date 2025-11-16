@@ -13,7 +13,10 @@ from bash_tool_executor import BashToolExecutor
 
 # Setup test environment
 WORKSPACE = Path("/home/user/couch")
-executor = BashToolExecutor(working_dir=str(WORKSPACE), testmode=True)
+executor = BashToolExecutor(working_dir=str(WORKSPACE))
+
+# ENABLE TESTMODE: Simulate execution without running commands
+executor.testmode = True
 
 def test_command(description, command, category=""):
     """Test a single bash command"""

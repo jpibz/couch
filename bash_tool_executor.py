@@ -4470,7 +4470,6 @@ class BashToolExecutor(ToolExecutor):
                  default_timeout: int = 30,
                  python_timeout: int = 60,
                  use_git_bash: bool = False,
-                 testmode: bool = False,
                  **kwargs):
         """
         Initialize BashToolExecutor
@@ -4483,7 +4482,6 @@ class BashToolExecutor(ToolExecutor):
             default_timeout: Default command timeout
             python_timeout: Python script timeout
             use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
-            testmode: If True, simulate execution without running commands
 
         Raises:
             RuntimeError: If Python not found and python_executable not provided
@@ -4494,7 +4492,9 @@ class BashToolExecutor(ToolExecutor):
         self.default_timeout = default_timeout
         self.python_timeout = python_timeout
         self.use_git_bash = use_git_bash
-        self.testmode = testmode
+
+        # TESTMODE: Set to True to simulate execution without running commands
+        self.testmode = False
         
         # Initialize components
         self.path_translator = PathTranslator()
