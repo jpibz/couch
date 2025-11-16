@@ -5624,7 +5624,7 @@ class BashToolExecutor(ToolExecutor):
         # ====================================================================
         # When True: Uses CommandExecutorTest with faked subprocess calls
         # Allows testing command translation without executing anything
-        TESTMODE = False  # <-- SET TO TRUE FOR TESTING
+        TESTMODE = True  # <-- SET TO TRUE FOR TESTING
         # ====================================================================
 
         self.TESTMODE = TESTMODE

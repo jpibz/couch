@@ -9,14 +9,13 @@ The kind of commands that if they fail, the entire task collapses.
 
 import sys
 from pathlib import Path
-from bash_tool_executor import BashToolExecutor
+from bash_tool_executor_REFACTORED import BashToolExecutor
 
 # Setup test environment
 WORKSPACE = Path("/home/user/couch")
 executor = BashToolExecutor(working_dir=str(WORKSPACE))
 
-# ENABLE TESTMODE: Simulate execution without running commands
-executor.testmode = True
+# TESTMODE is already set to True in bash_tool_executor_REFACTORED.py
 
 def test_command(description, command, category=""):
     """Test a single bash command"""
