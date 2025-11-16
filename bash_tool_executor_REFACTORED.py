@@ -6164,23 +6164,23 @@ EXPAND_DELIMITER'''
     def _process_command_substitution_recursive(self, command: str) -> str:
         """
         Process command substitution $(...) with RECURSIVE translation.
-        
+
         ARTISAN IMPLEMENTATION:
         - Parses nested $(...)
         - Recursively translates Unix commands inside substitution
         - Preserves PowerShell $(...) syntax for output
         - Handles multiple substitutions in single command
-        
+
         Examples:
             $(grep pattern file.txt)
             → $(Select-String -Pattern "pattern" -Path "file.txt")
-            
+
             $(cat file | wc -l)
             → $(Get-Content file | Measure-Object -Line)
-            
+
             Nested: $(echo $(cat file))
             → $(Write-Host $(Get-Content file))
-        
+
         Returns:
             Command with all $(..  .) recursively translated
         """
@@ -6239,7 +6239,7 @@ EXPAND_DELIMITER'''
             try:
                 # RECURSIVE: content might have nested $(...)
                 translated_content = self._translate_substitution_content(content)
-                
+
                 # Replace in command (preserve $(...) wrapper for PowerShell)
                 replacement = f"$({translated_content})"
                 command = command[:start] + replacement + command[end:]
@@ -6512,23 +6512,25 @@ EXPAND_DELIMITER'''
     def _process_subshell(self, command: str) -> str:
         """
         Process subshell execution: (command)
-        
+
         Subshell in bash creates new environment.
         In our case, just execute command normally.
+
+        IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
         """
         import re
-        
-        # Pattern: (command) at start of line or after operator
-        # Simple implementation: remove parentheses
-        subshell_pattern = r'\(([^)]+)\)'
-        
+
+        # Pattern: (command) but NOT $(command)
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        subshell_pattern = r'(?<!\$)\(([^)]+)\)'
+
         def remove_subshell(match):
             # Just return inner command
             # Full subshell would need environment isolation
             return match.group(1)
-        
+
         command = re.sub(subshell_pattern, remove_subshell, command)
-        
+
         return command
     
     def _process_command_grouping(self, command: str) -> str:
@@ -6938,7 +6940,8 @@ EXPAND_DELIMITER'''
         """Execute bash command with FULL pattern emulation"""
         command = tool_input.get('command', '')
         description = tool_input.get('description', '')
-        
+
+
         if not command:
             return "Error: command parameter is required"
         
@@ -6952,7 +6955,8 @@ EXPAND_DELIMITER'''
         
         try:
             # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
-            
+
+
             # STEP 0.0: Expand aliases (ll, la, etc.)
             command = self._expand_aliases(command)
             
@@ -6984,10 +6988,10 @@ EXPAND_DELIMITER'''
             
             # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
             command = self._expand_variables(command)
-            
+
             # STEP 0.8: xargs patterns
             command = self._process_xargs(command)
-            
+
             # STEP 0.9: find ... -exec patterns
             command = self._process_find_exec(command)
             
