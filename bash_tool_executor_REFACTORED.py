@@ -3509,13 +3509,26 @@ class CommandExecutor:
 # ======== sed (2591-2823) ========
     def _execute_sed(self, cmd: str, parts):
         """
-        Translate sed with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try sed.exe (Git for Windows) - 100% GNU sed
-        2. Fallback PowerShell custom for common operations
-        
-        Supported in PowerShell fallback:
+        Execute sed with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (bash.exe required):
+           - Hold space operations (h, H, g, G, x)
+           - Branch/labels (:label, b, t, T)
+           - Multi-line pattern (N, D, P)
+           - Complex address ranges with operations
+
+        2. ADVANCED (sed.exe preferred):
+           - In-place editing (-i)
+           - Multiple expressions (-e)
+           - Address ranges
+
+        3. SIMPLE (PowerShell OK):
+           - Basic s/search/replace/
+           - Line deletion (d)
+           - Print (p)
+
+        PowerShell fallback supports:
         - s/search/replace/flags (substitution with g, i, p flags)
         - Address ranges: 1,10s/.../, /pattern/s/.../, $s/.../
         - Multiple -e expressions
@@ -3524,11 +3537,46 @@ class CommandExecutor:
         - a, i, c (append, insert, change text)
         - -i (in-place editing)
         - -n (quiet mode - suppress output except explicit p)
-        
-        Complex sed scripts work better with native sed.
         """
         if len(parts) < 2:
             return 'echo Error: sed requires expression', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_sed(command):
+            """Detect if sed uses features that REQUIRE bash.exe"""
+            # Hold space operations
+            if any(pattern in command for pattern in [
+                '\\bh\\b', '\\bH\\b', '\\bg\\b', '\\bG\\b', '\\bx\\b',  # Hold space
+                ':[a-zA-Z]', '\\bb\\s', '\\bt\\s', '\\bT\\s',            # Labels/branches
+                '\\bN\\b', '\\bD\\b', '\\bP\\b',                        # Multi-line
+            ]):
+                return True
+
+            # Complex range operations (not simple /pattern/d or /pattern/s///)
+            # Example: /start/,/end/{//!d}
+            if ',/' in command and '{' in command:
+                return True
+
+            return False
+
+        if is_critical_sed(cmd):
+            # CRITICAL sed → bash.exe REQUIRED
+            if self.git_bash_exe:
+                self.logger.debug("sed with critical features (hold space, labels) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(cmd)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                self.logger.error("Critical sed features require bash.exe (not available)")
+                # Try sed.exe as last resort
+                pass
+
+        # ================================================================
+        # Standard sed execution with native sed.exe preference
+        # ================================================================
         
         # Build command for native sed
         sed_cmd_parts = []
