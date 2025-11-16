@@ -1910,25 +1910,113 @@ class CommandExecutor:
 # ======== awk (2824-3034) ========
     def _execute_awk(self, cmd: str, parts):
         """
-        Translate awk with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try awk.exe / gawk.exe (Git for Windows) - 100% GNU awk
-        2. Fallback PowerShell custom for common patterns
-        
-        Supported in PowerShell fallback:
-        - Field extraction: $1, $2, $NF, $(NF-1)
-        - Field separator: -F delimiter
-        - Pattern matching: /pattern/ {action}
-        - BEGIN/END blocks: BEGIN {x=0} {x+=$1} END {print x}
-        - Variables and arithmetic: x=0, x++, x+=$1
-        - Conditions: $1 > 100, NF > 5
-        - Multiple statements in blocks
-        
-        Complex awk programs work better with native gawk.
+        Execute awk with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (awk.exe/bash.exe required):
+           - Array operations (a[$1]++, associative arrays)
+           - Built-in functions (gsub, substr, split, match, sprintf, etc.)
+           - User-defined functions
+           - Pattern ranges (/start/,/end/)
+           - getline operations
+           - Multiple files with FILENAME/FNR
+           - Complex printf with format strings
+
+        2. ADVANCED (awk.exe preferred):
+           - BEGIN/END blocks
+           - Multiple -F field separators
+           - Field variables ($1, $2, $NF)
+           - Simple arithmetic
+
+        3. SIMPLE (PowerShell OK):
+           - Basic field extraction: awk '{print $1}'
+           - Single condition: awk '$3 > 100'
+
+        ARTIGIANO STRATEGY:
+        1. Try awk.exe/gawk.exe (Git for Windows) - 100% GNU awk
+        2. If critical features and no awk.exe → bash.exe
+        3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
             return 'echo Error: awk requires program', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_awk(program):
+            """Detect if awk uses features that REQUIRE native awk"""
+            # Array operations
+            if '[' in program and ']' in program:
+                # Likely array: a[$1]++, array[key]=value
+                return True
+
+            # Built-in functions (not exhaustive, but common ones)
+            critical_functions = [
+                'gsub', 'sub', 'substr', 'split', 'match', 'sprintf',
+                'strftime', 'systime', 'tolower', 'toupper', 'length',
+                'index', 'getline', 'system', 'close', 'fflush'
+            ]
+            for func in critical_functions:
+                if func + '(' in program:
+                    return True
+
+            # User-defined functions (function name() {...})
+            if re.search(r'\bfunction\s+\w+\s*\(', program):
+                return True
+
+            # Pattern ranges (/start/,/end/)
+            if re.search(r'/[^/]+/\s*,\s*/[^/]+/', program):
+                return True
+
+            # Multiple files with FILENAME or FNR
+            if 'FILENAME' in program or 'FNR' in program:
+                return True
+
+            # Complex printf (more than simple %s or %d)
+            if 'printf' in program:
+                # Check for complex format strings
+                printf_match = re.search(r'printf\s*\(["\']([^"\']+)', program)
+                if printf_match:
+                    format_str = printf_match.group(1)
+                    # Complex formats: %10s, %.2f, %-5d, etc.
+                    if re.search(r'%[-+0-9.]*[a-z]', format_str):
+                        complex_formats = re.findall(r'%[-+0-9.]+[a-z]', format_str)
+                        if complex_formats:
+                            return True
+
+            return False
+
+        # Extract program for analysis
+        program_str = None
+        for i, part in enumerate(parts):
+            if not part.startswith('-') and i > 0:
+                if parts[i-1] not in ['-F', '-v']:  # Not an option argument
+                    program_str = part
+                    break
+
+        if program_str and is_critical_awk(program_str):
+            # CRITICAL awk → native awk.exe or bash.exe REQUIRED
+            # First try will be awk.exe in the fallback chain
+            # But if that fails and we have bash.exe, use it
+            if not self.git_bash_exe:
+                self.logger.warning("Critical awk features detected - requires awk.exe or bash.exe")
+            else:
+                # Check if awk.exe available
+                try:
+                    result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
+                    if result.returncode != 0:
+                        # No awk.exe, use bash.exe
+                        self.logger.debug("Critical awk features + no awk.exe → using bash.exe")
+                        bash_cmd = self._execute_with_gitbash(cmd)
+                        if bash_cmd:
+                            return bash_cmd, False
+                except:
+                    pass
+
+        # ================================================================
+        # Standard awk execution with native awk.exe preference
+        # ================================================================
         
         # Build command for native awk
         awk_cmd_parts = []
