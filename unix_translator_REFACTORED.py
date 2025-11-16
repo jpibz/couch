@@ -638,7 +638,7 @@ class CommandTranslator:
             'grep', 'join', 'ln', 'sha256sum', 'sha1sum', 'md5sum',
             'gzip', 'gunzip', 'tar', 'zip', 'unzip', 'hexdump', 'strings',
             'base64', 'timeout', 'watch', 'column', 'jq', 'wget', 'paste',
-            'comm'
+            'comm', 'cat', 'head', 'tail', 'wc', 'test'
         }
 
         if base_cmd in EXECUTOR_MANAGED:

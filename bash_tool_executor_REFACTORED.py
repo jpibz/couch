@@ -748,6 +748,8 @@ class CommandExecutor:
             'cat': self._execute_cat,
             'wc': self._execute_wc,
             'test': self._execute_test,
+            'paste': self._execute_paste,
+            'comm': self._execute_comm,
 
             # Network
             'wget': self._execute_wget,
