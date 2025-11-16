@@ -5144,6 +5144,93 @@ class CommandExecutor:
 
             return f'powershell -Command "{ps_script}"', True
 
+        # ARTIGIANO: Glob Pattern Expansion (same as cat/head/tail)
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            files_patterns = ','.join(f'"{f}"' for f in files)
+
+            # Build glob expansion logic
+            ps_script = f'''
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @({files_patterns})) {{
+                    if ($pattern -match '[*?\\[\\]]') {{
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {{
+                            $expandedFiles += $matched.FullName
+                        }}
+                    }} else {{
+                        if (Test-Path $pattern) {{
+                            $expandedFiles += $pattern
+                        }} else {{
+                            Write-Error "wc: $pattern: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                }}
+
+                if ($expandedFiles.Count -eq 0) {{
+                    Write-Error "wc: No files matched"
+                    exit 1
+                }}
+
+                # Count stats for each file
+                $totalLines = 0
+                $totalWords = 0
+                $totalChars = 0
+
+                foreach ($file in $expandedFiles) {{
+                    $content = Get-Content $file
+                    $lineCount = $content.Count
+                    $wordCount = 0
+                    $charCount = 0
+
+                    foreach ($line in $content) {{
+                        if ($line -ne $null) {{
+                            $words = $line -split '\\s+'
+                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                            $charCount += $line.Length + 1
+                        }}
+                    }}
+
+                    $totalLines += $lineCount
+                    $totalWords += $wordCount
+                    $totalChars += $charCount
+
+                    $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n                    $output += $lineCount'
+            if count_words:
+                ps_script += '\n                    $output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n                    $output += $charCount'
+
+            ps_script += '\n                    $output += $file'
+            ps_script += '\n                    Write-Output ($output -join "  ")'
+            ps_script += '\n                }'
+
+            # Add total if multiple files
+            ps_script += '''
+                if ($expandedFiles.Count -gt 1) {
+                    $output = @()
+            '''
+            if count_lines:
+                ps_script += '\n                    $output += $totalLines'
+            if count_words:
+                ps_script += '\n                    $output += $totalWords'
+            if count_bytes or count_chars:
+                ps_script += '\n                    $output += $totalChars'
+
+            ps_script += '\n                    $output += "total"'
+            ps_script += '\n                    Write-Output ($output -join "  ")'
+            ps_script += '\n                }'
+
+            return f'powershell -Command "{ps_script}"', True
+
+        # No globs - direct file access
         # Files specified
         if len(files) == 1:
             file = files[0]
