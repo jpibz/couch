@@ -745,6 +745,7 @@ class CommandExecutor:
             'jq': self._execute_jq,
             'head': self._execute_head,
             'tail': self._execute_tail,
+            'cat': self._execute_cat,
 
             # Network
             'wget': self._execute_wget,
@@ -4780,6 +4781,117 @@ class CommandExecutor:
                     }}
                 }}
             '''.format(','.join(f'"{f}"' for f in files), line_count)
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_cat(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute cat - concatenate and display files.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content (native, fast)
+        - Multiple files concatenation
+        - Line numbering with -n
+        - Stdin support (no files = read from pipeline)
+
+        Flags:
+        - -n: number all output lines
+        - -b: number non-blank lines (simplified: same as -n for now)
+
+        Usage:
+          cat file.txt               → display file
+          cat file1 file2            → concatenate files
+          cat -n file.txt            → with line numbers
+          echo "text" | cat          → from stdin
+          cat < input.txt            → from redirect
+        """
+        number_lines = '-n' in parts or '-b' in parts
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] in ['-n', '-b']:
+                number_lines = True
+                i += 1
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline or redirect)
+            if number_lines:
+                # PowerShell: enumerate lines with numbers
+                ps_cmd = '''
+                    $lineNum = 1
+                    $input | ForEach-Object {
+                        Write-Output ("{0,6} {1}" -f $lineNum, $_)
+                        $lineNum++
+                    }
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            else:
+                # Just pass through stdin
+                # In PowerShell pipeline, this is implicit
+                return '$input', True
+
+        # Files specified
+        if len(files) == 1:
+            # Single file
+            file = files[0]
+            if number_lines:
+                ps_script = f'''
+                    if (Test-Path "{file}") {{
+                        $lineNum = 1
+                        Get-Content "{file}" | ForEach-Object {{
+                            Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                            $lineNum++
+                        }}
+                    }} else {{
+                        Write-Error "cat: {file}: No such file or directory"
+                        exit 1
+                    }}
+                '''
+            else:
+                ps_script = f'''
+                    if (Test-Path "{file}") {{
+                        Get-Content "{file}"
+                    }} else {{
+                        Write-Error "cat: {file}: No such file or directory"
+                        exit 1
+                    }}
+                '''
+        else:
+            # Multiple files - concatenate
+            if number_lines:
+                ps_script = '''
+                    $files = @({})
+                    $lineNum = 1
+                    foreach ($file in $files) {{
+                        if (Test-Path $file) {{
+                            Get-Content $file | ForEach-Object {{
+                                Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                                $lineNum++
+                            }}
+                        }} else {{
+                            Write-Error "cat: $file: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                '''.format(','.join(f'"{f}"' for f in files))
+            else:
+                ps_script = '''
+                    $files = @({})
+                    foreach ($file in $files) {{
+                        if (Test-Path $file) {{
+                            Get-Content $file
+                        }} else {{
+                            Write-Error "cat: $file: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                '''.format(','.join(f'"{f}"' for f in files))
 
         return f'powershell -Command "{ps_script}"', True
 
