@@ -4935,7 +4935,14 @@ class BashToolExecutor(ToolExecutor):
             
             while i < len(text):
                 if i < len(text) - 1 and text[i:i+2] == '$(':
-                    # Found start of substitution
+                    # FIX #6: Check if it's arithmetic $(( instead of command substitution $(
+                    if i < len(text) - 2 and text[i+2] == '(':
+                        # This is $((arithmetic)), NOT command substitution
+                        # Skip it - already handled by _expand_variables()
+                        i += 3
+                        continue
+
+                    # Found start of command substitution $(...)
                     start = i
                     i += 2
                     depth = 1
@@ -5169,11 +5176,13 @@ class BashToolExecutor(ToolExecutor):
         """
         import re
 
-        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command)
+        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command) and NOT $((arithmetic))
         # Use negative lookbehind: (?<!\$) = "not preceded by $"
         #                          (?<!<) = "not preceded by <"
         #                          (?<!>) = "not preceded by >"
-        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)\(([^)]+)\)'
+        #                          (?<!\() = "not preceded by (" (to avoid matching 2nd paren in $((expr)))
+        # FIX #6: Added (?<!\() to prevent matching the 2nd paren in $((5 + 5))
+        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)(?<!\()\(([^)]+)\)'
 
         def remove_subshell(match):
             # Just return inner command
