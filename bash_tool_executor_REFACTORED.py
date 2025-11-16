@@ -403,6 +403,32 @@ class CommandExecutor:
         
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
+        has_process_subst = '<(' in command or '>(' in command
+
+        # ================================================================
+        # PROCESS SUBSTITUTION - <(...) >(...)
+        # ================================================================
+        # CRITICAL: Process substitution creates named pipes/file descriptors
+        # - <(cmd) runs cmd, creates FD with output
+        # - >(cmd) creates FD, runs cmd on data written to it
+        # - Sub-commands can be COMPLEX (pipelines, chains)
+        # - NO PowerShell equivalent
+        # - bash.exe handles natively and perfectly
+        #
+        # ARTIGIANO: Don't emulate. Pass to bash.exe.
+
+        if has_process_subst:
+            if self.git_bash_exe:
+                self.logger.debug(f"Process substitution detected <(...) or >(...) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # NO bash.exe for process substitution - CRITICAL FAILURE
+                self.logger.error(f"Process substitution REQUIRES bash.exe: {command[:100]}")
+                self.logger.error("bash.exe not available - command will FAIL")
+                # Cannot emulate process substitution reliably
+                return f'echo "ERROR: Process substitution requires bash.exe (not available)"', True
 
         # ================================================================
         # COMMAND CHAINS - && || ;
@@ -701,9 +727,20 @@ class CommandExecutor:
     
     def _execute_find(self, cmd: str, parts: List[str]) -> Tuple[str, bool]:
         """
-        Execute find with COMPLETE test support - FULL EMULATION.
-        
-        Tests supported:
+        Execute find with COMPLETE test support - STRATEGIC DISPATCH.
+
+        ARTIGIANO STRATEGY:
+        - Simple find → PowerShell emulation
+        - Complex -exec → bash.exe (perfect emulation)
+        - Complex tests → bash.exe
+
+        Complexity triggers (bash.exe required):
+        - -exec with sh/bash invocation
+        - -exec with pipes/redirects
+        - -exec with complex quoting
+        - Advanced tests (-printf, -execdir, etc.)
+
+        Tests supported (PowerShell emulation):
         - -name PATTERN: filename pattern (wildcards)
         - -iname PATTERN: case-insensitive name
         - -type f|d|l: file type (file, directory, link)
@@ -714,16 +751,70 @@ class CommandExecutor:
         - -newer FILE: modified more recently than FILE
         - -maxdepth N: descend at most N levels
         - -mindepth N: descend at least N levels
-        - -exec CMD {} \;: execute command on each file
+        - -exec CMD {} \;: execute command (simple only)
         - -delete: delete matched files
         - -print: print matched files (default)
         - -print0: print with null separator
-        
+
         Examples:
-          find . -name "*.py" -mtime -7
-          find /tmp -type f -size +100M -delete
-          find . -name "*.log" -mtime +30 -exec rm {} \;
+          find . -name "*.py" -mtime -7                           # PowerShell OK
+          find /tmp -type f -size +100M -delete                   # PowerShell OK
+          find . -name "*.log" -mtime +30 -exec rm {} \;          # PowerShell OK
+          find . -exec sh -c 'echo "$1"' _ {} \;                  # bash.exe REQUIRED
+          find . -name "*.txt" -exec grep pattern {} \; | wc -l   # bash.exe REQUIRED
         """
+
+        # ================================================================
+        # ARTIGIANO: Complexity detection BEFORE parsing
+        # ================================================================
+
+        def is_complex_exec(exec_cmd):
+            """Detect if -exec is too complex for PowerShell"""
+            # sh/bash invocation
+            if 'sh -c' in exec_cmd or 'bash -c' in exec_cmd:
+                return True
+            # Pipe/redirect inside -exec command
+            if any(op in exec_cmd for op in ['|', '>', '<', '2>', '&&', '||']):
+                return True
+            # Complex quoting (nested quotes)
+            single_quotes = exec_cmd.count("'")
+            double_quotes = exec_cmd.count('"')
+            if single_quotes > 2 or double_quotes > 2:
+                return True
+            return False
+
+        # Check for complex -exec in command
+        if '-exec' in cmd:
+            # Extract -exec portion
+            exec_start = cmd.find('-exec')
+            exec_portion = cmd[exec_start:]
+            if is_complex_exec(exec_portion):
+                # Complex -exec → bash.exe REQUIRED
+                if self.git_bash_exe:
+                    self.logger.debug("find with complex -exec → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.error("Complex find -exec requires bash.exe (not available)")
+                    return 'echo "ERROR: Complex find -exec requires bash.exe"', True
+
+        # Advanced find features not supported in PowerShell emulation
+        unsupported_flags = ['-printf', '-execdir', '-ok', '-okdir', '-prune', '-quit',
+                            '-fprint', '-fprint0', '-fprintf', '-ls', '-fls']
+        for flag in unsupported_flags:
+            if flag in cmd:
+                if self.git_bash_exe:
+                    self.logger.debug(f"find with {flag} → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.warning(f"find flag {flag} not supported in emulation")
+
+        # ================================================================
+        # PowerShell emulation for SIMPLE find
+        # ================================================================
         # Parse find arguments
         path = '.'
         tests = []
@@ -1819,25 +1910,113 @@ class CommandExecutor:
 # ======== awk (2824-3034) ========
     def _execute_awk(self, cmd: str, parts):
         """
-        Translate awk with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try awk.exe / gawk.exe (Git for Windows) - 100% GNU awk
-        2. Fallback PowerShell custom for common patterns
-        
-        Supported in PowerShell fallback:
-        - Field extraction: $1, $2, $NF, $(NF-1)
-        - Field separator: -F delimiter
-        - Pattern matching: /pattern/ {action}
-        - BEGIN/END blocks: BEGIN {x=0} {x+=$1} END {print x}
-        - Variables and arithmetic: x=0, x++, x+=$1
-        - Conditions: $1 > 100, NF > 5
-        - Multiple statements in blocks
-        
-        Complex awk programs work better with native gawk.
+        Execute awk with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (awk.exe/bash.exe required):
+           - Array operations (a[$1]++, associative arrays)
+           - Built-in functions (gsub, substr, split, match, sprintf, etc.)
+           - User-defined functions
+           - Pattern ranges (/start/,/end/)
+           - getline operations
+           - Multiple files with FILENAME/FNR
+           - Complex printf with format strings
+
+        2. ADVANCED (awk.exe preferred):
+           - BEGIN/END blocks
+           - Multiple -F field separators
+           - Field variables ($1, $2, $NF)
+           - Simple arithmetic
+
+        3. SIMPLE (PowerShell OK):
+           - Basic field extraction: awk '{print $1}'
+           - Single condition: awk '$3 > 100'
+
+        ARTIGIANO STRATEGY:
+        1. Try awk.exe/gawk.exe (Git for Windows) - 100% GNU awk
+        2. If critical features and no awk.exe → bash.exe
+        3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
             return 'echo Error: awk requires program', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_awk(program):
+            """Detect if awk uses features that REQUIRE native awk"""
+            # Array operations
+            if '[' in program and ']' in program:
+                # Likely array: a[$1]++, array[key]=value
+                return True
+
+            # Built-in functions (not exhaustive, but common ones)
+            critical_functions = [
+                'gsub', 'sub', 'substr', 'split', 'match', 'sprintf',
+                'strftime', 'systime', 'tolower', 'toupper', 'length',
+                'index', 'getline', 'system', 'close', 'fflush'
+            ]
+            for func in critical_functions:
+                if func + '(' in program:
+                    return True
+
+            # User-defined functions (function name() {...})
+            if re.search(r'\bfunction\s+\w+\s*\(', program):
+                return True
+
+            # Pattern ranges (/start/,/end/)
+            if re.search(r'/[^/]+/\s*,\s*/[^/]+/', program):
+                return True
+
+            # Multiple files with FILENAME or FNR
+            if 'FILENAME' in program or 'FNR' in program:
+                return True
+
+            # Complex printf (more than simple %s or %d)
+            if 'printf' in program:
+                # Check for complex format strings
+                printf_match = re.search(r'printf\s*\(["\']([^"\']+)', program)
+                if printf_match:
+                    format_str = printf_match.group(1)
+                    # Complex formats: %10s, %.2f, %-5d, etc.
+                    if re.search(r'%[-+0-9.]*[a-z]', format_str):
+                        complex_formats = re.findall(r'%[-+0-9.]+[a-z]', format_str)
+                        if complex_formats:
+                            return True
+
+            return False
+
+        # Extract program for analysis
+        program_str = None
+        for i, part in enumerate(parts):
+            if not part.startswith('-') and i > 0:
+                if parts[i-1] not in ['-F', '-v']:  # Not an option argument
+                    program_str = part
+                    break
+
+        if program_str and is_critical_awk(program_str):
+            # CRITICAL awk → native awk.exe or bash.exe REQUIRED
+            # First try will be awk.exe in the fallback chain
+            # But if that fails and we have bash.exe, use it
+            if not self.git_bash_exe:
+                self.logger.warning("Critical awk features detected - requires awk.exe or bash.exe")
+            else:
+                # Check if awk.exe available
+                try:
+                    result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
+                    if result.returncode != 0:
+                        # No awk.exe, use bash.exe
+                        self.logger.debug("Critical awk features + no awk.exe → using bash.exe")
+                        bash_cmd = self._execute_with_gitbash(cmd)
+                        if bash_cmd:
+                            return bash_cmd, False
+                except:
+                    pass
+
+        # ================================================================
+        # Standard awk execution with native awk.exe preference
+        # ================================================================
         
         # Build command for native awk
         awk_cmd_parts = []
@@ -3418,13 +3597,26 @@ class CommandExecutor:
 # ======== sed (2591-2823) ========
     def _execute_sed(self, cmd: str, parts):
         """
-        Translate sed with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try sed.exe (Git for Windows) - 100% GNU sed
-        2. Fallback PowerShell custom for common operations
-        
-        Supported in PowerShell fallback:
+        Execute sed with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (bash.exe required):
+           - Hold space operations (h, H, g, G, x)
+           - Branch/labels (:label, b, t, T)
+           - Multi-line pattern (N, D, P)
+           - Complex address ranges with operations
+
+        2. ADVANCED (sed.exe preferred):
+           - In-place editing (-i)
+           - Multiple expressions (-e)
+           - Address ranges
+
+        3. SIMPLE (PowerShell OK):
+           - Basic s/search/replace/
+           - Line deletion (d)
+           - Print (p)
+
+        PowerShell fallback supports:
         - s/search/replace/flags (substitution with g, i, p flags)
         - Address ranges: 1,10s/.../, /pattern/s/.../, $s/.../
         - Multiple -e expressions
@@ -3433,11 +3625,46 @@ class CommandExecutor:
         - a, i, c (append, insert, change text)
         - -i (in-place editing)
         - -n (quiet mode - suppress output except explicit p)
-        
-        Complex sed scripts work better with native sed.
         """
         if len(parts) < 2:
             return 'echo Error: sed requires expression', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_sed(command):
+            """Detect if sed uses features that REQUIRE bash.exe"""
+            # Hold space operations
+            if any(pattern in command for pattern in [
+                '\\bh\\b', '\\bH\\b', '\\bg\\b', '\\bG\\b', '\\bx\\b',  # Hold space
+                ':[a-zA-Z]', '\\bb\\s', '\\bt\\s', '\\bT\\s',            # Labels/branches
+                '\\bN\\b', '\\bD\\b', '\\bP\\b',                        # Multi-line
+            ]):
+                return True
+
+            # Complex range operations (not simple /pattern/d or /pattern/s///)
+            # Example: /start/,/end/{//!d}
+            if ',/' in command and '{' in command:
+                return True
+
+            return False
+
+        if is_critical_sed(cmd):
+            # CRITICAL sed → bash.exe REQUIRED
+            if self.git_bash_exe:
+                self.logger.debug("sed with critical features (hold space, labels) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(cmd)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                self.logger.error("Critical sed features require bash.exe (not available)")
+                # Try sed.exe as last resort
+                pass
+
+        # ================================================================
+        # Standard sed execution with native sed.exe preference
+        # ================================================================
         
         # Build command for native sed
         sed_cmd_parts = []
@@ -4986,31 +5213,82 @@ class BashToolExecutor(ToolExecutor):
     
     def _translate_substitution_content(self, content: str) -> str:
         """
-        Translate Unix command content inside $(...).
-        
-        FULL TRANSLATION PIPELINE:
-        1. Check for nested $(...)  - recurse first
-        2. Translate Unix paths → Windows
-        3. Translate Unix commands → Windows
-        4. Return translated command (WITHOUT outer $(...))
-        
+        Translate Unix command content inside $(...) - ARTIGIANO STRATEGY.
+
+        CRITICAL: Commands inside $(...) must be EXECUTED to capture output.
+        Cannot just "pass to bash.exe" - must run and get result.
+
+        ARTIGIANO STRATEGY:
+        1. Detect if command is COMPLEX (would fail in PowerShell emulation)
+        2. Complex → execute with bash.exe, capture output, return as string
+        3. Simple → translate to PowerShell, execute in $(...) context
+
+        COMPLEXITY TRIGGERS:
+        - Pipeline with critical commands (find, xargs, awk, sed)
+        - Command chains (&&, ||)
+        - Process substitution <(...)
+        - Complex redirections
+
         Args:
             content: Unix command string (e.g., "grep pattern file.txt")
-            
+
         Returns:
-            Translated command (e.g., "Select-String -Pattern 'pattern' -Path 'file.txt'")
+            Translated command or bash.exe invocation
         """
         # Handle empty
         if not content or not content.strip():
             return content
-        
+
         # STEP 1: Recursively handle nested $(...)
         if '$(' in content:
             content = self._process_command_substitution_recursive(content)
-        
+
+        # ================================================================
+        # ARTIGIANO: Detect if command inside $(...) is COMPLEX
+        # ================================================================
+
+        def is_complex_substitution(cmd: str) -> bool:
+            """Detect if command needs bash.exe for reliable execution"""
+            # Pipeline with critical commands
+            if '|' in cmd:
+                critical_in_pipeline = ['find', 'xargs', 'awk', 'sed', 'grep -', 'cut', 'tr']
+                for critical in critical_in_pipeline:
+                    if critical in cmd:
+                        return True
+
+            # Command chains
+            if any(op in cmd for op in ['&&', '||', ';']):
+                return True
+
+            # Process substitution (shouldn't be here but check anyway)
+            if '<(' in cmd or '>(' in cmd:
+                return True
+
+            # Complex find -exec
+            if '-exec' in cmd and 'find' in cmd:
+                return True
+
+            return False
+
+        if is_complex_substitution(content):
+            # COMPLEX command inside $(...) → execute with bash.exe
+            if self.git_bash_exe:
+                self.logger.debug(f"Complex command in $(...) → using bash.exe: {content[:50]}")
+                # Need to execute bash.exe, capture output, and insert as string
+                # This is tricky - we're in preprocessing, haven't executed yet
+                # Return a PowerShell invocation that runs bash.exe
+                bash_escaped = content.replace('"', '`"').replace('$', '`$')
+                # Convert to bash.exe invocation that captures output
+                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
+            else:
+                self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
+                # Fall through to PowerShell translation (may fail)
+
+        # ================================================================
         # STEP 2: Translate paths
+        # ================================================================
         content_with_paths = self.path_translator.translate_paths_in_string(content, 'to_windows')
-        
+
         # STEP 3: Translate commands
         # Use command_translator which handles:
         # - Pipe chains
