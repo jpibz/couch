@@ -5882,9 +5882,10 @@ class BashToolExecutor(ToolExecutor):
         # Expand braces - may need multiple passes for nested
         max_iterations = 10
         for _ in range(max_iterations):
-            # Pattern: {content}
+            # Pattern: {content} but NOT ${var...}
             # Match innermost braces first (non-greedy)
-            pattern = r'\{([^{}]+)\}'
+            # FIX #7: Use negative lookbehind to exclude ${var...} parameter expansion
+            pattern = r'(?<!\$)\{([^{}]+)\}'
             new_command = re.sub(pattern, expand_single_brace, command)
             
             if new_command == command:
