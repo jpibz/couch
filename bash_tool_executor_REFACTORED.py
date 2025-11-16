@@ -5470,7 +5470,44 @@ EXPAND_DELIMITER'''
         # Full array support would require state tracking
         array_pattern = r'\$\{(\w+)\[@\]\}'
         command = re.sub(array_pattern, r'$\1', command)
-        
+
+        # ================================================================
+        # ARTIGIANO: Simple Variable Expansion
+        # ================================================================
+        # CRITICAL: Must expand basic $VAR and ${VAR} forms!
+        # Previous code only handled ${VAR:-default}, missing simple expansion.
+        #
+        # This BROKE commands like:
+        #   cd $HOME        → cd $HOME (literal! Wrong!)
+        #   echo $PATH      → echo $PATH (literal!)
+        #   cp file $USER/  → cp file $USER/ (fails!)
+        #
+        # 6. Simple ${VAR} expansion
+        simple_brace_pattern = r'\$\{(\w+)\}'
+
+        def expand_simple_brace(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${{{var_name}}} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_brace_pattern, expand_simple_brace, command)
+
+        # 7. Simple $VAR expansion (without braces)
+        # Must be AFTER ${VAR} to avoid double-expansion
+        # Match $VAR but NOT $((, ${, $@, $*, $#, $?, $$, $!, $0-9
+        simple_var_pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
+
+        def expand_simple_var(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${var_name} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_var_pattern, expand_simple_var, command)
+
         return command
     
     def _preprocess_test_commands(self, command: str) -> str:
