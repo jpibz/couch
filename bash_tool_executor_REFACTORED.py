@@ -5213,31 +5213,82 @@ class BashToolExecutor(ToolExecutor):
     
     def _translate_substitution_content(self, content: str) -> str:
         """
-        Translate Unix command content inside $(...).
-        
-        FULL TRANSLATION PIPELINE:
-        1. Check for nested $(...)  - recurse first
-        2. Translate Unix paths → Windows
-        3. Translate Unix commands → Windows
-        4. Return translated command (WITHOUT outer $(...))
-        
+        Translate Unix command content inside $(...) - ARTIGIANO STRATEGY.
+
+        CRITICAL: Commands inside $(...) must be EXECUTED to capture output.
+        Cannot just "pass to bash.exe" - must run and get result.
+
+        ARTIGIANO STRATEGY:
+        1. Detect if command is COMPLEX (would fail in PowerShell emulation)
+        2. Complex → execute with bash.exe, capture output, return as string
+        3. Simple → translate to PowerShell, execute in $(...) context
+
+        COMPLEXITY TRIGGERS:
+        - Pipeline with critical commands (find, xargs, awk, sed)
+        - Command chains (&&, ||)
+        - Process substitution <(...)
+        - Complex redirections
+
         Args:
             content: Unix command string (e.g., "grep pattern file.txt")
-            
+
         Returns:
-            Translated command (e.g., "Select-String -Pattern 'pattern' -Path 'file.txt'")
+            Translated command or bash.exe invocation
         """
         # Handle empty
         if not content or not content.strip():
             return content
-        
+
         # STEP 1: Recursively handle nested $(...)
         if '$(' in content:
             content = self._process_command_substitution_recursive(content)
-        
+
+        # ================================================================
+        # ARTIGIANO: Detect if command inside $(...) is COMPLEX
+        # ================================================================
+
+        def is_complex_substitution(cmd: str) -> bool:
+            """Detect if command needs bash.exe for reliable execution"""
+            # Pipeline with critical commands
+            if '|' in cmd:
+                critical_in_pipeline = ['find', 'xargs', 'awk', 'sed', 'grep -', 'cut', 'tr']
+                for critical in critical_in_pipeline:
+                    if critical in cmd:
+                        return True
+
+            # Command chains
+            if any(op in cmd for op in ['&&', '||', ';']):
+                return True
+
+            # Process substitution (shouldn't be here but check anyway)
+            if '<(' in cmd or '>(' in cmd:
+                return True
+
+            # Complex find -exec
+            if '-exec' in cmd and 'find' in cmd:
+                return True
+
+            return False
+
+        if is_complex_substitution(content):
+            # COMPLEX command inside $(...) → execute with bash.exe
+            if self.git_bash_exe:
+                self.logger.debug(f"Complex command in $(...) → using bash.exe: {content[:50]}")
+                # Need to execute bash.exe, capture output, and insert as string
+                # This is tricky - we're in preprocessing, haven't executed yet
+                # Return a PowerShell invocation that runs bash.exe
+                bash_escaped = content.replace('"', '`"').replace('$', '`$')
+                # Convert to bash.exe invocation that captures output
+                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
+            else:
+                self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
+                # Fall through to PowerShell translation (may fail)
+
+        # ================================================================
         # STEP 2: Translate paths
+        # ================================================================
         content_with_paths = self.path_translator.translate_paths_in_string(content, 'to_windows')
-        
+
         # STEP 3: Translate commands
         # Use command_translator which handles:
         # - Pipe chains
