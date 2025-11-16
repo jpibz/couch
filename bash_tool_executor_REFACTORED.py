@@ -746,6 +746,7 @@ class CommandExecutor:
             'head': self._execute_head,
             'tail': self._execute_tail,
             'cat': self._execute_cat,
+            'wc': self._execute_wc,
 
             # Network
             'wget': self._execute_wget,
@@ -4892,6 +4893,171 @@ class CommandExecutor:
                         }}
                     }}
                 '''.format(','.join(f'"{f}"' for f in files))
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_wc(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute wc - word, line, character, and byte count.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Measure-Object (native, fast)
+        - Count lines, words, characters, bytes
+        - Multiple files support
+        - Pipeline support
+
+        Flags:
+        - -l: count lines only
+        - -w: count words only
+        - -c: count bytes only
+        - -m: count characters only
+        - (no flags): show lines, words, bytes
+
+        Usage:
+          wc file.txt               → lines, words, bytes
+          wc -l file.txt            → lines only
+          wc -w file.txt            → words only
+          cat file | wc -l          → count lines from pipeline
+          ls | wc -l                → count items
+        """
+        count_lines = '-l' in parts
+        count_words = '-w' in parts
+        count_chars = '-m' in parts
+        count_bytes = '-c' in parts
+        files = []
+
+        # If no flags specified, count all (lines, words, bytes)
+        if not (count_lines or count_words or count_chars or count_bytes):
+            count_lines = count_words = count_bytes = True
+
+        i = 1
+        while i < len(parts):
+            if parts[i] in ['-l', '-w', '-c', '-m']:
+                i += 1
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # Collect and count
+            ps_script = '''
+                $lines = @($input)
+                $lineCount = $lines.Count
+                $wordCount = 0
+                $charCount = 0
+
+                foreach ($line in $lines) {
+                    if ($line -ne $null) {
+                        $words = $line -split '\s+'
+                        $wordCount += ($words | Where-Object { $_ -ne '' }).Count
+                        $charCount += $line.Length + 1  # +1 for newline
+                    }
+                }
+
+                $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += '\nWrite-Output ($output -join "  ")'
+
+            return f'powershell -Command "{ps_script}"', True
+
+        # Files specified
+        if len(files) == 1:
+            file = files[0]
+            ps_script = f'''
+                if (-not (Test-Path "{file}")) {{
+                    Write-Error "wc: {file}: No such file or directory"
+                    exit 1
+                }}
+
+                $content = Get-Content "{file}"
+                $lineCount = $content.Count
+                $wordCount = 0
+                $charCount = 0
+
+                foreach ($line in $content) {{
+                    if ($line -ne $null) {{
+                        $words = $line -split '\\s+'
+                        $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                        $charCount += $line.Length + 1
+                    }}
+                }}
+
+                $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += f'\n$output += "{file}"\nWrite-Output ($output -join "  ")'
+
+        else:
+            # Multiple files - show individual counts and total
+            ps_script = '''
+                $files = @({})
+                $totalLines = 0
+                $totalWords = 0
+                $totalChars = 0
+
+                foreach ($file in $files) {{
+                    if (-not (Test-Path $file)) {{
+                        Write-Error "wc: $file: No such file or directory"
+                        continue
+                    }}
+
+                    $content = Get-Content $file
+                    $lineCount = $content.Count
+                    $wordCount = 0
+                    $charCount = 0
+
+                    foreach ($line in $content) {{
+                        if ($line -ne $null) {{
+                            $words = $line -split '\\s+'
+                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                            $charCount += $line.Length + 1
+                        }}
+                    }}
+
+                    $totalLines += $lineCount
+                    $totalWords += $wordCount
+                    $totalChars += $charCount
+
+                    $output = @()
+            '''.format(','.join(f'"{f}"' for f in files))
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += '\n$output += $file\nWrite-Output ($output -join "  ")\n}'
+
+            # Add total line
+            if len(files) > 1:
+                ps_script += '\n$output = @()'
+                if count_lines:
+                    ps_script += '\n$output += $totalLines'
+                if count_words:
+                    ps_script += '\n$output += $totalWords'
+                if count_bytes or count_chars:
+                    ps_script += '\n$output += $totalChars'
+                ps_script += '\n$output += "total"\nWrite-Output ($output -join "  ")'
 
         return f'powershell -Command "{ps_script}"', True
 
