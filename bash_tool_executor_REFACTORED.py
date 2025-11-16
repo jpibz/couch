@@ -4654,32 +4654,74 @@ class CommandExecutor:
             # PowerShell: Select-Object -First N
             return f'Select-Object -First {line_count}', True
 
-        if len(files) == 1:
-            # Single file
+        # ARTIGIANO: Glob Pattern Expansion (same as cat)
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            files_patterns = ','.join(f'"{f}"' for f in files)
             ps_script = f'''
-                if (Test-Path "{files[0]}") {{
-                    Get-Content "{files[0]}" -TotalCount {line_count}
-                }} else {{
-                    Write-Error "head: {files[0]}: No such file or directory"
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @({files_patterns})) {{
+                    if ($pattern -match '[*?\\[\\]]') {{
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {{
+                            $expandedFiles += $matched.FullName
+                        }}
+                    }} else {{
+                        if (Test-Path $pattern) {{
+                            $expandedFiles += $pattern
+                        }} else {{
+                            Write-Error "head: $pattern: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                }}
+
+                if ($expandedFiles.Count -eq 0) {{
+                    Write-Error "head: No files matched"
                     exit 1
+                }}
+
+                # Process files
+                $first = $true
+                foreach ($file in $expandedFiles) {{
+                    if ($expandedFiles.Count -gt 1) {{
+                        if (-not $first) {{ Write-Output "" }}
+                        Write-Output "==> $file <=="
+                    }}
+                    Get-Content $file -TotalCount {line_count}
+                    $first = $false
                 }}
             '''
         else:
-            # Multiple files - show filename headers like Unix head
-            ps_script = '''
-                $files = @({})
-                $first = $true
-                foreach ($file in $files) {{
-                    if (Test-Path $file) {{
-                        if (-not $first) {{ Write-Output "" }}
-                        Write-Output "==> $file <=="
-                        Get-Content $file -TotalCount {}
-                        $first = $false
+            # No globs - direct access
+            if len(files) == 1:
+                # Single file
+                ps_script = f'''
+                    if (Test-Path "{files[0]}") {{
+                        Get-Content "{files[0]}" -TotalCount {line_count}
                     }} else {{
-                        Write-Error "head: $file: No such file or directory"
+                        Write-Error "head: {files[0]}: No such file or directory"
+                        exit 1
                     }}
-                }}
-            '''.format(','.join(f'"{f}"' for f in files), line_count)
+                '''
+            else:
+                # Multiple files - show filename headers like Unix head
+                ps_script = '''
+                    $files = @({})
+                    $first = $true
+                    foreach ($file in $files) {{
+                        if (Test-Path $file) {{
+                            if (-not $first) {{ Write-Output "" }}
+                            Write-Output "==> $file <=="
+                            Get-Content $file -TotalCount {}
+                            $first = $false
+                        }} else {{
+                            Write-Error "head: $file: No such file or directory"
+                        }}
+                    }}
+                '''.format(','.join(f'"{f}"' for f in files), line_count)
 
         return f'powershell -Command "{ps_script}"', True
 
