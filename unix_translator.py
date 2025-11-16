@@ -337,90 +337,105 @@ class CommandTranslator:
     
     def __init__(self, path_translator: PathTranslator):
         self.path_translator = path_translator
-        
-        # Command map with all translators (50+ commands)
+
+        # Command map with all translators (73 commands)
+        #
+        # ORGANIZATION:
+        # - Simple 1:1 translations: Used directly by translate() for basic commands
+        # - Complex emulations (EXECUTOR_MANAGED): Used as FALLBACK by CommandExecutor
+        #   when primary strategy fails. Not called during normal flow due to bypass.
+        #
+        # See _translate_single_command() for bypass logic.
         self.command_map = {
-            'ls': self._translate_ls,
-            'cat': self._translate_cat,
-            'echo': self._translate_echo,
-            'pwd': self._translate_pwd,
-            'cd': self._translate_cd,
-            'mkdir': self._translate_mkdir,
-            'rm': self._translate_rm,
-            'cp': self._translate_cp,
-            'mv': self._translate_mv,
-            'ln': self._translate_ln,
-            'touch': self._translate_touch,
-            'grep': self._translate_grep,
-            'find': self._translate_find,
-            'which': self._translate_which,
-            'head': self._translate_head,
-            'tail': self._translate_tail,
-            'wc': self._translate_wc,
-            'sort': self._translate_sort,
-            'uniq': self._translate_uniq,
-            'ps': self._translate_ps,
-            'kill': self._translate_kill,
-            'env': self._translate_env,
-            'printenv': self._translate_printenv,
-            'export': self._translate_export,
-            'wget': self._translate_wget,
-            'curl': self._translate_curl,
-            'chmod': self._translate_chmod,
-            'chown': self._translate_chown,
-            'du': self._translate_du,
-            'df': self._translate_df,
-            'date': self._translate_date,
-            'sleep': self._translate_sleep,
-            'basename': self._translate_basename,
-            'dirname': self._translate_dirname,
-            'tar': self._translate_tar,
-            'zip': self._translate_zip,
-            'unzip': self._translate_unzip,
-            'sed': self._translate_sed,
-            'awk': self._translate_awk,
-            'cut': self._translate_cut,
-            'true': self._translate_true,
-            'false': self._translate_false,
-            # NEW CRITICAL COMMANDS
-            'test': self._translate_test,
-            'tr': self._translate_tr,
-            'diff': self._translate_diff,
-            'tee': self._translate_tee,
-            'seq': self._translate_seq,
-            'yes': self._translate_yes,
-            'whoami': self._translate_whoami,
-            'hostname': self._translate_hostname,
-            'file': self._translate_file,
-            'stat': self._translate_stat,
-            'readlink': self._translate_readlink,
-            'realpath': self._translate_realpath,
-            # Checksums/Hashing
-            'sha256sum': self._translate_sha256sum,
-            'sha1sum': self._translate_sha1sum,
-            'md5sum': self._translate_md5sum,
-            # Encoding
-            'base64': self._translate_base64,
-            # Binary inspection
-            'hexdump': self._translate_hexdump,
-            'strings': self._translate_strings,
-            # Text formatting
-            'column': self._translate_column,
-            # Text operations
-            'paste': self._translate_paste,
-            'comm': self._translate_comm,
-            'join': self._translate_join,
-            # Monitoring/utilities
-            'watch': self._translate_watch,
-            # Process management
-            'timeout': self._translate_timeout,
-            # File operations advanced
-            'split': self._translate_split,
-            # Compression
-            'gzip': self._translate_gzip,
-            'gunzip': self._translate_gunzip,
-            # JSON processing
-            'jq': self._translate_jq,
+            # ===== SIMPLE 1:1 TRANSLATIONS (< 20 righe) =====
+            # These are called directly by translate() for simple command translation
+            'pwd': self._translate_pwd,           # 3 lines
+            'ps': self._translate_ps,             # 3 lines
+            'chmod': self._translate_chmod,       # 3 lines
+            'chown': self._translate_chown,       # 3 lines
+            'df': self._translate_df,             # 3 lines
+            'true': self._translate_true,         # 3 lines
+            'false': self._translate_false,       # 7 lines
+            'whoami': self._translate_whoami,     # 4 lines
+            'hostname': self._translate_hostname, # 4 lines
+            'which': self._translate_which,       # 5 lines
+            'sleep': self._translate_sleep,       # 5 lines
+            'cd': self._translate_cd,             # 6 lines
+            'basename': self._translate_basename, # 6 lines
+            'dirname': self._translate_dirname,   # 6 lines
+            'kill': self._translate_kill,         # 8 lines
+            'mkdir': self._translate_mkdir,       # 9 lines
+            'mv': self._translate_mv,             # 11 lines
+            'yes': self._translate_yes,           # 13 lines
+            'env': self._translate_env,           # 15 lines
+            'printenv': self._translate_printenv, # 15 lines
+            'export': self._translate_export,     # 19 lines
+
+            # ===== MEDIUM COMPLEXITY (20-100 righe) =====
+            # May be called directly or as fallback depending on command
+            'touch': self._translate_touch,       # 26 lines
+            'echo': self._translate_echo,         # 37 lines
+            'wc': self._translate_wc,             # 34 lines
+            'du': self._translate_du,             # 36 lines
+            'date': self._translate_date,         # 46 lines
+            'head': self._translate_head,         # 51 lines
+            'tail': self._translate_tail,         # 56 lines
+            'rm': self._translate_rm,             # 58 lines
+            'cat': self._translate_cat,           # 63 lines
+            'cp': self._translate_cp,             # 72 lines
+            'ls': self._translate_ls,             # 75 lines
+
+            # Medium - special commands
+            'tee': self._translate_tee,           # 23 lines
+            'seq': self._translate_seq,           # 33 lines
+            'file': self._translate_file,         # 21 lines
+            'stat': self._translate_stat,         # 21 lines
+            'readlink': self._translate_readlink, # 26 lines
+            'realpath': self._translate_realpath, # 21 lines
+            'test': self._translate_test,         # 75 lines
+            'tr': self._translate_tr,             # 68 lines
+            'find': self._translate_find,         # 24 lines - FALLBACK (executor has _execute_find)
+
+            # ===== COMPLEX EMULATIONS - FALLBACK ONLY (> 100 righe) =====
+            # These are EXECUTOR_MANAGED - bypassed by translate(), used as fallback
+            # CommandExecutor has _execute_* methods for these as primary strategy
+            'wget': self._translate_wget,         # 16 lines - simple but in executor
+            'curl': self._translate_curl,         # 239 lines - FALLBACK
+            'sed': self._translate_sed,           # 233 lines - FALLBACK
+            'diff': self._translate_diff,         # 212 lines - FALLBACK
+            'jq': self._translate_jq,             # 212 lines - FALLBACK
+            'awk': self._translate_awk,           # 211 lines - FALLBACK
+            'split': self._translate_split,       # 196 lines - FALLBACK
+            'sort': self._translate_sort,         # 190 lines - FALLBACK
+            'uniq': self._translate_uniq,         # 161 lines - FALLBACK
+            'join': self._translate_join,         # 140 lines - FALLBACK
+            'hexdump': self._translate_hexdump,   # 131 lines - FALLBACK
+            'ln': self._translate_ln,             # 124 lines - FALLBACK
+            'grep': self._translate_grep,         # 124 lines - FALLBACK
+            'gzip': self._translate_gzip,         # 115 lines - FALLBACK
+            'gunzip': self._translate_gunzip,     # 92 lines - FALLBACK
+            'timeout': self._translate_timeout,   # 112 lines - FALLBACK
+            'tar': self._translate_tar,           # 110 lines - FALLBACK
+            'cut': self._translate_cut,           # 107 lines
+
+            # Complex - text/binary processing
+            'strings': self._translate_strings,   # 68 lines - FALLBACK
+            'column': self._translate_column,     # 95 lines - FALLBACK
+            'paste': self._translate_paste,       # 88 lines - FALLBACK
+            'comm': self._translate_comm,         # 88 lines - FALLBACK
+
+            # Complex - compression/archives
+            'zip': self._translate_zip,           # 69 lines - FALLBACK
+            'unzip': self._translate_unzip,       # 88 lines - FALLBACK
+
+            # Checksums/encoding - FALLBACK (executor has _execute_*)
+            'sha256sum': self._translate_sha256sum, # 9 lines - FALLBACK
+            'sha1sum': self._translate_sha1sum,     # 9 lines - FALLBACK
+            'md5sum': self._translate_md5sum,       # 9 lines - FALLBACK
+            'base64': self._translate_base64,       # 58 lines - FALLBACK
+
+            # Monitoring - FALLBACK
+            'watch': self._translate_watch,       # 58 lines - FALLBACK
         }
     
     def translate(self, unix_command: str):
