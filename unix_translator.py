@@ -4,7 +4,7 @@ import json
 import re
 import logging
 import threading
-import tiktoken
+# import tiktoken  # Not needed for testing
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple

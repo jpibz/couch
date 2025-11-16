@@ -9,7 +9,7 @@ import json
 import re
 import logging
 import threading
-import tiktoken
+# import tiktoken  # Not needed for testing
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
@@ -4635,17 +4635,19 @@ class BashToolExecutor(ToolExecutor):
     def _expand_braces(self, command: str) -> str:
         """
         Expand brace patterns: {1..10}, {a..z}, {a,b,c}
-        
+
         Supports:
         - Numeric ranges: {1..10}, {01..100}
         - Alpha ranges: {a..z}, {A..Z}
         - Lists: {file1,file2,file3}
         - Nested: {a,b{1,2}}
-        
+
         Returns command with braces expanded
         """
         import re
-        
+
+        self.logger.debug(f"[BRACE EXPAND] Input: {command}")
+
         def expand_single_brace(match):
             """Expand a single brace expression"""
             content = match.group(1)
@@ -4699,7 +4701,8 @@ class BashToolExecutor(ToolExecutor):
                 # No more expansions
                 break
             command = new_command
-        
+
+        self.logger.debug(f"[BRACE EXPAND] Output: {command}")
         return command
     
     def _process_heredocs(self, command: str) -> Tuple[str, List[Path]]:
@@ -4901,29 +4904,40 @@ class BashToolExecutor(ToolExecutor):
     def _process_command_substitution_recursive(self, command: str) -> str:
         """
         Process command substitution $(...) with RECURSIVE translation.
-        
+
         ARTISAN IMPLEMENTATION:
         - Parses nested $(...)
         - Recursively translates Unix commands inside substitution
         - Preserves PowerShell $(...) syntax for output
         - Handles multiple substitutions in single command
-        
+        - FIX #10: Does NOT process $(...)  inside single quotes
+
         Examples:
             $(grep pattern file.txt)
             → $(Select-String -Pattern "pattern" -Path "file.txt")
-            
+
             $(cat file | wc -l)
             → $(Get-Content file | Measure-Object -Line)
-            
+
             Nested: $(echo $(cat file))
             → $(Write-Host $(Get-Content file))
-        
+
+            'literal $(date)' → 'literal $(date)' (preserved)
+
         Returns:
             Command with all $(..  .) recursively translated
         """
         if '$(' not in command:
             return command
-        
+
+        def is_in_single_quotes(text: str, pos: int) -> bool:
+            """Check if position is inside single quotes"""
+            in_quotes = False
+            for i in range(pos):
+                if text[i] == "'" and (i == 0 or text[i-1] != '\\'):
+                    in_quotes = not in_quotes
+            return in_quotes
+
         def find_substitutions(text: str) -> List[Tuple[int, int, str]]:
             """
             Find all $(...) patterns with correct nesting.
@@ -4936,6 +4950,11 @@ class BashToolExecutor(ToolExecutor):
             
             while i < len(text):
                 if i < len(text) - 1 and text[i:i+2] == '$(':
+                    # FIX #10: Skip if inside single quotes
+                    if is_in_single_quotes(text, i):
+                        i += 2
+                        continue
+
                     # FIX #6: Check if it's arithmetic $(( instead of command substitution $(
                     if i < len(text) - 2 and text[i+2] == '(':
                         # This is $((arithmetic)), NOT command substitution
@@ -5241,6 +5260,31 @@ class BashToolExecutor(ToolExecutor):
 
         command = re.sub(case_pattern, expand_case, command)
 
+        # 6. Simple variable expansion: ${VAR} and $VAR
+        # This must be done LAST, after all other ${...} patterns
+
+        # 6a. ${VAR} - simple braced variable
+        simple_braced_pattern = r'\$\{(\w+)\}'
+
+        def expand_simple_braced(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            return value
+
+        command = re.sub(simple_braced_pattern, expand_simple_braced, command)
+
+        # 6b. $VAR - simple unbraced variable (but NOT $(...) or $(()
+        # Must not match $(...) command substitution or $((arithmetic))
+        # Pattern: $ followed by word characters, but not followed by ( or ((
+        simple_var_pattern = r'\$(\w+)(?!\()'
+
+        def expand_simple_var(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            return value
+
+        command = re.sub(simple_var_pattern, expand_simple_var, command)
+
         return command
     
     def _preprocess_test_commands(self, command: str) -> str:
@@ -5334,23 +5378,26 @@ class BashToolExecutor(ToolExecutor):
     def _process_command_grouping(self, command: str) -> str:
         """
         Process command grouping: { cmd1; cmd2; }
-        
+
         Group commands to run in current shell.
         Convert to simple command sequence.
+
+        FIX #9: Must NOT match brace expansions like {1..5} or {a,b,c}
         """
         import re
-        
-        # Pattern: { cmd1; cmd2; } but NOT ${var...}
+
+        # Pattern: { cmd1; cmd2; } but NOT ${var...} and NOT brace expansions
+        # Command groups contain semicolons or newlines
         # Use negative lookbehind: (?<!\$) = "not preceded by $"
-        # FIX #7: Prevent matching ${var#pattern}, ${var%pattern}, ${var/pattern/repl}, etc.
-        grouping_pattern = r'(?<!\$)\{\s*([^}]+)\s*\}'
-        
+        # FIX #9: Only match if content contains ; or \n (actual command groups)
+        grouping_pattern = r'(?<!\$)\{\s*([^}]*[;\n][^}]*)\s*\}'
+
         def expand_grouping(match):
             # Return inner commands
             return match.group(1)
-        
+
         command = re.sub(grouping_pattern, expand_grouping, command)
-        
+
         return command
     
     def _process_xargs(self, command: str) -> str:
@@ -5749,6 +5796,60 @@ class BashToolExecutor(ToolExecutor):
             self.logger.error(f"Unexpected error creating venv: {e}")
             raise RuntimeError(f"Virtual environment setup failed: {e}")
     
+    def _process_variable_assignments(self, command: str) -> str:
+        """
+        FIX #8: Process variable assignments in command chains.
+
+        Handles patterns like:
+        - file="test.tar.gz"; echo ${file%.*}
+        - var1=val1; var2=val2; echo $var1 $var2
+        - x=5; y=10; echo $((x + y))
+
+        Extracts variable assignments and adds them to os.environ
+        so they're available for subsequent ${var} expansions.
+
+        Returns:
+            Command with variable assignments processed
+        """
+        import re
+
+        # Pattern: var=value (at start of command or after ; or &&)
+        # Handles: var="value" or var='value' or var=value
+        # Must be at word boundary (after whitespace, ;, or &&)
+        assign_pattern = r'(?:^|;\s*|&&\s*)(\w+)=((?:"[^"]*"|\'[^\']*\'|[^\s;]+))'
+
+        matches = list(re.finditer(assign_pattern, command))
+
+        if not matches:
+            return command
+
+        # Extract assignments and set in environment
+        for match in matches:
+            var_name = match.group(1)
+            var_value = match.group(2)
+
+            # Remove quotes if present
+            if (var_value.startswith('"') and var_value.endswith('"')) or \
+               (var_value.startswith("'") and var_value.endswith("'")):
+                var_value = var_value[1:-1]
+
+            # Set in environment for subsequent expansions
+            os.environ[var_name] = var_value
+
+            self.logger.debug(f"[VAR ASSIGN] {var_name}={var_value}")
+
+        # Remove assignments from command (they're now in environment)
+        # Replace assignment with empty string (keep separator if present)
+        cleaned_command = re.sub(assign_pattern, '', command)
+
+        # Clean up extra semicolons/whitespace that may be left
+        cleaned_command = re.sub(r';\s*;', ';', cleaned_command)
+        cleaned_command = re.sub(r'^;\s*', '', cleaned_command)
+        cleaned_command = re.sub(r'\s*;\s*$', '', cleaned_command)
+        cleaned_command = cleaned_command.strip()
+
+        return cleaned_command
+
     def execute(self, tool_input: dict) -> str:
         """Execute bash command with FULL pattern emulation"""
         command = tool_input.get('command', '')
@@ -5767,7 +5868,11 @@ class BashToolExecutor(ToolExecutor):
         
         try:
             # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
-            
+
+            # STEP 0.-1: Extract and process variable assignments
+            # FIX #8: Handle variable assignment chains like: file="test"; echo ${file}
+            command = self._process_variable_assignments(command)
+
             # STEP 0.0: Expand aliases (ll, la, etc.)
             command = self._expand_aliases(command)
             

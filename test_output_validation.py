@@ -7,7 +7,7 @@ Not just "does it crash?" but "is the OUTPUT CORRECT?"
 Testing that translations produce CORRECT Windows commands.
 """
 
-from bash_tool_executor_REFACTORED import BashToolExecutor
+from bash_tool_executor import BashToolExecutor
 from pathlib import Path
 import os
 
@@ -16,6 +16,7 @@ os.environ['TESTFILE'] = '/path/to/file.txt'
 os.environ['TESTNUM'] = '42'
 
 executor = BashToolExecutor(working_dir='/home/user/couch')
+executor.testmode = True  # Enable test mode to see translations without executing
 
 print("=" * 80)
 print("OUTPUT VALIDATION TEST - Verify CORRECT translations")
