@@ -263,24 +263,89 @@ class CommandExecutor:
     
     # Pipeline strategies - Pattern matching for command chains
     # Format: regex pattern → strategy
+    #
+    # CRITICAL: User (Claude) uses EXTREME pipeline acrobatics
+    # Default for pipelines MUST be bash.exe for perfect emulation
     PIPELINE_STRATEGIES = {
-        # Complex chains → bash.exe required
+        # ===== BASH.EXE REQUIRED (Complex, no alternative) =====
+
+        # find combinations (complex logic, -exec, tests)
         r'find.*\|.*grep': 'bash_exe_required',
         r'find.*\|.*wc': 'bash_exe_required',
+        r'find.*\|.*xargs': 'bash_exe_required',
+        r'find.*\|.*awk': 'bash_exe_required',
+        r'find.*\|.*sed': 'bash_exe_required',
+        r'find.*\|.*cut': 'bash_exe_required',
+        r'find.*\|.*sort': 'bash_exe_required',
+
+        # xargs (process substitution, argument building)
+        r'xargs': 'bash_exe_required',
+
+        # awk in pipeline (field processing, BEGIN/END blocks)
         r'awk.*\|': 'bash_exe_required',
-        r'sed.*\|': 'bash_exe_required',
         r'\|.*awk': 'bash_exe_required',
+
+        # sed in pipeline (multi-line, hold space, complex patterns)
+        r'sed.*\|': 'bash_exe_required',
         r'\|.*sed': 'bash_exe_required',
-        
-        # Multi-stage text processing → bash.exe preferred
+
+        # grep with pipeline (regex complexity, -v, -o flags)
+        r'grep.*\|.*awk': 'bash_exe_required',
+        r'grep.*\|.*sed': 'bash_exe_required',
+        r'grep.*\|.*xargs': 'bash_exe_required',
+        r'grep.*\|.*cut': 'bash_exe_required',
+
+        # cut in pipeline (field extraction precision)
+        r'cut.*\|': 'bash_exe_required',
+        r'\|.*cut': 'bash_exe_required',
+
+        # tar/compression with pipeline
+        r'tar.*\|': 'bash_exe_required',
+        r'\|.*tar': 'bash_exe_required',
+        r'gzip.*\|': 'bash_exe_required',
+        r'\|.*gzip': 'bash_exe_required',
+
+        # diff with pipeline
+        r'diff.*\|': 'bash_exe_required',
+        r'\|.*diff': 'bash_exe_required',
+
+        # ===== BASH.EXE PREFERRED (Can emulate but bash better) =====
+
+        # Multi-stage text processing
         r'cat.*\|.*sort.*\|.*uniq': 'bash_exe_preferred',
-        r'grep.*\|.*sort': 'bash_exe_preferred',
+        r'grep.*\|.*sort.*\|.*uniq': 'bash_exe_preferred',
         r'sort.*\|.*uniq': 'bash_exe_preferred',
-        
-        # Simple chains → PowerShell OK
+        r'grep.*\|.*sort': 'bash_exe_preferred',
+        r'cat.*\|.*grep.*\|': 'bash_exe_preferred',
+
+        # head/tail with pipeline
+        r'head.*\|': 'bash_exe_preferred',
+        r'tail.*\|': 'bash_exe_preferred',
+        r'\|.*head': 'bash_exe_preferred',
+        r'\|.*tail': 'bash_exe_preferred',
+
+        # sort/uniq alone
+        r'sort.*\|': 'bash_exe_preferred',
+        r'\|.*sort': 'bash_exe_preferred',
+        r'uniq.*\|': 'bash_exe_preferred',
+        r'\|.*uniq': 'bash_exe_preferred',
+
+        # wc with complex input
+        r'grep.*\|.*wc': 'bash_exe_preferred',
+        r'find.*\|.*wc': 'bash_exe_preferred',
+
+        # ===== POWERSHELL OK (Simple, well emulated) =====
+
+        # Simple text display
         r'echo.*\|.*base64': 'powershell_ok',
-        r'ls.*\|.*wc': 'powershell_ok',
-        r'cat.*\|.*grep': 'powershell_ok',
+        r'cat.*\|.*base64': 'powershell_ok',
+
+        # Simple listing
+        r'ls\s+[^|]*\|.*wc': 'powershell_ok',  # ls | wc (simple count)
+        r'dir\s+[^|]*\|.*wc': 'powershell_ok',
+
+        # Simple grep (single file, simple pattern)
+        r'cat\s+\S+\s*\|\s*grep\s+[^|]+$': 'powershell_ok',  # cat file | grep pattern (end)
     }
     
     def __init__(self, path_translator=None, command_translator=None,
@@ -334,39 +399,94 @@ class CommandExecutor:
         
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
-        
+
+        # ================================================================
+        # COMMAND CHAINS - && || ;
+        # ================================================================
+        # CRITICAL: Chains have different semantics in bash vs PowerShell
+        # - Exit code propagation differs
+        # - Short-circuit evaluation behavior differs
+        # - Error handling differs
+        # For PERFECT emulation, chains MUST use bash.exe
+
+        if has_chain:
+            if self.git_bash_exe:
+                self.logger.debug(f"Command chain detected (&&, ||, ;) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # No bash.exe for chain - CRITICAL
+                self.logger.error(f"Command chain requires bash.exe: {command[:100]}")
+                self.logger.error("bash.exe not available - chain execution may behave incorrectly")
+                # Continue but results may be wrong
+
+        # ================================================================
+        # PIPELINES - |
+        # ================================================================
+
         if has_pipeline:
             # Check pipeline strategies
+            matched_strategy = None
             for pattern, strategy in self.PIPELINE_STRATEGIES.items():
                 if re.search(pattern, command):
                     self.logger.debug(f"Pipeline pattern matched: {pattern} → {strategy}")
-                    
-                    if strategy == 'bash_exe_required' and self.git_bash_exe:
-                        # Must use bash.exe
-                        bash_cmd = self._execute_with_gitbash(command)
-                        if bash_cmd:
-                            return bash_cmd, False
-                    
-                    elif strategy == 'bash_exe_preferred' and self.git_bash_exe:
-                        # Prefer bash.exe but can fallback
-                        bash_cmd = self._execute_with_gitbash(command)
-                        if bash_cmd:
-                            return bash_cmd, False
+                    matched_strategy = strategy
+
+                    if strategy == 'bash_exe_required':
+                        if self.git_bash_exe:
+                            # Must use bash.exe
+                            bash_cmd = self._execute_with_gitbash(command)
+                            if bash_cmd:
+                                return bash_cmd, False
+                        else:
+                            # CRITICAL: bash.exe REQUIRED but not available
+                            self.logger.error(f"Pipeline requires bash.exe but not available: {command[:100]}")
+                            # Try fallback anyway but warn
+                            self.logger.warning("Attempting PowerShell emulation - may produce incorrect results")
+                            break  # Continue to emulation with warning
+
+                    elif strategy == 'bash_exe_preferred':
+                        if self.git_bash_exe:
+                            # Prefer bash.exe but can fallback
+                            bash_cmd = self._execute_with_gitbash(command)
+                            if bash_cmd:
+                                return bash_cmd, False
                         # If bash not available, continue to emulation
-                    
+                        self.logger.debug("bash.exe preferred but not available, trying emulation")
+                        break
+
                     elif strategy == 'powershell_ok':
                         # Can handle with PowerShell - continue to normal flow
                         break
-            
-            # If no specific pattern matched and has complex commands, use bash
-            if self.git_bash_exe:
+
+                    # Strategy handled, exit pattern loop
+                    break
+
+            # DEFAULT SAFETY NET: Pipeline detected but no pattern matched
+            # OR pattern matched but bash.exe not available for required/preferred
+            if matched_strategy is None or (matched_strategy in ['bash_exe_required', 'bash_exe_preferred'] and not self.git_bash_exe):
                 # Check if pipeline contains any BASH_EXE_PREFERRED commands
-                for bash_cmd in self.BASH_EXE_PREFERRED:
-                    if bash_cmd in command:
-                        self.logger.debug(f"Pipeline contains {bash_cmd} → using bash.exe")
+                contains_complex = False
+                for complex_cmd in self.BASH_EXE_PREFERRED:
+                    if complex_cmd in command:
+                        contains_complex = True
+                        break
+
+                if contains_complex or matched_strategy is None:
+                    # Complex pipeline or unknown pattern
+                    if self.git_bash_exe:
+                        self.logger.debug("Pipeline with complex commands → using bash.exe (safety net)")
                         bash_cmd = self._execute_with_gitbash(command)
                         if bash_cmd:
                             return bash_cmd, False
+                    else:
+                        # NO bash.exe for complex pipeline - CRITICAL situation
+                        # User requirement: PERFECT emulation at ANY cost
+                        # If we can't guarantee perfect, we should fail honestly
+                        self.logger.error(f"Complex pipeline requires bash.exe: {command[:100]}")
+                        self.logger.error("bash.exe not available - emulation may fail or produce wrong results")
+                        # Continue to try emulation but user is warned
         
         # ================================================================
         # TIER 1: Pattern Cache - Fast path
