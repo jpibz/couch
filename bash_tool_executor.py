@@ -239,6 +239,10 @@ class CommandExecutor:
         'diff', 'tar',                  # Format-sensitive
         'sort', 'uniq', 'split',        # Edge cases
         'join', 'comm', 'paste',        # Perfect behavior
+        'xargs',                        # Argument building (CRITICAL for pipelines)
+        'cut',                          # Field extraction (subtle behaviors)
+        'tr',                           # Character translation (locale-dependent)
+        'tee',                          # Output splitting (buffering matters)
     }
     
     # Native Windows binaries available (Git for Windows)
