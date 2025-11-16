@@ -5719,8 +5719,9 @@ class BashToolExecutor(ToolExecutor):
             self.virtual_env = self._setup_virtual_env(virtual_env)
 
         # Initialize CommandExecutor with all dependencies now available
-        # Get claude home directory (needed for tilde expansion)
-        # NOTE: Both BashToolExecutor and CommandExecutor need this for _expand_variables
+        # Get claude home directory (needed for tilde expansion in _expand_variables)
+        # NOTE: Only BashToolExecutor has _expand_variables, but pass to CommandExecutor
+        #       in case it needs config info in future
         if TESTMODE:
             # TEST MODE: Use fake home
             self.claude_home_unix = "/home/testuser"
