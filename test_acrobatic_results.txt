@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/home/user/couch/test_real_acrobatic_commands.py", line 12, in <module>
+    from bash_tool_executor_REFACTORED import BashToolExecutor
+  File "/home/user/couch/bash_tool_executor_REFACTORED.py", line 12, in <module>
+    import tiktoken
+ModuleNotFoundError: No module named 'tiktoken'

@@ -4442,16 +4442,16 @@ class BashToolExecutor(ToolExecutor):
        - Credential manager: "None" ✓
        
        Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\Program Files\Git\usr\bin (automatic)
-       
+       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
+
        Verify:
          diff --version
          awk --version
-    
+
     2. JQ (JSON processor)
        Download: https://github.com/jqlang/jq/releases/latest
        Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
+       Install: Copy to C:\\Windows\\System32 (already in PATH)
        
        Verify:
          jq --version
