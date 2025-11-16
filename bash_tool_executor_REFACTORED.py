@@ -6154,11 +6154,12 @@ EXPAND_DELIMITER'''
             return unix_temp
         
         # Replace all input substitutions
+        matches = list(re.finditer(input_pattern, command))
         command = re.sub(input_pattern, replace_input_substitution, command)
-        
+
         # Replace all output substitutions
         command = re.sub(output_pattern, replace_output_substitution, command)
-        
+
         return command, temp_files
     
     def _process_command_substitution_recursive(self, command: str) -> str:
@@ -6525,9 +6526,11 @@ EXPAND_DELIMITER'''
         """
         import re
 
-        # Pattern: (command) but NOT $(command)
+        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command)
         # Use negative lookbehind: (?<!\$) = "not preceded by $"
-        subshell_pattern = r'(?<!\$)\(([^)]+)\)'
+        #                          (?<!<) = "not preceded by <"
+        #                          (?<!>) = "not preceded by >"
+        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)\(([^)]+)\)'
 
         def remove_subshell(match):
             # Just return inner command
