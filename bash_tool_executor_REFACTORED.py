@@ -660,24 +660,43 @@ class CommandExecutor:
     def _intelligent_fallback(self, command: str, parts: List[str]) -> Tuple[str, bool]:
         """
         Fallback for unknown command patterns.
-        
+
         Tries multiple strategies in order.
+
+        FIX #14: Recognize PowerShell cmdlets and powershell command itself
         """
         cmd_name = parts[0]
-        
+
+        # FIX #14: Detect PowerShell cmdlets and commands
+        POWERSHELL_CMDLETS = {
+            'Get-Content', 'Set-Content', 'Get-ChildItem', 'Get-Item',
+            'Select-String', 'Select-Object', 'ForEach-Object', 'Where-Object',
+            'Measure-Object', 'Sort-Object', 'Get-Unique', 'Group-Object',
+            'Compare-Object', 'Test-Path', 'New-Item', 'Remove-Item',
+            'Copy-Item', 'Move-Item', 'Rename-Item',
+            'Write-Host', 'Write-Output', 'Read-Host',
+            'powershell', 'pwsh'  # PowerShell executables themselves
+        }
+
+        # Check if this is a PowerShell cmdlet
+        if cmd_name in POWERSHELL_CMDLETS:
+            self.logger.debug(f"PowerShell cmdlet detected: {cmd_name}")
+            # Return command as-is but flag for PowerShell execution
+            return command, True
+
         # Try Git Bash as fallback
         if self.git_bash_exe:
             bash_cmd = self._execute_with_gitbash(command)
             if bash_cmd:
                 self.logger.debug(f"Fallback: Git Bash for {cmd_name}")
                 return bash_cmd, False
-        
+
         # Delegate to CommandTranslator for simple 1:1 mappings
         if self.command_translator:
             result = self._delegate_to_translator(command, parts)
             if result:
                 return result
-        
+
         # Last resort - pass through as-is
         self.logger.warning(f"Unknown command: {cmd_name} - passing through")
         return command, False
@@ -938,8 +957,43 @@ class CommandExecutor:
         
         # Build Windows command
         win_path = path  # Already translated
-        
-        # Build PowerShell find implementation
+
+        # FIX #18: For simple cases, use direct Get-ChildItem | Where-Object (more readable)
+        # Complex cases use full script
+        is_simple = (
+            len(tests) <= 2 and  # Only name and/or type tests
+            not actions and  # No actions (no -exec, -delete)
+            max_depth is None and
+            min_depth is None and
+            all(test[0] in ['name', 'type'] for test in tests)
+        )
+
+        if is_simple:
+            # Simple case: Get-ChildItem | Where-Object
+            get_cmd = f'Get-ChildItem -Path "{win_path}" -Recurse -ErrorAction SilentlyContinue'
+
+            where_conditions = []
+            for test_type, test_arg, test_flag in tests:
+                if test_type == 'name':
+                    if test_flag:  # case-insensitive
+                        where_conditions.append(f'$_.Name -like "{test_arg}"')
+                    else:
+                        where_conditions.append(f'$_.Name -clike "{test_arg}"')
+                elif test_type == 'type':
+                    if test_arg == 'f':
+                        where_conditions.append('-not $_.PSIsContainer')
+                    elif test_arg == 'd':
+                        where_conditions.append('$_.PSIsContainer')
+
+            if where_conditions:
+                where_clause = ' -and '.join(where_conditions)
+                ps_cmd = f'{get_cmd} | Where-Object {{ {where_clause} }} | ForEach-Object {{ $_.FullName }}'
+            else:
+                ps_cmd = f'{get_cmd} | ForEach-Object {{ $_.FullName }}'
+
+            return ps_cmd, True
+
+        # Complex case: Build full PowerShell script
         ps_script = f'''
             $path = "{win_path}"
             $maxDepth = {max_depth if max_depth else 999}
