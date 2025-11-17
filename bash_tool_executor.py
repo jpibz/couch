@@ -5674,7 +5674,7 @@ class BashToolExecutor(ToolExecutor):
         super().__init__('bash_tool', enabled)
 
         # TESTMODE flag for testing purposes
-        TESTMODE = False  # Can be set to True for testing
+        TESTMODE = True  # Set to True for testing
         self.TESTMODE = TESTMODE
 
         self.working_dir = Path(working_dir)
