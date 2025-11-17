@@ -9,12 +9,12 @@ import json
 import re
 import logging
 import threading
-# import tiktoken  # Not needed for testing
+import tiktoken
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, CommandTranslator
+from unix_translator_REFACTORED import PathTranslator, CommandTranslator
 
 
 class SandboxValidator:
@@ -351,26 +351,31 @@ class CommandExecutor:
         # Simple grep (single file, simple pattern)
         r'cat\s+\S+\s*\|\s*grep\s+[^|]+$': 'powershell_ok',  # cat file | grep pattern (end)
     }
-    
-    def __init__(self, path_translator=None, command_translator=None,
-                 git_bash_exe=None, logger=None):
+
+    def __init__(self, command_translator=None,
+                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None):
         """
         Initialize CommandExecutor.
-        
+
+        ARCHITECTURE NOTE:
+        CommandExecutor does NOT need PathTranslator!
+        Path translation happens in BashToolExecutor.execute() BEFORE
+        commands reach this layer.
+
         Args:
-            path_translator: PathTranslator instance (optional)
             command_translator: CommandTranslator instance (for delegation)
             git_bash_exe: Path to bash.exe (optional)
+            claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
         """
-        self.path_translator = path_translator
         self.command_translator = command_translator
         self.git_bash_exe = git_bash_exe
+        self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
-        
+
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
-        
+
         self.logger.info(f"CommandExecutor initialized")
         self.logger.info(f"Git Bash: {'available' if git_bash_exe else 'not available'}")
         self.logger.info(f"Native binaries: {len(self.available_bins)} detected")
@@ -403,6 +408,62 @@ class CommandExecutor:
         
         has_pipeline = '|' in command
         has_chain = '&&' in command or '||' in command or ';' in command
+        has_process_subst = '<(' in command or '>(' in command
+        has_stderr_redir = '2>' in command or '|&' in command or re.search(r'2>&1', command)
+
+        # ================================================================
+        # STDERR REDIRECTION - 2>, 2>&1, |&
+        # ================================================================
+        # CRITICAL: Stderr redirection operators are SHELL syntax, not command args
+        # - 2>file        redirect stderr to file
+        # - 2>&1          merge stderr to stdout
+        # - |&            pipe both stdout and stderr (bash shorthand for 2>&1 |)
+        # - 2>/dev/null   suppress error messages
+        #
+        # PowerShell emulation of these is UNRELIABLE:
+        # - _execute_grep(), _execute_awk(), etc. DON'T parse redirection
+        # - Redirection operators are treated as regular arguments
+        # - Result: syntax errors or silent failures
+        #
+        # ARTIGIANO: Don't emulate redirection. Pass to bash.exe.
+
+        if has_stderr_redir:
+            if self.git_bash_exe:
+                self.logger.debug(f"STDERR redirection detected (2>, 2>&1, |&) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # No bash.exe for stderr redirection
+                # Attempt PowerShell but warn - semantics may be wrong
+                self.logger.warning(f"STDERR redirection in command but bash.exe not available: {command[:100]}")
+                self.logger.warning("PowerShell stderr semantics differ from bash - results may be incorrect")
+                # Continue to emulation attempt
+
+        # ================================================================
+        # PROCESS SUBSTITUTION - <(...) >(...)
+        # ================================================================
+        # CRITICAL: Process substitution creates named pipes/file descriptors
+        # - <(cmd) runs cmd, creates FD with output
+        # - >(cmd) creates FD, runs cmd on data written to it
+        # - Sub-commands can be COMPLEX (pipelines, chains)
+        # - NO PowerShell equivalent
+        # - bash.exe handles natively and perfectly
+        #
+        # ARTIGIANO: Don't emulate. Pass to bash.exe.
+
+        if has_process_subst:
+            if self.git_bash_exe:
+                self.logger.debug(f"Process substitution detected <(...) or >(...) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(command)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                # NO bash.exe for process substitution - CRITICAL FAILURE
+                self.logger.error(f"Process substitution REQUIRES bash.exe: {command[:100]}")
+                self.logger.error("bash.exe not available - command will FAIL")
+                # Cannot emulate process substitution reliably
+                return f'echo "ERROR: Process substitution requires bash.exe (not available)"', True
 
         # ================================================================
         # COMMAND CHAINS - && || ;
@@ -706,7 +767,14 @@ class CommandExecutor:
             'watch': self._execute_watch,
             'column': self._execute_column,
             'jq': self._execute_jq,
-            
+            'head': self._execute_head,
+            'tail': self._execute_tail,
+            'cat': self._execute_cat,
+            'wc': self._execute_wc,
+            'test': self._execute_test,
+            'paste': self._execute_paste,
+            'comm': self._execute_comm,
+
             # Network
             'wget': self._execute_wget,
         }
@@ -720,9 +788,20 @@ class CommandExecutor:
     
     def _execute_find(self, cmd: str, parts: List[str]) -> Tuple[str, bool]:
         """
-        Execute find with COMPLETE test support - FULL EMULATION.
-        
-        Tests supported:
+        Execute find with COMPLETE test support - STRATEGIC DISPATCH.
+
+        ARTIGIANO STRATEGY:
+        - Simple find → PowerShell emulation
+        - Complex -exec → bash.exe (perfect emulation)
+        - Complex tests → bash.exe
+
+        Complexity triggers (bash.exe required):
+        - -exec with sh/bash invocation
+        - -exec with pipes/redirects
+        - -exec with complex quoting
+        - Advanced tests (-printf, -execdir, etc.)
+
+        Tests supported (PowerShell emulation):
         - -name PATTERN: filename pattern (wildcards)
         - -iname PATTERN: case-insensitive name
         - -type f|d|l: file type (file, directory, link)
@@ -733,16 +812,70 @@ class CommandExecutor:
         - -newer FILE: modified more recently than FILE
         - -maxdepth N: descend at most N levels
         - -mindepth N: descend at least N levels
-        - -exec CMD {} \;: execute command on each file
+        - -exec CMD {} \;: execute command (simple only)
         - -delete: delete matched files
         - -print: print matched files (default)
         - -print0: print with null separator
-        
+
         Examples:
-          find . -name "*.py" -mtime -7
-          find /tmp -type f -size +100M -delete
-          find . -name "*.log" -mtime +30 -exec rm {} \;
+          find . -name "*.py" -mtime -7                           # PowerShell OK
+          find /tmp -type f -size +100M -delete                   # PowerShell OK
+          find . -name "*.log" -mtime +30 -exec rm {} \;          # PowerShell OK
+          find . -exec sh -c 'echo "$1"' _ {} \;                  # bash.exe REQUIRED
+          find . -name "*.txt" -exec grep pattern {} \; | wc -l   # bash.exe REQUIRED
         """
+
+        # ================================================================
+        # ARTIGIANO: Complexity detection BEFORE parsing
+        # ================================================================
+
+        def is_complex_exec(exec_cmd):
+            """Detect if -exec is too complex for PowerShell"""
+            # sh/bash invocation
+            if 'sh -c' in exec_cmd or 'bash -c' in exec_cmd:
+                return True
+            # Pipe/redirect inside -exec command
+            if any(op in exec_cmd for op in ['|', '>', '<', '2>', '&&', '||']):
+                return True
+            # Complex quoting (nested quotes)
+            single_quotes = exec_cmd.count("'")
+            double_quotes = exec_cmd.count('"')
+            if single_quotes > 2 or double_quotes > 2:
+                return True
+            return False
+
+        # Check for complex -exec in command
+        if '-exec' in cmd:
+            # Extract -exec portion
+            exec_start = cmd.find('-exec')
+            exec_portion = cmd[exec_start:]
+            if is_complex_exec(exec_portion):
+                # Complex -exec → bash.exe REQUIRED
+                if self.git_bash_exe:
+                    self.logger.debug("find with complex -exec → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.error("Complex find -exec requires bash.exe (not available)")
+                    return 'echo "ERROR: Complex find -exec requires bash.exe"', True
+
+        # Advanced find features not supported in PowerShell emulation
+        unsupported_flags = ['-printf', '-execdir', '-ok', '-okdir', '-prune', '-quit',
+                            '-fprint', '-fprint0', '-fprintf', '-ls', '-fls']
+        for flag in unsupported_flags:
+            if flag in cmd:
+                if self.git_bash_exe:
+                    self.logger.debug(f"find with {flag} → using bash.exe")
+                    bash_cmd = self._execute_with_gitbash(cmd)
+                    if bash_cmd:
+                        return bash_cmd, False
+                else:
+                    self.logger.warning(f"find flag {flag} not supported in emulation")
+
+        # ================================================================
+        # PowerShell emulation for SIMPLE find
+        # ================================================================
         # Parse find arguments
         path = '.'
         tests = []
@@ -865,16 +998,16 @@ class CommandExecutor:
             $path = "{win_path}"
             $maxDepth = {max_depth if max_depth else 999}
             $minDepth = {min_depth if min_depth else 0}
-
+            
             Get-ChildItem -Path $path -Recurse -ErrorAction SilentlyContinue | ForEach-Object {{
                 $item = $_
                 $depth = ($item.FullName.Substring($path.Length) -split '\\\\|/').Length - 1
-
+                
                 # Depth filtering
                 if ($depth -gt $maxDepth -or $depth -lt $minDepth) {{
                     return
                 }}
-
+                
                 $match = $true
         '''
         
@@ -1049,897 +1182,6 @@ class CommandExecutor:
         
         return f'powershell -Command "{ps_script}"', True
     
-    def _execute_head(self, cmd: str, parts) -> Tuple[str, bool]:
-        """
-        Execute head - output first N lines of file(s).
-
-        ARTIGIANO IMPLEMENTATION:
-        - PowerShell Get-Content with -TotalCount (native, fast)
-        - Supports pipeline input via stdin
-        - Multiple files
-
-        Flags:
-        - -n N: number of lines (default 10)
-        - -N: short form for -n N
-        - -c N: first N bytes (not commonly used, skip for now)
-
-        Usage:
-          head file.txt           → first 10 lines
-          head -n 20 file.txt     → first 20 lines
-          head -5 file.txt        → first 5 lines
-          cat file | head -10     → from pipeline
-        """
-        line_count = 10  # Default
-        files = []
-
-        i = 1
-        while i < len(parts):
-            if parts[i] == '-n' and i + 1 < len(parts):
-                line_count = int(parts[i + 1])
-                i += 2
-            elif parts[i].startswith('-') and parts[i][1:].isdigit():
-                # Short form: -20
-                line_count = int(parts[i][1:])
-                i += 1
-            elif parts[i] == '-c':
-                # Byte mode - skip for now, not commonly used
-                i += 2
-            elif not parts[i].startswith('-'):
-                files.append(parts[i])
-                i += 1
-            else:
-                i += 1
-
-        if not files:
-            # Reading from stdin (pipeline)
-            # PowerShell: Select-Object -First N
-            return f'Select-Object -First {line_count}', True
-
-        # ARTIGIANO: Glob Pattern Expansion (same as cat)
-        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
-
-        if has_glob:
-            files_patterns = ','.join(f'"{f}"' for f in files)
-            ps_script = f'''
-                # Expand glob patterns
-                $expandedFiles = @()
-                foreach ($pattern in @({files_patterns})) {{
-                    if ($pattern -match '[*?\\[\\]]') {{
-                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
-                        if ($matched) {{
-                            $expandedFiles += $matched.FullName
-                        }}
-                    }} else {{
-                        if (Test-Path $pattern) {{
-                            $expandedFiles += $pattern
-                        }} else {{
-                            Write-Error "head: $pattern: No such file or directory"
-                            exit 1
-                        }}
-                    }}
-                }}
-
-                if ($expandedFiles.Count -eq 0) {{
-                    Write-Error "head: No files matched"
-                    exit 1
-                }}
-
-                # Process files
-                $first = $true
-                foreach ($file in $expandedFiles) {{
-                    if ($expandedFiles.Count -gt 1) {{
-                        if (-not $first) {{ Write-Output "" }}
-                        Write-Output "==> $file <=="
-                    }}
-                    Get-Content $file -TotalCount {line_count}
-                    $first = $false
-                }}
-            '''
-        else:
-            # No globs - direct access
-            if len(files) == 1:
-                # Single file
-                ps_script = f'''
-                    if (Test-Path "{files[0]}") {{
-                        Get-Content "{files[0]}" -TotalCount {line_count}
-                    }} else {{
-                        Write-Error "head: {files[0]}: No such file or directory"
-                        exit 1
-                    }}
-                '''
-            else:
-                # Multiple files - show filename headers like Unix head
-                ps_script = '''
-                    $files = @({})
-                    $first = $true
-                    foreach ($file in $files) {{
-                        if (Test-Path $file) {{
-                            if (-not $first) {{ Write-Output "" }}
-                            Write-Output "==> $file <=="
-                            Get-Content $file -TotalCount {}
-                            $first = $false
-                        }} else {{
-                            Write-Error "head: $file: No such file or directory"
-                        }}
-                    }}
-                '''.format(','.join(f'"{f}"' for f in files), line_count)
-
-        return f'powershell -Command "{ps_script}"', True
-
-
-
-    def _execute_tail(self, cmd: str, parts) -> Tuple[str, bool]:
-        """
-        Execute tail - output last N lines of file(s).
-
-        ARTIGIANO IMPLEMENTATION:
-        - PowerShell Get-Content with -Tail (native, fast)
-        - Supports pipeline input
-        - Follow mode (-f) with Get-Content -Wait
-
-        Flags:
-        - -n N: number of lines (default 10)
-        - -N: short form for -n N
-        - -f: follow mode (watch file for changes)
-        - -c N: last N bytes (not commonly used, skip for now)
-
-        Usage:
-          tail file.txt           → last 10 lines
-          tail -n 20 file.txt     → last 20 lines
-          tail -5 file.txt        → last 5 lines
-          tail -f log.txt         → follow file
-          cat file | tail -10     → from pipeline
-        """
-        line_count = 10  # Default
-        follow = False
-        files = []
-
-        i = 1
-        while i < len(parts):
-            if parts[i] == '-n' and i + 1 < len(parts):
-                line_count = int(parts[i + 1])
-                i += 2
-            elif parts[i].startswith('-') and parts[i][1:].isdigit():
-                # Short form: -20
-                line_count = int(parts[i][1:])
-                i += 1
-            elif parts[i] == '-f':
-                follow = True
-                i += 1
-            elif parts[i] == '-c':
-                # Byte mode - skip for now
-                i += 2
-            elif not parts[i].startswith('-'):
-                files.append(parts[i])
-                i += 1
-            else:
-                i += 1
-
-        if not files:
-            # Reading from stdin (pipeline)
-            # PowerShell: Select-Object -Last N
-            return f'Select-Object -Last {line_count}', True
-
-        # ARTIGIANO: Glob Pattern Expansion (same as cat/head)
-        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
-
-        if has_glob:
-            # Glob expansion needed
-            if follow:
-                # Follow mode with globs - use bash.exe (complex)
-                if self.git_bash_exe:
-                    return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
-                else:
-                    return 'echo "tail -f with globs requires bash.exe"', True
-
-            files_patterns = ','.join(f'"{f}"' for f in files)
-            ps_script = f'''
-                # Expand glob patterns
-                $expandedFiles = @()
-                foreach ($pattern in @({files_patterns})) {{
-                    if ($pattern -match '[*?\\[\\]]') {{
-                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
-                        if ($matched) {{
-                            $expandedFiles += $matched.FullName
-                        }}
-                    }} else {{
-                        if (Test-Path $pattern) {{
-                            $expandedFiles += $pattern
-                        }} else {{
-                            Write-Error "tail: $pattern: No such file or directory"
-                            exit 1
-                        }}
-                    }}
-                }}
-
-                if ($expandedFiles.Count -eq 0) {{
-                    Write-Error "tail: No files matched"
-                    exit 1
-                }}
-
-                # Process files
-                $first = $true
-                foreach ($file in $expandedFiles) {{
-                    if ($expandedFiles.Count -gt 1) {{
-                        if (-not $first) {{ Write-Output "" }}
-                        Write-Output "==> $file <=="
-                    }}
-                    Get-Content $file -Tail {line_count}
-                    $first = $false
-                }}
-            '''
-        else:
-            # No globs - direct access
-            if len(files) == 1:
-                # Single file
-                file = files[0]
-                if follow:
-                    # Follow mode - continuously monitor file
-                    ps_script = f'''
-                        if (Test-Path "{file}") {{
-                            Get-Content "{file}" -Tail {line_count} -Wait
-                        }} else {{
-                            Write-Error "tail: {file}: No such file or directory"
-                            exit 1
-                        }}
-                    '''
-                else:
-                    # Normal mode - just last N lines
-                    ps_script = f'''
-                        if (Test-Path "{file}") {{
-                            Get-Content "{file}" -Tail {line_count}
-                        }} else {{
-                            Write-Error "tail: {file}: No such file or directory"
-                            exit 1
-                        }}
-                    '''
-            else:
-                # Multiple files - show filename headers
-                if follow:
-                    # Follow mode with multiple files - complex, use bash.exe if available
-                    if self.git_bash_exe:
-                        return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
-                    else:
-                        return 'echo "tail -f with multiple files requires bash.exe"', True
-
-                # Normal mode with multiple files
-                ps_script = '''
-                    $files = @({})
-                    $first = $true
-                    foreach ($file in $files) {{
-                        if (Test-Path $file) {{
-                            if (-not $first) {{ Write-Output "" }}
-                            Write-Output "==> $file <=="
-                            Get-Content $file -Tail {}
-                            $first = $false
-                        }} else {{
-                            Write-Error "tail: $file: No such file or directory"
-                        }}
-                    }}
-                '''.format(','.join(f'"{f}"' for f in files), line_count)
-
-        return f'powershell -Command "{ps_script}"', True
-
-
-
-    def _execute_cat(self, cmd: str, parts) -> Tuple[str, bool]:
-        """
-        Execute cat - concatenate and display files.
-
-        ARTIGIANO IMPLEMENTATION:
-        - PowerShell Get-Content (native, fast)
-        - Multiple files concatenation
-        - Line numbering with -n
-        - Stdin support (no files = read from pipeline)
-
-        Flags:
-        - -n: number all output lines
-        - -b: number non-blank lines (simplified: same as -n for now)
-
-        Usage:
-          cat file.txt               → display file
-          cat file1 file2            → concatenate files
-          cat -n file.txt            → with line numbers
-          echo "text" | cat          → from stdin
-          cat < input.txt            → from redirect
-        """
-        number_lines = '-n' in parts or '-b' in parts
-        files = []
-
-        i = 1
-        while i < len(parts):
-            if parts[i] in ['-n', '-b']:
-                number_lines = True
-                i += 1
-            elif not parts[i].startswith('-'):
-                files.append(parts[i])
-                i += 1
-            else:
-                i += 1
-
-        if not files:
-            # Reading from stdin (pipeline or redirect)
-            if number_lines:
-                # PowerShell: enumerate lines with numbers
-                ps_cmd = '''
-                    $lineNum = 1
-                    $input | ForEach-Object {
-                        Write-Output ("{0,6} {1}" -f $lineNum, $_)
-                        $lineNum++
-                    }
-                '''
-                return f'powershell -Command "{ps_cmd}"', True
-            else:
-                # Just pass through stdin
-                # In PowerShell pipeline, this is implicit
-                return '$input', True
-
-        # ================================================================
-        # ARTIGIANO: Glob Pattern Expansion
-        # ================================================================
-        # CRITICAL: PowerShell scripts must expand globs BEFORE using files
-        # If we pass "*.txt" directly to Get-Content, it's LITERAL, not expanded!
-        #
-        # Detect glob patterns: *, ?, [ ]
-        # Use Get-ChildItem to expand, then process expanded files
-
-        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
-
-        if has_glob:
-            # Build glob-aware PowerShell script
-            files_patterns = ','.join(f'"{f}"' for f in files)
-
-            if number_lines:
-                ps_script = f'''
-                    # Expand glob patterns
-                    $expandedFiles = @()
-                    foreach ($pattern in @({files_patterns})) {{
-                        if ($pattern -match '[*?\\[\\]]') {{
-                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
-                            if ($matched) {{
-                                $expandedFiles += $matched.FullName
-                            }}
-                        }} else {{
-                            if (Test-Path $pattern) {{
-                                $expandedFiles += $pattern
-                            }} else {{
-                                Write-Error "cat: $pattern: No such file or directory"
-                                exit 1
-                            }}
-                        }}
-                    }}
-
-                    if ($expandedFiles.Count -eq 0) {{
-                        Write-Error "cat: No files matched"
-                        exit 1
-                    }}
-
-                    # Process files with line numbers
-                    $lineNum = 1
-                    foreach ($file in $expandedFiles) {{
-                        Get-Content $file | ForEach-Object {{
-                            Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
-                            $lineNum++
-                        }}
-                    }}
-                '''
-            else:
-                ps_script = f'''
-                    # Expand glob patterns
-                    $expandedFiles = @()
-                    foreach ($pattern in @({files_patterns})) {{
-                        if ($pattern -match '[*?\\[\\]]') {{
-                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
-                            if ($matched) {{
-                                $expandedFiles += $matched.FullName
-                            }}
-                        }} else {{
-                            if (Test-Path $pattern) {{
-                                $expandedFiles += $pattern
-                            }} else {{
-                                Write-Error "cat: $pattern: No such file or directory"
-                                exit 1
-                            }}
-                        }}
-                    }}
-
-                    if ($expandedFiles.Count -eq 0) {{
-                        Write-Error "cat: No files matched"
-                        exit 1
-                    }}
-
-                    # Concatenate files
-                    foreach ($file in $expandedFiles) {{
-                        Get-Content $file
-                    }}
-                '''
-        else:
-            # No globs - direct file access (original logic)
-            # Files specified
-            if len(files) == 1:
-                # Single file
-                file = files[0]
-                if number_lines:
-                    ps_script = f'''
-                        if (Test-Path "{file}") {{
-                            $lineNum = 1
-                            Get-Content "{file}" | ForEach-Object {{
-                                Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
-                                $lineNum++
-                            }}
-                        }} else {{
-                            Write-Error "cat: {file}: No such file or directory"
-                            exit 1
-                        }}
-                    '''
-                else:
-                    ps_script = f'''
-                        if (Test-Path "{file}") {{
-                            Get-Content "{file}"
-                        }} else {{
-                            Write-Error "cat: {file}: No such file or directory"
-                            exit 1
-                        }}
-                    '''
-            else:
-                # Multiple files - concatenate
-                if number_lines:
-                    ps_script = '''
-                        $files = @({})
-                        $lineNum = 1
-                        foreach ($file in $files) {{
-                            if (Test-Path $file) {{
-                                Get-Content $file | ForEach-Object {{
-                                    Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
-                                    $lineNum++
-                                }}
-                            }} else {{
-                                Write-Error "cat: $file: No such file or directory"
-                                exit 1
-                            }}
-                        }}
-                    '''.format(','.join(f'"{f}"' for f in files))
-                else:
-                    ps_script = '''
-                        $files = @({})
-                        foreach ($file in $files) {{
-                            if (Test-Path $file) {{
-                                Get-Content $file
-                            }} else {{
-                                Write-Error "cat: $file: No such file or directory"
-                                exit 1
-                            }}
-                        }}
-                    '''.format(','.join(f'"{f}"' for f in files))
-
-        return f'powershell -Command "{ps_script}"', True
-
-
-
-    def _execute_wc(self, cmd: str, parts) -> Tuple[str, bool]:
-        """
-        Execute wc - word, line, character, and byte count.
-
-        ARTIGIANO IMPLEMENTATION:
-        - PowerShell Measure-Object (native, fast)
-        - Count lines, words, characters, bytes
-        - Multiple files support
-        - Pipeline support
-
-        Flags:
-        - -l: count lines only
-        - -w: count words only
-        - -c: count bytes only
-        - -m: count characters only
-        - (no flags): show lines, words, bytes
-
-        Usage:
-          wc file.txt               → lines, words, bytes
-          wc -l file.txt            → lines only
-          wc -w file.txt            → words only
-          cat file | wc -l          → count lines from pipeline
-          ls | wc -l                → count items
-        """
-        count_lines = '-l' in parts
-        count_words = '-w' in parts
-        count_chars = '-m' in parts
-        count_bytes = '-c' in parts
-        files = []
-
-        # If no flags specified, count all (lines, words, bytes)
-        if not (count_lines or count_words or count_chars or count_bytes):
-            count_lines = count_words = count_bytes = True
-
-        i = 1
-        while i < len(parts):
-            if parts[i] in ['-l', '-w', '-c', '-m']:
-                i += 1
-            elif not parts[i].startswith('-'):
-                files.append(parts[i])
-                i += 1
-            else:
-                i += 1
-
-        if not files:
-            # Reading from stdin (pipeline)
-            # Collect and count
-            ps_script = '''
-                $lines = @($input)
-                $lineCount = $lines.Count
-                $wordCount = 0
-                $charCount = 0
-
-                foreach ($line in $lines) {
-                    if ($line -ne $null) {
-                        $words = $line -split '\s+'
-                        $wordCount += ($words | Where-Object { $_ -ne '' }).Count
-                        $charCount += $line.Length + 1  # +1 for newline
-                    }
-                }
-
-                $output = @()
-            '''
-
-            if count_lines:
-                ps_script += '\n$output += $lineCount'
-            if count_words:
-                ps_script += '\n$output += $wordCount'
-            if count_bytes or count_chars:
-                ps_script += '\n$output += $charCount'
-
-            ps_script += '\nWrite-Output ($output -join "  ")'
-
-            return f'powershell -Command "{ps_script}"', True
-
-        # ARTIGIANO: Glob Pattern Expansion (same as cat/head/tail)
-        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
-
-        if has_glob:
-            files_patterns = ','.join(f'"{f}"' for f in files)
-
-            # Build glob expansion logic
-            ps_script = f'''
-                # Expand glob patterns
-                $expandedFiles = @()
-                foreach ($pattern in @({files_patterns})) {{
-                    if ($pattern -match '[*?\\[\\]]') {{
-                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
-                        if ($matched) {{
-                            $expandedFiles += $matched.FullName
-                        }}
-                    }} else {{
-                        if (Test-Path $pattern) {{
-                            $expandedFiles += $pattern
-                        }} else {{
-                            Write-Error "wc: $pattern: No such file or directory"
-                            exit 1
-                        }}
-                    }}
-                }}
-
-                if ($expandedFiles.Count -eq 0) {{
-                    Write-Error "wc: No files matched"
-                    exit 1
-                }}
-
-                # Count stats for each file
-                $totalLines = 0
-                $totalWords = 0
-                $totalChars = 0
-
-                foreach ($file in $expandedFiles) {{
-                    $content = Get-Content $file
-                    $lineCount = $content.Count
-                    $wordCount = 0
-                    $charCount = 0
-
-                    foreach ($line in $content) {{
-                        if ($line -ne $null) {{
-                            $words = $line -split '\\s+'
-                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
-                            $charCount += $line.Length + 1
-                        }}
-                    }}
-
-                    $totalLines += $lineCount
-                    $totalWords += $wordCount
-                    $totalChars += $charCount
-
-                    $output = @()
-            '''
-
-            if count_lines:
-                ps_script += '\n                    $output += $lineCount'
-            if count_words:
-                ps_script += '\n                    $output += $wordCount'
-            if count_bytes or count_chars:
-                ps_script += '\n                    $output += $charCount'
-
-            ps_script += '\n                    $output += $file'
-            ps_script += '\n                    Write-Output ($output -join "  ")'
-            ps_script += '\n                }'
-
-            # Add total if multiple files
-            ps_script += '''
-                if ($expandedFiles.Count -gt 1) {
-                    $output = @()
-            '''
-            if count_lines:
-                ps_script += '\n                    $output += $totalLines'
-            if count_words:
-                ps_script += '\n                    $output += $totalWords'
-            if count_bytes or count_chars:
-                ps_script += '\n                    $output += $totalChars'
-
-            ps_script += '\n                    $output += "total"'
-            ps_script += '\n                    Write-Output ($output -join "  ")'
-            ps_script += '\n                }'
-
-            return f'powershell -Command "{ps_script}"', True
-
-        # No globs - direct file access
-        # Files specified
-        if len(files) == 1:
-            file = files[0]
-            ps_script = f'''
-                if (-not (Test-Path "{file}")) {{
-                    Write-Error "wc: {file}: No such file or directory"
-                    exit 1
-                }}
-
-                $content = Get-Content "{file}"
-                $lineCount = $content.Count
-                $wordCount = 0
-                $charCount = 0
-
-                foreach ($line in $content) {{
-                    if ($line -ne $null) {{
-                        $words = $line -split '\\s+'
-                        $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
-                        $charCount += $line.Length + 1
-                    }}
-                }}
-
-                $output = @()
-            '''
-
-            if count_lines:
-                ps_script += '\n$output += $lineCount'
-            if count_words:
-                ps_script += '\n$output += $wordCount'
-            if count_bytes or count_chars:
-                ps_script += '\n$output += $charCount'
-
-            ps_script += f'\n$output += "{file}"\nWrite-Output ($output -join "  ")'
-
-        else:
-            # Multiple files - show individual counts and total
-            ps_script = '''
-                $files = @({})
-                $totalLines = 0
-                $totalWords = 0
-                $totalChars = 0
-
-                foreach ($file in $files) {{
-                    if (-not (Test-Path $file)) {{
-                        Write-Error "wc: $file: No such file or directory"
-                        continue
-                    }}
-
-                    $content = Get-Content $file
-                    $lineCount = $content.Count
-                    $wordCount = 0
-                    $charCount = 0
-
-                    foreach ($line in $content) {{
-                        if ($line -ne $null) {{
-                            $words = $line -split '\\s+'
-                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
-                            $charCount += $line.Length + 1
-                        }}
-                    }}
-
-                    $totalLines += $lineCount
-                    $totalWords += $wordCount
-                    $totalChars += $charCount
-
-                    $output = @()
-            '''.format(','.join(f'"{f}"' for f in files))
-
-            if count_lines:
-                ps_script += '\n$output += $lineCount'
-            if count_words:
-                ps_script += '\n$output += $wordCount'
-            if count_bytes or count_chars:
-                ps_script += '\n$output += $charCount'
-
-            ps_script += '\n$output += $file\nWrite-Output ($output -join "  ")\n}'
-
-            # Add total line
-            if len(files) > 1:
-                ps_script += '\n$output = @()'
-                if count_lines:
-                    ps_script += '\n$output += $totalLines'
-                if count_words:
-                    ps_script += '\n$output += $totalWords'
-                if count_bytes or count_chars:
-                    ps_script += '\n$output += $totalChars'
-                ps_script += '\n$output += "total"\nWrite-Output ($output -join "  ")'
-
-        return f'powershell -Command "{ps_script}"', True
-
-
-
-    def _execute_test(self, cmd: str, parts) -> Tuple[str, bool]:
-        """
-        Execute test - evaluate conditional expressions.
-
-        ARTIGIANO IMPLEMENTATION:
-        - PowerShell Test-Path for file/dir checks
-        - PowerShell operators for comparisons
-        - Exit code 0 (success) or 1 (failure)
-
-        Common tests:
-        - -f file: file exists and is regular file
-        - -d dir: directory exists
-        - -e path: path exists (any type)
-        - -z string: string is empty
-        - -n string: string is not empty
-        - -eq, -ne, -lt, -le, -gt, -ge: numeric comparisons
-        - =, !=: string comparisons
-
-        Usage:
-          test -f file.txt          → check if file exists
-          test -d mydir             → check if directory exists
-          test "a" = "b"            → string comparison
-          [ -f file.txt ]           → same (converted by preprocessor)
-        """
-        if len(parts) < 2:
-            # Empty test is false
-            return 'exit 1', False
-
-        # File/directory tests
-        if parts[1] == '-f' and len(parts) >= 3:
-            file_path = parts[2]
-            ps_cmd = f'''
-                if ((Test-Path "{file_path}") -and -not (Test-Path "{file_path}" -PathType Container)) {{
-                    exit 0
-                }} else {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        if parts[1] == '-d' and len(parts) >= 3:
-            dir_path = parts[2]
-            ps_cmd = f'''
-                if (Test-Path "{dir_path}" -PathType Container) {{
-                    exit 0
-                }} else {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        if parts[1] == '-e' and len(parts) >= 3:
-            path = parts[2]
-            ps_cmd = f'''
-                if (Test-Path "{path}") {{
-                    exit 0
-                }} else {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        # String tests
-        if parts[1] == '-z' and len(parts) >= 3:
-            # String is empty
-            string = parts[2]
-            ps_cmd = f'''
-                if ([string]::IsNullOrEmpty("{string}")) {{
-                    exit 0
-                }} else {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        if parts[1] == '-n' and len(parts) >= 3:
-            # String is NOT empty
-            string = parts[2]
-            ps_cmd = f'''
-                if (-not [string]::IsNullOrEmpty("{string}")) {{
-                    exit 0
-                }} else {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        # Numeric comparisons (3 args: val1 op val2)
-        if len(parts) >= 4:
-            val1 = parts[1]
-            op = parts[2]
-            val2 = parts[3]
-
-            # Map bash operators to PowerShell
-            if op == '-eq':
-                ps_op = '-eq'
-            elif op == '-ne':
-                ps_op = '-ne'
-            elif op == '-lt':
-                ps_op = '-lt'
-            elif op == '-le':
-                ps_op = '-le'
-            elif op == '-gt':
-                ps_op = '-gt'
-            elif op == '-ge':
-                ps_op = '-ge'
-            elif op == '=':
-                # String equality
-                ps_cmd = f'''
-                    if ("{val1}" -eq "{val2}") {{
-                        exit 0
-                    }} else {{
-                        exit 1
-                    }}
-                '''
-                return f'powershell -Command "{ps_cmd}"', True
-            elif op == '!=':
-                # String inequality
-                ps_cmd = f'''
-                    if ("{val1}" -ne "{val2}") {{
-                        exit 0
-                    }} else {{
-                        exit 1
-                    }}
-                '''
-                return f'powershell -Command "{ps_cmd}"', True
-            else:
-                # Unknown operator - fail
-                return 'exit 1', False
-
-            # Numeric comparison
-            ps_cmd = f'''
-                try {{
-                    $v1 = [int]"{val1}"
-                    $v2 = [int]"{val2}"
-                    if ($v1 {ps_op} $v2) {{
-                        exit 0
-                    }} else {{
-                        exit 1
-                    }}
-                }} catch {{
-                    exit 1
-                }}
-            '''
-            return f'powershell -Command "{ps_cmd}"', True
-
-        # Unknown test format - fail
-        return 'exit 1', False
-
-    def _execute_zip(self, cmd: str, parts):
-        """
-        Translate zip - create compressed archives.
-        
-        ARTISAN IMPLEMENTATION:
-        - Uses PowerShell Compress-Archive (native .NET)
-        - Creates .zip files compatible with Unix unzip
-        
-        Flags:
-        - -r: recursive (include subdirectories) - default ON
-        - archive.zip: output file
-        - files/dirs: items to compress
-        
-        Usage:
-          zip -r archive.zip dir/
-          zip archive.zip file1.txt file2.txt
-        """
-        recursive = '-r' in parts
-        archive = None
-        items = []
-
     def _execute_curl(self, cmd: str, parts: List[str]) -> Tuple[str, bool]:
         """
         Execute curl with COMPLETE flag support for API work.
@@ -2764,25 +2006,113 @@ class CommandExecutor:
 # ======== awk (2824-3034) ========
     def _execute_awk(self, cmd: str, parts):
         """
-        Translate awk with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try awk.exe / gawk.exe (Git for Windows) - 100% GNU awk
-        2. Fallback PowerShell custom for common patterns
-        
-        Supported in PowerShell fallback:
-        - Field extraction: $1, $2, $NF, $(NF-1)
-        - Field separator: -F delimiter
-        - Pattern matching: /pattern/ {action}
-        - BEGIN/END blocks: BEGIN {x=0} {x+=$1} END {print x}
-        - Variables and arithmetic: x=0, x++, x+=$1
-        - Conditions: $1 > 100, NF > 5
-        - Multiple statements in blocks
-        
-        Complex awk programs work better with native gawk.
+        Execute awk with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (awk.exe/bash.exe required):
+           - Array operations (a[$1]++, associative arrays)
+           - Built-in functions (gsub, substr, split, match, sprintf, etc.)
+           - User-defined functions
+           - Pattern ranges (/start/,/end/)
+           - getline operations
+           - Multiple files with FILENAME/FNR
+           - Complex printf with format strings
+
+        2. ADVANCED (awk.exe preferred):
+           - BEGIN/END blocks
+           - Multiple -F field separators
+           - Field variables ($1, $2, $NF)
+           - Simple arithmetic
+
+        3. SIMPLE (PowerShell OK):
+           - Basic field extraction: awk '{print $1}'
+           - Single condition: awk '$3 > 100'
+
+        ARTIGIANO STRATEGY:
+        1. Try awk.exe/gawk.exe (Git for Windows) - 100% GNU awk
+        2. If critical features and no awk.exe → bash.exe
+        3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
             return 'echo Error: awk requires program', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_awk(program):
+            """Detect if awk uses features that REQUIRE native awk"""
+            # Array operations
+            if '[' in program and ']' in program:
+                # Likely array: a[$1]++, array[key]=value
+                return True
+
+            # Built-in functions (not exhaustive, but common ones)
+            critical_functions = [
+                'gsub', 'sub', 'substr', 'split', 'match', 'sprintf',
+                'strftime', 'systime', 'tolower', 'toupper', 'length',
+                'index', 'getline', 'system', 'close', 'fflush'
+            ]
+            for func in critical_functions:
+                if func + '(' in program:
+                    return True
+
+            # User-defined functions (function name() {...})
+            if re.search(r'\bfunction\s+\w+\s*\(', program):
+                return True
+
+            # Pattern ranges (/start/,/end/)
+            if re.search(r'/[^/]+/\s*,\s*/[^/]+/', program):
+                return True
+
+            # Multiple files with FILENAME or FNR
+            if 'FILENAME' in program or 'FNR' in program:
+                return True
+
+            # Complex printf (more than simple %s or %d)
+            if 'printf' in program:
+                # Check for complex format strings
+                printf_match = re.search(r'printf\s*\(["\']([^"\']+)', program)
+                if printf_match:
+                    format_str = printf_match.group(1)
+                    # Complex formats: %10s, %.2f, %-5d, etc.
+                    if re.search(r'%[-+0-9.]*[a-z]', format_str):
+                        complex_formats = re.findall(r'%[-+0-9.]+[a-z]', format_str)
+                        if complex_formats:
+                            return True
+
+            return False
+
+        # Extract program for analysis
+        program_str = None
+        for i, part in enumerate(parts):
+            if not part.startswith('-') and i > 0:
+                if parts[i-1] not in ['-F', '-v']:  # Not an option argument
+                    program_str = part
+                    break
+
+        if program_str and is_critical_awk(program_str):
+            # CRITICAL awk → native awk.exe or bash.exe REQUIRED
+            # First try will be awk.exe in the fallback chain
+            # But if that fails and we have bash.exe, use it
+            if not self.git_bash_exe:
+                self.logger.warning("Critical awk features detected - requires awk.exe or bash.exe")
+            else:
+                # Check if awk.exe available
+                try:
+                    result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
+                    if result.returncode != 0:
+                        # No awk.exe, use bash.exe
+                        self.logger.debug("Critical awk features + no awk.exe → using bash.exe")
+                        bash_cmd = self._execute_with_gitbash(cmd)
+                        if bash_cmd:
+                            return bash_cmd, False
+                except:
+                    pass
+
+        # ================================================================
+        # Standard awk execution with native awk.exe preference
+        # ================================================================
         
         # Build command for native awk
         awk_cmd_parts = []
@@ -4363,13 +3693,26 @@ class CommandExecutor:
 # ======== sed (2591-2823) ========
     def _execute_sed(self, cmd: str, parts):
         """
-        Translate sed with fallback chain.
-        
-        STRATEGY FOR 100%:
-        1. Try sed.exe (Git for Windows) - 100% GNU sed
-        2. Fallback PowerShell custom for common operations
-        
-        Supported in PowerShell fallback:
+        Execute sed with ARTIGIANO strategy dispatch.
+
+        COMPLEXITY LEVELS:
+        1. CRITICAL (bash.exe required):
+           - Hold space operations (h, H, g, G, x)
+           - Branch/labels (:label, b, t, T)
+           - Multi-line pattern (N, D, P)
+           - Complex address ranges with operations
+
+        2. ADVANCED (sed.exe preferred):
+           - In-place editing (-i)
+           - Multiple expressions (-e)
+           - Address ranges
+
+        3. SIMPLE (PowerShell OK):
+           - Basic s/search/replace/
+           - Line deletion (d)
+           - Print (p)
+
+        PowerShell fallback supports:
         - s/search/replace/flags (substitution with g, i, p flags)
         - Address ranges: 1,10s/.../, /pattern/s/.../, $s/.../
         - Multiple -e expressions
@@ -4378,11 +3721,46 @@ class CommandExecutor:
         - a, i, c (append, insert, change text)
         - -i (in-place editing)
         - -n (quiet mode - suppress output except explicit p)
-        
-        Complex sed scripts work better with native sed.
         """
         if len(parts) < 2:
             return 'echo Error: sed requires expression', True
+
+        # ================================================================
+        # ARTIGIANO: Detect CRITICAL complexity
+        # ================================================================
+
+        def is_critical_sed(command):
+            """Detect if sed uses features that REQUIRE bash.exe"""
+            # Hold space operations
+            if any(pattern in command for pattern in [
+                '\\bh\\b', '\\bH\\b', '\\bg\\b', '\\bG\\b', '\\bx\\b',  # Hold space
+                ':[a-zA-Z]', '\\bb\\s', '\\bt\\s', '\\bT\\s',            # Labels/branches
+                '\\bN\\b', '\\bD\\b', '\\bP\\b',                        # Multi-line
+            ]):
+                return True
+
+            # Complex range operations (not simple /pattern/d or /pattern/s///)
+            # Example: /start/,/end/{//!d}
+            if ',/' in command and '{' in command:
+                return True
+
+            return False
+
+        if is_critical_sed(cmd):
+            # CRITICAL sed → bash.exe REQUIRED
+            if self.git_bash_exe:
+                self.logger.debug("sed with critical features (hold space, labels) → using bash.exe")
+                bash_cmd = self._execute_with_gitbash(cmd)
+                if bash_cmd:
+                    return bash_cmd, False
+            else:
+                self.logger.error("Critical sed features require bash.exe (not available)")
+                # Try sed.exe as last resort
+                pass
+
+        # ================================================================
+        # Standard sed execution with native sed.exe preference
+        # ================================================================
         
         # Build command for native sed
         sed_cmd_parts = []
@@ -5292,6 +4670,868 @@ class CommandExecutor:
         # Delegate to curl implementation for full feature support
         return self._execute_curl(curl_cmd, curl_parts)
 
+    def _execute_head(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute head - output first N lines of file(s).
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content with -TotalCount (native, fast)
+        - Supports pipeline input via stdin
+        - Multiple files
+
+        Flags:
+        - -n N: number of lines (default 10)
+        - -N: short form for -n N
+        - -c N: first N bytes (not commonly used, skip for now)
+
+        Usage:
+          head file.txt           → first 10 lines
+          head -n 20 file.txt     → first 20 lines
+          head -5 file.txt        → first 5 lines
+          cat file | head -10     → from pipeline
+        """
+        line_count = 10  # Default
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-n' and i + 1 < len(parts):
+                line_count = int(parts[i + 1])
+                i += 2
+            elif parts[i].startswith('-') and parts[i][1:].isdigit():
+                # Short form: -20
+                line_count = int(parts[i][1:])
+                i += 1
+            elif parts[i] == '-c':
+                # Byte mode - skip for now, not commonly used
+                i += 2
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # PowerShell: Select-Object -First N
+            return f'Select-Object -First {line_count}', True
+
+        # ARTIGIANO: Glob Pattern Expansion (same as cat)
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            files_patterns = ','.join(f'"{f}"' for f in files)
+            ps_script = f'''
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @({files_patterns})) {{
+                    if ($pattern -match '[*?\\[\\]]') {{
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {{
+                            $expandedFiles += $matched.FullName
+                        }}
+                    }} else {{
+                        if (Test-Path $pattern) {{
+                            $expandedFiles += $pattern
+                        }} else {{
+                            Write-Error "head: $pattern: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                }}
+
+                if ($expandedFiles.Count -eq 0) {{
+                    Write-Error "head: No files matched"
+                    exit 1
+                }}
+
+                # Process files
+                $first = $true
+                foreach ($file in $expandedFiles) {{
+                    if ($expandedFiles.Count -gt 1) {{
+                        if (-not $first) {{ Write-Output "" }}
+                        Write-Output "==> $file <=="
+                    }}
+                    Get-Content $file -TotalCount {line_count}
+                    $first = $false
+                }}
+            '''
+        else:
+            # No globs - direct access
+            if len(files) == 1:
+                # Single file
+                ps_script = f'''
+                    if (Test-Path "{files[0]}") {{
+                        Get-Content "{files[0]}" -TotalCount {line_count}
+                    }} else {{
+                        Write-Error "head: {files[0]}: No such file or directory"
+                        exit 1
+                    }}
+                '''
+            else:
+                # Multiple files - show filename headers like Unix head
+                ps_script = '''
+                    $files = @({})
+                    $first = $true
+                    foreach ($file in $files) {{
+                        if (Test-Path $file) {{
+                            if (-not $first) {{ Write-Output "" }}
+                            Write-Output "==> $file <=="
+                            Get-Content $file -TotalCount {}
+                            $first = $false
+                        }} else {{
+                            Write-Error "head: $file: No such file or directory"
+                        }}
+                    }}
+                '''.format(','.join(f'"{f}"' for f in files), line_count)
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_tail(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute tail - output last N lines of file(s).
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content with -Tail (native, fast)
+        - Supports pipeline input
+        - Follow mode (-f) with Get-Content -Wait
+
+        Flags:
+        - -n N: number of lines (default 10)
+        - -N: short form for -n N
+        - -f: follow mode (watch file for changes)
+        - -c N: last N bytes (not commonly used, skip for now)
+
+        Usage:
+          tail file.txt           → last 10 lines
+          tail -n 20 file.txt     → last 20 lines
+          tail -5 file.txt        → last 5 lines
+          tail -f log.txt         → follow file
+          cat file | tail -10     → from pipeline
+        """
+        line_count = 10  # Default
+        follow = False
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] == '-n' and i + 1 < len(parts):
+                line_count = int(parts[i + 1])
+                i += 2
+            elif parts[i].startswith('-') and parts[i][1:].isdigit():
+                # Short form: -20
+                line_count = int(parts[i][1:])
+                i += 1
+            elif parts[i] == '-f':
+                follow = True
+                i += 1
+            elif parts[i] == '-c':
+                # Byte mode - skip for now
+                i += 2
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # PowerShell: Select-Object -Last N
+            return f'Select-Object -Last {line_count}', True
+
+        # ARTIGIANO: Glob Pattern Expansion (same as cat/head)
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            # Glob expansion needed
+            if follow:
+                # Follow mode with globs - use bash.exe (complex)
+                if self.git_bash_exe:
+                    return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
+                else:
+                    return 'echo "tail -f with globs requires bash.exe"', True
+
+            files_patterns = ','.join(f'"{f}"' for f in files)
+            ps_script = f'''
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @({files_patterns})) {{
+                    if ($pattern -match '[*?\\[\\]]') {{
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {{
+                            $expandedFiles += $matched.FullName
+                        }}
+                    }} else {{
+                        if (Test-Path $pattern) {{
+                            $expandedFiles += $pattern
+                        }} else {{
+                            Write-Error "tail: $pattern: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                }}
+
+                if ($expandedFiles.Count -eq 0) {{
+                    Write-Error "tail: No files matched"
+                    exit 1
+                }}
+
+                # Process files
+                $first = $true
+                foreach ($file in $expandedFiles) {{
+                    if ($expandedFiles.Count -gt 1) {{
+                        if (-not $first) {{ Write-Output "" }}
+                        Write-Output "==> $file <=="
+                    }}
+                    Get-Content $file -Tail {line_count}
+                    $first = $false
+                }}
+            '''
+        else:
+            # No globs - direct access
+            if len(files) == 1:
+                # Single file
+                file = files[0]
+                if follow:
+                    # Follow mode - continuously monitor file
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            Get-Content "{file}" -Tail {line_count} -Wait
+                        }} else {{
+                            Write-Error "tail: {file}: No such file or directory"
+                            exit 1
+                        }}
+                    '''
+                else:
+                    # Normal mode - just last N lines
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            Get-Content "{file}" -Tail {line_count}
+                        }} else {{
+                            Write-Error "tail: {file}: No such file or directory"
+                            exit 1
+                        }}
+                    '''
+            else:
+                # Multiple files - show filename headers
+                if follow:
+                    # Follow mode with multiple files - complex, use bash.exe if available
+                    if self.git_bash_exe:
+                        return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
+                    else:
+                        return 'echo "tail -f with multiple files requires bash.exe"', True
+
+                # Normal mode with multiple files
+                ps_script = '''
+                    $files = @({})
+                    $first = $true
+                    foreach ($file in $files) {{
+                        if (Test-Path $file) {{
+                            if (-not $first) {{ Write-Output "" }}
+                            Write-Output "==> $file <=="
+                            Get-Content $file -Tail {}
+                            $first = $false
+                        }} else {{
+                            Write-Error "tail: $file: No such file or directory"
+                        }}
+                    }}
+                '''.format(','.join(f'"{f}"' for f in files), line_count)
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_cat(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute cat - concatenate and display files.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Get-Content (native, fast)
+        - Multiple files concatenation
+        - Line numbering with -n
+        - Stdin support (no files = read from pipeline)
+
+        Flags:
+        - -n: number all output lines
+        - -b: number non-blank lines (simplified: same as -n for now)
+
+        Usage:
+          cat file.txt               → display file
+          cat file1 file2            → concatenate files
+          cat -n file.txt            → with line numbers
+          echo "text" | cat          → from stdin
+          cat < input.txt            → from redirect
+        """
+        number_lines = '-n' in parts or '-b' in parts
+        files = []
+
+        i = 1
+        while i < len(parts):
+            if parts[i] in ['-n', '-b']:
+                number_lines = True
+                i += 1
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline or redirect)
+            if number_lines:
+                # PowerShell: enumerate lines with numbers
+                ps_cmd = '''
+                    $lineNum = 1
+                    $input | ForEach-Object {
+                        Write-Output ("{0,6} {1}" -f $lineNum, $_)
+                        $lineNum++
+                    }
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            else:
+                # Just pass through stdin
+                # In PowerShell pipeline, this is implicit
+                return '$input', True
+
+        # ================================================================
+        # ARTIGIANO: Glob Pattern Expansion
+        # ================================================================
+        # CRITICAL: PowerShell scripts must expand globs BEFORE using files
+        # If we pass "*.txt" directly to Get-Content, it's LITERAL, not expanded!
+        #
+        # Detect glob patterns: *, ?, [ ]
+        # Use Get-ChildItem to expand, then process expanded files
+
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            # Build glob-aware PowerShell script
+            files_patterns = ','.join(f'"{f}"' for f in files)
+
+            if number_lines:
+                ps_script = f'''
+                    # Expand glob patterns
+                    $expandedFiles = @()
+                    foreach ($pattern in @({files_patterns})) {{
+                        if ($pattern -match '[*?\\[\\]]') {{
+                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                            if ($matched) {{
+                                $expandedFiles += $matched.FullName
+                            }}
+                        }} else {{
+                            if (Test-Path $pattern) {{
+                                $expandedFiles += $pattern
+                            }} else {{
+                                Write-Error "cat: $pattern: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    }}
+
+                    if ($expandedFiles.Count -eq 0) {{
+                        Write-Error "cat: No files matched"
+                        exit 1
+                    }}
+
+                    # Process files with line numbers
+                    $lineNum = 1
+                    foreach ($file in $expandedFiles) {{
+                        Get-Content $file | ForEach-Object {{
+                            Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                            $lineNum++
+                        }}
+                    }}
+                '''
+            else:
+                ps_script = f'''
+                    # Expand glob patterns
+                    $expandedFiles = @()
+                    foreach ($pattern in @({files_patterns})) {{
+                        if ($pattern -match '[*?\\[\\]]') {{
+                            $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                            if ($matched) {{
+                                $expandedFiles += $matched.FullName
+                            }}
+                        }} else {{
+                            if (Test-Path $pattern) {{
+                                $expandedFiles += $pattern
+                            }} else {{
+                                Write-Error "cat: $pattern: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    }}
+
+                    if ($expandedFiles.Count -eq 0) {{
+                        Write-Error "cat: No files matched"
+                        exit 1
+                    }}
+
+                    # Concatenate files
+                    foreach ($file in $expandedFiles) {{
+                        Get-Content $file
+                    }}
+                '''
+        else:
+            # No globs - direct file access (original logic)
+            # Files specified
+            if len(files) == 1:
+                # Single file
+                file = files[0]
+                if number_lines:
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            $lineNum = 1
+                            Get-Content "{file}" | ForEach-Object {{
+                                Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                                $lineNum++
+                            }}
+                        }} else {{
+                            Write-Error "cat: {file}: No such file or directory"
+                            exit 1
+                        }}
+                    '''
+                else:
+                    ps_script = f'''
+                        if (Test-Path "{file}") {{
+                            Get-Content "{file}"
+                        }} else {{
+                            Write-Error "cat: {file}: No such file or directory"
+                            exit 1
+                        }}
+                    '''
+            else:
+                # Multiple files - concatenate
+                if number_lines:
+                    ps_script = '''
+                        $files = @({})
+                        $lineNum = 1
+                        foreach ($file in $files) {{
+                            if (Test-Path $file) {{
+                                Get-Content $file | ForEach-Object {{
+                                    Write-Output ("{{0,6}} {{1}}" -f $lineNum, $_)
+                                    $lineNum++
+                                }}
+                            }} else {{
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    '''.format(','.join(f'"{f}"' for f in files))
+                else:
+                    ps_script = '''
+                        $files = @({})
+                        foreach ($file in $files) {{
+                            if (Test-Path $file) {{
+                                Get-Content $file
+                            }} else {{
+                                Write-Error "cat: $file: No such file or directory"
+                                exit 1
+                            }}
+                        }}
+                    '''.format(','.join(f'"{f}"' for f in files))
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_wc(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute wc - word, line, character, and byte count.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Measure-Object (native, fast)
+        - Count lines, words, characters, bytes
+        - Multiple files support
+        - Pipeline support
+
+        Flags:
+        - -l: count lines only
+        - -w: count words only
+        - -c: count bytes only
+        - -m: count characters only
+        - (no flags): show lines, words, bytes
+
+        Usage:
+          wc file.txt               → lines, words, bytes
+          wc -l file.txt            → lines only
+          wc -w file.txt            → words only
+          cat file | wc -l          → count lines from pipeline
+          ls | wc -l                → count items
+        """
+        count_lines = '-l' in parts
+        count_words = '-w' in parts
+        count_chars = '-m' in parts
+        count_bytes = '-c' in parts
+        files = []
+
+        # If no flags specified, count all (lines, words, bytes)
+        if not (count_lines or count_words or count_chars or count_bytes):
+            count_lines = count_words = count_bytes = True
+
+        i = 1
+        while i < len(parts):
+            if parts[i] in ['-l', '-w', '-c', '-m']:
+                i += 1
+            elif not parts[i].startswith('-'):
+                files.append(parts[i])
+                i += 1
+            else:
+                i += 1
+
+        if not files:
+            # Reading from stdin (pipeline)
+            # Collect and count
+            ps_script = '''
+                $lines = @($input)
+                $lineCount = $lines.Count
+                $wordCount = 0
+                $charCount = 0
+
+                foreach ($line in $lines) {
+                    if ($line -ne $null) {
+                        $words = $line -split '\s+'
+                        $wordCount += ($words | Where-Object { $_ -ne '' }).Count
+                        $charCount += $line.Length + 1  # +1 for newline
+                    }
+                }
+
+                $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += '\nWrite-Output ($output -join "  ")'
+
+            return f'powershell -Command "{ps_script}"', True
+
+        # ARTIGIANO: Glob Pattern Expansion (same as cat/head/tail)
+        has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
+
+        if has_glob:
+            files_patterns = ','.join(f'"{f}"' for f in files)
+
+            # Build glob expansion logic
+            ps_script = f'''
+                # Expand glob patterns
+                $expandedFiles = @()
+                foreach ($pattern in @({files_patterns})) {{
+                    if ($pattern -match '[*?\\[\\]]') {{
+                        $matched = Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue
+                        if ($matched) {{
+                            $expandedFiles += $matched.FullName
+                        }}
+                    }} else {{
+                        if (Test-Path $pattern) {{
+                            $expandedFiles += $pattern
+                        }} else {{
+                            Write-Error "wc: $pattern: No such file or directory"
+                            exit 1
+                        }}
+                    }}
+                }}
+
+                if ($expandedFiles.Count -eq 0) {{
+                    Write-Error "wc: No files matched"
+                    exit 1
+                }}
+
+                # Count stats for each file
+                $totalLines = 0
+                $totalWords = 0
+                $totalChars = 0
+
+                foreach ($file in $expandedFiles) {{
+                    $content = Get-Content $file
+                    $lineCount = $content.Count
+                    $wordCount = 0
+                    $charCount = 0
+
+                    foreach ($line in $content) {{
+                        if ($line -ne $null) {{
+                            $words = $line -split '\\s+'
+                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                            $charCount += $line.Length + 1
+                        }}
+                    }}
+
+                    $totalLines += $lineCount
+                    $totalWords += $wordCount
+                    $totalChars += $charCount
+
+                    $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n                    $output += $lineCount'
+            if count_words:
+                ps_script += '\n                    $output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n                    $output += $charCount'
+
+            ps_script += '\n                    $output += $file'
+            ps_script += '\n                    Write-Output ($output -join "  ")'
+            ps_script += '\n                }'
+
+            # Add total if multiple files
+            ps_script += '''
+                if ($expandedFiles.Count -gt 1) {
+                    $output = @()
+            '''
+            if count_lines:
+                ps_script += '\n                    $output += $totalLines'
+            if count_words:
+                ps_script += '\n                    $output += $totalWords'
+            if count_bytes or count_chars:
+                ps_script += '\n                    $output += $totalChars'
+
+            ps_script += '\n                    $output += "total"'
+            ps_script += '\n                    Write-Output ($output -join "  ")'
+            ps_script += '\n                }'
+
+            return f'powershell -Command "{ps_script}"', True
+
+        # No globs - direct file access
+        # Files specified
+        if len(files) == 1:
+            file = files[0]
+            ps_script = f'''
+                if (-not (Test-Path "{file}")) {{
+                    Write-Error "wc: {file}: No such file or directory"
+                    exit 1
+                }}
+
+                $content = Get-Content "{file}"
+                $lineCount = $content.Count
+                $wordCount = 0
+                $charCount = 0
+
+                foreach ($line in $content) {{
+                    if ($line -ne $null) {{
+                        $words = $line -split '\\s+'
+                        $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                        $charCount += $line.Length + 1
+                    }}
+                }}
+
+                $output = @()
+            '''
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += f'\n$output += "{file}"\nWrite-Output ($output -join "  ")'
+
+        else:
+            # Multiple files - show individual counts and total
+            ps_script = '''
+                $files = @({})
+                $totalLines = 0
+                $totalWords = 0
+                $totalChars = 0
+
+                foreach ($file in $files) {{
+                    if (-not (Test-Path $file)) {{
+                        Write-Error "wc: $file: No such file or directory"
+                        continue
+                    }}
+
+                    $content = Get-Content $file
+                    $lineCount = $content.Count
+                    $wordCount = 0
+                    $charCount = 0
+
+                    foreach ($line in $content) {{
+                        if ($line -ne $null) {{
+                            $words = $line -split '\\s+'
+                            $wordCount += ($words | Where-Object {{ $_ -ne '' }}).Count
+                            $charCount += $line.Length + 1
+                        }}
+                    }}
+
+                    $totalLines += $lineCount
+                    $totalWords += $wordCount
+                    $totalChars += $charCount
+
+                    $output = @()
+            '''.format(','.join(f'"{f}"' for f in files))
+
+            if count_lines:
+                ps_script += '\n$output += $lineCount'
+            if count_words:
+                ps_script += '\n$output += $wordCount'
+            if count_bytes or count_chars:
+                ps_script += '\n$output += $charCount'
+
+            ps_script += '\n$output += $file\nWrite-Output ($output -join "  ")\n}'
+
+            # Add total line
+            if len(files) > 1:
+                ps_script += '\n$output = @()'
+                if count_lines:
+                    ps_script += '\n$output += $totalLines'
+                if count_words:
+                    ps_script += '\n$output += $totalWords'
+                if count_bytes or count_chars:
+                    ps_script += '\n$output += $totalChars'
+                ps_script += '\n$output += "total"\nWrite-Output ($output -join "  ")'
+
+        return f'powershell -Command "{ps_script}"', True
+
+    def _execute_test(self, cmd: str, parts) -> Tuple[str, bool]:
+        """
+        Execute test - evaluate conditional expressions.
+
+        ARTIGIANO IMPLEMENTATION:
+        - PowerShell Test-Path for file/dir checks
+        - PowerShell operators for comparisons
+        - Exit code 0 (success) or 1 (failure)
+
+        Common tests:
+        - -f file: file exists and is regular file
+        - -d dir: directory exists
+        - -e path: path exists (any type)
+        - -z string: string is empty
+        - -n string: string is not empty
+        - -eq, -ne, -lt, -le, -gt, -ge: numeric comparisons
+        - =, !=: string comparisons
+
+        Usage:
+          test -f file.txt          → check if file exists
+          test -d mydir             → check if directory exists
+          test "a" = "b"            → string comparison
+          [ -f file.txt ]           → same (converted by preprocessor)
+        """
+        if len(parts) < 2:
+            # Empty test is false
+            return 'exit 1', False
+
+        # File/directory tests
+        if parts[1] == '-f' and len(parts) >= 3:
+            file_path = parts[2]
+            ps_cmd = f'''
+                if ((Test-Path "{file_path}") -and -not (Test-Path "{file_path}" -PathType Container)) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-d' and len(parts) >= 3:
+            dir_path = parts[2]
+            ps_cmd = f'''
+                if (Test-Path "{dir_path}" -PathType Container) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-e' and len(parts) >= 3:
+            path = parts[2]
+            ps_cmd = f'''
+                if (Test-Path "{path}") {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # String tests
+        if parts[1] == '-z' and len(parts) >= 3:
+            # String is empty
+            string = parts[2]
+            ps_cmd = f'''
+                if ([string]::IsNullOrEmpty("{string}")) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        if parts[1] == '-n' and len(parts) >= 3:
+            # String is NOT empty
+            string = parts[2]
+            ps_cmd = f'''
+                if (-not [string]::IsNullOrEmpty("{string}")) {{
+                    exit 0
+                }} else {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # Numeric comparisons (3 args: val1 op val2)
+        if len(parts) >= 4:
+            val1 = parts[1]
+            op = parts[2]
+            val2 = parts[3]
+
+            # Map bash operators to PowerShell
+            if op == '-eq':
+                ps_op = '-eq'
+            elif op == '-ne':
+                ps_op = '-ne'
+            elif op == '-lt':
+                ps_op = '-lt'
+            elif op == '-le':
+                ps_op = '-le'
+            elif op == '-gt':
+                ps_op = '-gt'
+            elif op == '-ge':
+                ps_op = '-ge'
+            elif op == '=':
+                # String equality
+                ps_cmd = f'''
+                    if ("{val1}" -eq "{val2}") {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            elif op == '!=':
+                # String inequality
+                ps_cmd = f'''
+                    if ("{val1}" -ne "{val2}") {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                '''
+                return f'powershell -Command "{ps_cmd}"', True
+            else:
+                # Unknown operator - fail
+                return 'exit 1', False
+
+            # Numeric comparison
+            ps_cmd = f'''
+                try {{
+                    $v1 = [int]"{val1}"
+                    $v2 = [int]"{val2}"
+                    if ($v1 {ps_op} $v2) {{
+                        exit 0
+                    }} else {{
+                        exit 1
+                    }}
+                }} catch {{
+                    exit 1
+                }}
+            '''
+            return f'powershell -Command "{ps_cmd}"', True
+
+        # Unknown test format - fail
+        return 'exit 1', False
+
     def _execute_zip(self, cmd: str, parts):
         """
         Translate zip - create compressed archives.
@@ -5388,15 +5628,15 @@ class BashToolExecutor(ToolExecutor):
        
        Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
        PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
-
+       
        Verify:
          diff --version
          awk --version
-
+    
     2. JQ (JSON processor)
        Download: https://github.com/jqlang/jq/releases/latest
        Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\\Windows\\System32 (already in PATH)
+       Install: Copy to C:\Windows\System32 (already in PATH)
        
        Verify:
          jq --version
@@ -5418,7 +5658,7 @@ class BashToolExecutor(ToolExecutor):
                  **kwargs):
         """
         Initialize BashToolExecutor
-
+        
         Args:
             working_dir: Tool working directory (from ConfigurationManager)
             enabled: Tool enabled state
@@ -5427,78 +5667,140 @@ class BashToolExecutor(ToolExecutor):
             default_timeout: Default command timeout
             python_timeout: Python script timeout
             use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
-
+            
         Raises:
             RuntimeError: If Python not found and python_executable not provided
         """
         super().__init__('bash_tool', enabled)
 
+        # ====================================================================
+        # TESTMODE FLAG - HARDCODED FOR TESTING
+        # ====================================================================
+        # When True: Uses CommandExecutorTest with faked subprocess calls
+        # Allows testing command translation without executing anything
+        TESTMODE = True  # <-- SET TO TRUE FOR TESTING
+        # ====================================================================
+
+        self.TESTMODE = TESTMODE
         self.working_dir = Path(working_dir)
         self.default_timeout = default_timeout
         self.python_timeout = python_timeout
         self.use_git_bash = use_git_bash
 
-        # TESTMODE: Set to True to simulate execution without running commands
-        self.testmode = False
-        
         # Initialize components
-        self.path_translator = PathTranslator()
-        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
-        self.command_translator = CommandTranslator(self.path_translator)
+        if TESTMODE:
+            # TEST MODE: Skip PathTranslator, use real CommandTranslator
+            self.logger.warning("="*80)
+            self.logger.warning("TESTMODE ENABLED - Subprocess calls will be faked")
+            self.logger.warning("TESTMODE: PathTranslator SKIPPED (not needed in test)")
+            self.logger.warning("TESTMODE: CommandTranslator REAL (testing translation logic)")
+            self.logger.warning("="*80)
+            # SKIP PathTranslator in test mode (not needed!)
+            self.path_translator = None
+            self.sandbox_validator = None  # Skip sandbox in test mode
+            # Use REAL CommandTranslator (path_translator=None is OK, it's not used!)
+            self.command_translator = CommandTranslator(path_translator=None)
+        else:
+            # PRODUCTION MODE: Normal initialization
+            self.path_translator = PathTranslator()
+            self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
+            self.command_translator = CommandTranslator(self.path_translator)
         
         # Initialize CommandExecutor (execution strategy layer)
         # Will be fully initialized after Git Bash detection
         self.command_executor = None
-        
+
         # Create tool-specific scratch directory
-        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
-        
+        if TESTMODE:
+            # TEST MODE: Use temp directory
+            import tempfile
+            self.scratch_dir = Path(tempfile.mkdtemp(prefix='bash_test_'))
+            self.logger.info(f"TEST MODE: Using temp scratch dir: {self.scratch_dir}")
+        else:
+            # PRODUCTION MODE: Normal scratch dir
+            self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
+            self.scratch_dir.mkdir(parents=True, exist_ok=True)
+
         # Git Bash detection (if enabled)
         self.git_bash_exe = None
         if use_git_bash:
-            self.git_bash_exe = self._detect_git_bash()
-            if self.git_bash_exe:
-                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+            if TESTMODE:
+                # TEST MODE: Fake git bash path
+                self.git_bash_exe = r"C:\Program Files\Git\bin\bash.exe"
+                self.logger.info(f"TEST MODE: Faking Git Bash path: {self.git_bash_exe}")
             else:
-                self.logger.warning("Git Bash not found - falling back to command translation")
+                # PRODUCTION MODE: Real detection
+                self.git_bash_exe = self._detect_git_bash()
+                if self.git_bash_exe:
+                    self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+                else:
+                    self.logger.warning("Git Bash not found - falling back to command translation")
         
         # Python executable - CRITICAL DEPENDENCY
-        try:
-            if python_executable:
-                # Validate provided executable
-                result = subprocess.run(
-                    [python_executable, '--version'],
-                    capture_output=True,
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
-                
-                self.python_executable = python_executable
-                self.logger.info(f"Using provided Python: {python_executable}")
-            else:
-                # Auto-detect (may raise RuntimeError)
-                self.python_executable = self._detect_system_python()
-        
-        except RuntimeError as e:
-            # Python detection failed - tool disabled
-            self.python_executable = None
+        if TESTMODE:
+            # TEST MODE: Skip Python detection
+            self.python_executable = "python.exe"
             self.virtual_env = None
-            self.logger.error(f"BashToolExecutor initialization failed: {e}")
-            raise
-        
-        # Virtual environment - only if Python available
-        self.virtual_env = self._setup_virtual_env(virtual_env)
-        
+            self.logger.info("TEST MODE: Skipping Python detection")
+        else:
+            # PRODUCTION MODE: Real Python detection
+            try:
+                if python_executable:
+                    # Validate provided executable
+                    result = subprocess.run(
+                        [python_executable, '--version'],
+                        capture_output=True,
+                        timeout=2,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Invalid Python executable: {python_executable}")
+
+                    self.python_executable = python_executable
+                    self.logger.info(f"Using provided Python: {python_executable}")
+                else:
+                    # Auto-detect (may raise RuntimeError)
+                    self.python_executable = self._detect_system_python()
+
+            except RuntimeError as e:
+                # Python detection failed - tool disabled
+                self.python_executable = None
+                self.virtual_env = None
+                self.logger.error(f"BashToolExecutor initialization failed: {e}")
+                raise
+
+            # Virtual environment - only if Python available
+            self.virtual_env = self._setup_virtual_env(virtual_env)
+
         # Initialize CommandExecutor with all dependencies now available
-        self.command_executor = CommandExecutor(
-            path_translator=self.path_translator,
-            command_translator=self.command_translator,
-            git_bash_exe=self.git_bash_exe,
-            logger=self.logger
-        )
+        # Get claude home directory (needed for tilde expansion in _expand_variables)
+        # NOTE: Only BashToolExecutor has _expand_variables, but pass to CommandExecutor
+        #       in case it needs config info in future
+        if TESTMODE:
+            # TEST MODE: Use fake home
+            self.claude_home_unix = "/home/testuser"
+        else:
+            # PRODUCTION MODE: Get from path_translator
+            self.claude_home_unix = self.path_translator.get_claude_home_unix()
+
+        if TESTMODE:
+            # TEST MODE: Use CommandExecutorTest with faked subprocess
+            from bash_tool_executor_test import CommandExecutorTest
+            self.command_executor = CommandExecutorTest(
+                command_translator=self.command_translator,
+                git_bash_exe=self.git_bash_exe,
+                claude_home_unix=self.claude_home_unix,
+                logger=self.logger
+            )
+            self.logger.warning("TEST MODE: Using CommandExecutorTest (faked subprocess)")
+        else:
+            # PRODUCTION MODE: Normal CommandExecutor
+            self.command_executor = CommandExecutor(
+                command_translator=self.command_translator,
+                git_bash_exe=self.git_bash_exe,
+                claude_home_unix=self.claude_home_unix,
+                logger=self.logger
+            )
         
         self.logger.info(
             f"BashToolExecutor initialized: Python={self.python_executable}, "
@@ -5580,19 +5882,17 @@ class BashToolExecutor(ToolExecutor):
     def _expand_braces(self, command: str) -> str:
         """
         Expand brace patterns: {1..10}, {a..z}, {a,b,c}
-
+        
         Supports:
         - Numeric ranges: {1..10}, {01..100}
         - Alpha ranges: {a..z}, {A..Z}
         - Lists: {file1,file2,file3}
         - Nested: {a,b{1,2}}
-
+        
         Returns command with braces expanded
         """
         import re
-
-        self.logger.debug(f"[BRACE EXPAND] Input: {command}")
-
+        
         def expand_single_brace(match):
             """Expand a single brace expression"""
             content = match.group(1)
@@ -5646,8 +5946,7 @@ class BashToolExecutor(ToolExecutor):
                 # No more expansions
                 break
             command = new_command
-
-        self.logger.debug(f"[BRACE EXPAND] Output: {command}")
+        
         return command
     
     def _process_heredocs(self, command: str) -> Tuple[str, List[Path]]:
@@ -5687,20 +5986,21 @@ class BashToolExecutor(ToolExecutor):
         
         for match in reversed(matches):
             strip_tabs = match.group(1) == '-'
+            quote_char = match.group(2)  # Captures ' or " if delimiter was quoted
             delimiter = match.group(3)
             heredoc_start = match.end()
-            
+
             # Find content after heredoc operator
             remaining = result_command[heredoc_start:]
-            
+
             # Split into lines
             lines = remaining.split('\n')
-            
+
             # Find delimiter closing line
             content_lines = []
             delimiter_found = False
             delimiter_line_index = -1
-            
+
             # Start from line 1 (line 0 is usually empty after <<EOF)
             for i in range(1, len(lines)):
                 if lines[i].rstrip() == delimiter:
@@ -5708,23 +6008,93 @@ class BashToolExecutor(ToolExecutor):
                     delimiter_line_index = i
                     break
                 content_lines.append(lines[i])
-            
+
             if not delimiter_found:
                 self.logger.warning(f"Heredoc delimiter '{delimiter}' not found")
                 # Use all remaining lines as content
                 content_lines = lines[1:] if len(lines) > 1 else []
                 delimiter_line_index = len(lines) - 1
-            
+
             # Build content
             content = '\n'.join(content_lines)
-            
+
             # Strip leading tabs if <<- was used
             if strip_tabs:
                 content = '\n'.join(line.lstrip('\t') for line in content_lines)
-            
+
+            # ================================================================
+            # ARTIGIANO: Heredoc Variable Expansion
+            # ================================================================
+            # CRITICAL: In bash, heredocs expand variables and commands UNLESS
+            # the delimiter is quoted (<<"EOF" or <<'EOF')
+            #
+            # <<EOF          → Expand $VAR, $(cmd), `cmd`, $((expr))
+            # <<"EOF"        → NO expansion (literal)
+            # <<'EOF'        → NO expansion (literal)
+            #
+            # BEHAVIOR:
+            # - Unquoted delimiter → Use bash.exe to expand content
+            # - Quoted delimiter → Write content literally
+            # - No bash.exe → Write literally + warning
+            #
+            # This ensures heredoc-generated configs/scripts have correct values.
+
+            should_expand = (quote_char == '')  # Empty = unquoted delimiter
+
+            if should_expand:
+                # Attempt variable expansion via bash.exe
+                if self.git_bash_exe:
+                    try:
+                        # Use bash to expand the content
+                        # We pass content via echo to let bash do expansion
+                        # Use printf for better control over newlines and special chars
+
+                        # Escape content for bash heredoc (preserve literal backslashes)
+                        # We'll use bash itself to expand, via a heredoc to bash
+                        expansion_script = f'''cat <<'EXPAND_DELIMITER'
+{content}
+EXPAND_DELIMITER'''
+
+                        # But wait - we WANT expansion, so use UNquoted delimiter
+                        expansion_script = f'''cat <<EXPAND_DELIMITER
+{content}
+EXPAND_DELIMITER'''
+
+                        # Execute via bash.exe
+                        bash_path = self.git_bash_exe
+                        result = subprocess.run(
+                            [bash_path, '-c', expansion_script],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=str(self.scratch_dir),
+                            env=self._setup_environment(),
+                            errors='replace',
+                            encoding='utf-8'
+                        )
+
+                        if result.returncode == 0:
+                            # Use expanded content
+                            content = result.stdout
+                            self.logger.debug(f"Heredoc expanded via bash.exe (delimiter: {delimiter})")
+                        else:
+                            # Expansion failed - use literal
+                            self.logger.warning(f"Heredoc expansion failed (exit {result.returncode}), using literal content")
+                            self.logger.debug(f"Bash stderr: {result.stderr}")
+
+                    except Exception as e:
+                        # Expansion error - use literal
+                        self.logger.warning(f"Heredoc expansion error: {e}, using literal content")
+
+                else:
+                    # No bash.exe for expansion - CRITICAL
+                    self.logger.warning(f"Heredoc with unquoted delimiter '{delimiter}' should expand variables")
+                    self.logger.warning("bash.exe not available - writing LITERAL content (may be incorrect)")
+                    # Continue with literal content
+
             # Create temp file
             temp_file = self.scratch_dir / f'heredoc_{threading.get_ident()}_{len(temp_files)}.tmp'
-            
+
             try:
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(content)
@@ -5772,42 +6142,20 @@ class BashToolExecutor(ToolExecutor):
         env = self._setup_environment()
         
         def replace_input_substitution(match):
-            """Replace <(cmd) with temp file containing cmd output
-
-            FIX #12: Handle testmode and proper shell selection
-            """
+            """Replace <(cmd) with temp file containing cmd output"""
             cmd = match.group(1)
-
-            # Create temp file path
-            temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
-            temp_files.append(temp_file)
-
-            # FIX #12: If in testmode, don't execute, just create placeholder
-            if self.testmode:
-                # Create empty temp file for testing
-                temp_file.write_text(f"[TESTMODE] Process substitution: <({cmd})")
-                unix_temp = f"/tmp/{temp_file.name}"
-                return unix_temp
 
             # Translate and execute command
             try:
-                # Translate paths in sub-command
-                cmd_with_paths = self.path_translator.translate_paths_in_string(cmd, 'to_windows')
+                # NOTE: Paths already translated by BashToolExecutor.execute()
+                # No need to translate again here
 
                 # Translate command
-                translated, _, _ = self.command_translator.translate(cmd_with_paths)
-
-                # FIX #12: Detect if PowerShell command or cmd command
-                if 'Get-ChildItem' in translated or 'Select-String' in translated or 'Measure-Object' in translated:
-                    # PowerShell command
-                    shell_cmd = ['powershell', '-Command', translated]
-                else:
-                    # CMD command
-                    shell_cmd = ['cmd', '/c', translated]
-
+                translated, _, _ = self.command_translator.translate(cmd)
+                
                 # Execute
                 result = subprocess.run(
-                    shell_cmd,
+                    ['cmd', '/c', translated],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -5815,15 +6163,19 @@ class BashToolExecutor(ToolExecutor):
                     env=env,
                     errors='replace'
                 )
-
-                # Write output to temp file
+                
+                # Create temp file with output
+                temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
+                
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(result.stdout)
-
+                
+                temp_files.append(temp_file)
+                
                 # Return Unix path for substitution
                 unix_temp = f"/tmp/{temp_file.name}"
                 return unix_temp
-
+            
             except Exception as e:
                 self.logger.error(f"Process substitution failed for <({cmd}): {e}")
                 # Return original if failed
@@ -5857,14 +6209,15 @@ class BashToolExecutor(ToolExecutor):
             return unix_temp
         
         # Replace all input substitutions
+        matches = list(re.finditer(input_pattern, command))
         command = re.sub(input_pattern, replace_input_substitution, command)
-        
+
         # Replace all output substitutions
         command = re.sub(output_pattern, replace_output_substitution, command)
-        
+
         return command, temp_files
     
-    def _process_command_substitution_recursive(self, command: str) -> Tuple[str, Dict[str, str]]:
+    def _process_command_substitution_recursive(self, command: str) -> str:
         """
         Process command substitution $(...) with RECURSIVE translation.
 
@@ -5873,8 +6226,6 @@ class BashToolExecutor(ToolExecutor):
         - Recursively translates Unix commands inside substitution
         - Preserves PowerShell $(...) syntax for output
         - Handles multiple substitutions in single command
-        - FIX #10: Does NOT process $(...)  inside single quotes
-        - FIX #21: Returns placeholders to prevent double-translation
 
         Examples:
             $(grep pattern file.txt)
@@ -5886,22 +6237,12 @@ class BashToolExecutor(ToolExecutor):
             Nested: $(echo $(cat file))
             → $(Write-Host $(Get-Content file))
 
-            'literal $(date)' → 'literal $(date)' (preserved)
-
         Returns:
-            Tuple[str, Dict]: (command_with_placeholders, {placeholder: translated_content})
+            Command with all $(..  .) recursively translated
         """
         if '$(' not in command:
-            return command, {}
-
-        def is_in_single_quotes(text: str, pos: int) -> bool:
-            """Check if position is inside single quotes"""
-            in_quotes = False
-            for i in range(pos):
-                if text[i] == "'" and (i == 0 or text[i-1] != '\\'):
-                    in_quotes = not in_quotes
-            return in_quotes
-
+            return command
+        
         def find_substitutions(text: str) -> List[Tuple[int, int, str]]:
             """
             Find all $(...) patterns with correct nesting.
@@ -5914,11 +6255,6 @@ class BashToolExecutor(ToolExecutor):
             
             while i < len(text):
                 if i < len(text) - 1 and text[i:i+2] == '$(':
-                    # FIX #10: Skip if inside single quotes
-                    if is_in_single_quotes(text, i):
-                        i += 2
-                        continue
-
                     # FIX #6: Check if it's arithmetic $(( instead of command substitution $(
                     if i < len(text) - 2 and text[i+2] == '(':
                         # This is $((arithmetic)), NOT command substitution
@@ -5956,80 +6292,127 @@ class BashToolExecutor(ToolExecutor):
         substitutions = find_substitutions(command)
 
         if not substitutions:
-            return command, {}
+            return command
 
-        # FIX #21: Use placeholders to prevent double-translation
+        for start, end, content in substitutions:
+            print(f"  - Position {start}-{end}: '{content}'")
+        
         # Process substitutions from END to START (avoid index shifting)
         substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
-        placeholder_map = {}
-        placeholder_counter = [0]  # Use list to allow modification in nested function
-
+        
         for start, end, content in substitutions_reversed:
             # Translate the content
             try:
                 # RECURSIVE: content might have nested $(...)
                 translated_content = self._translate_substitution_content(content)
 
-                # Create placeholder for translated content
-                placeholder = f"__CMD_SUBST_{placeholder_counter[0]}__"
-                placeholder_counter[0] += 1
-
-                # Store the translated content with $(...) wrapper
-                placeholder_map[placeholder] = f"$({translated_content})"
-
-                # Replace with placeholder in command
-                command = command[:start] + placeholder + command[end:]
-
+                # Replace in command (preserve $(...) wrapper for PowerShell)
+                replacement = f"$({translated_content})"
+                command = command[:start] + replacement + command[end:]
+                
             except Exception as e:
                 self.logger.error(f"Command substitution translation failed: {e}")
                 # Keep original on error
                 continue
-
-        return command, placeholder_map
+        
+        return command
     
     def _translate_substitution_content(self, content: str) -> str:
         """
-        Translate Unix command content inside $(...).
-        
-        FULL TRANSLATION PIPELINE:
-        1. Check for nested $(...)  - recurse first
-        2. Translate Unix paths → Windows
-        3. Translate Unix commands → Windows
-        4. Return translated command (WITHOUT outer $(...))
-        
+        Translate Unix command content inside $(...) - ARTIGIANO STRATEGY.
+
+        CRITICAL: Commands inside $(...) must be EXECUTED to capture output.
+        Cannot just "pass to bash.exe" - must run and get result.
+
+        ARTIGIANO STRATEGY:
+        1. Detect if command is COMPLEX (would fail in PowerShell emulation)
+        2. Complex → execute with bash.exe, capture output, return as string
+        3. Simple → translate to PowerShell, execute in $(...) context
+
+        COMPLEXITY TRIGGERS:
+        - Pipeline with critical commands (find, xargs, awk, sed)
+        - Command chains (&&, ||)
+        - Process substitution <(...)
+        - Complex redirections
+
         Args:
             content: Unix command string (e.g., "grep pattern file.txt")
-            
+
         Returns:
-            Translated command (e.g., "Select-String -Pattern 'pattern' -Path 'file.txt'")
+            Translated command or bash.exe invocation
         """
         # Handle empty
         if not content or not content.strip():
             return content
-        
+
         # STEP 1: Recursively handle nested $(...)
         if '$(' in content:
             content = self._process_command_substitution_recursive(content)
-        
-        # STEP 2: Translate paths
-        content_with_paths = self.path_translator.translate_paths_in_string(content, 'to_windows')
-        
-        # STEP 3: Translate commands
+
+        # ================================================================
+        # ARTIGIANO: Detect if command inside $(...) is COMPLEX
+        # ================================================================
+
+        def is_complex_substitution(cmd: str) -> bool:
+            """Detect if command needs bash.exe for reliable execution"""
+            # Pipeline with critical commands
+            if '|' in cmd:
+                critical_in_pipeline = ['find', 'xargs', 'awk', 'sed', 'grep -', 'cut', 'tr']
+                for critical in critical_in_pipeline:
+                    if critical in cmd:
+                        return True
+
+            # Command chains
+            if any(op in cmd for op in ['&&', '||', ';']):
+                return True
+
+            # Process substitution (shouldn't be here but check anyway)
+            if '<(' in cmd or '>(' in cmd:
+                return True
+
+            # Complex find -exec
+            if '-exec' in cmd and 'find' in cmd:
+                return True
+
+            return False
+
+        if is_complex_substitution(content):
+            # COMPLEX command inside $(...) → execute with bash.exe
+            if self.git_bash_exe:
+                self.logger.debug(f"Complex command in $(...) → using bash.exe: {content[:50]}")
+                # Need to execute bash.exe, capture output, and insert as string
+                # This is tricky - we're in preprocessing, haven't executed yet
+                # Return a PowerShell invocation that runs bash.exe
+                bash_escaped = content.replace('"', '`"').replace('$', '`$')
+                # Convert to bash.exe invocation that captures output
+                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
+            else:
+                self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
+                # Fall through to PowerShell translation (may fail)
+
+        # ================================================================
+        # STEP 2: Translate commands
+        # ================================================================
+        # NOTE: Paths already translated by BashToolExecutor.execute()
+        # Command substitution $(...) is PART of the original command,
+        # so paths inside it were already translated.
+
         # Use command_translator which handles:
         # - Pipe chains
         # - Redirections
         # - Command concatenation (&&, ||, ;)
         # - All individual commands
-        # FIX #3: Use force_translate=True to ensure commands inside $() are translated
-        translated, use_shell, method = self.command_translator.translate(content_with_paths, force_translate=True)
-        
+        # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
+        # Inside $(), there's no "strategy selection" - must translate immediately
+        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
+
         # STEP 4: Clean up for PowerShell context
         # Command translator might wrap in cmd /c - remove that for $(...) context
         if translated.startswith('cmd /c '):
             translated = translated[7:]
         elif translated.startswith('cmd.exe /c '):
             translated = translated[11:]
-        
+
         # PowerShell $(...) expects bare commands, not cmd wrappers
         return translated
     
@@ -6042,14 +6425,14 @@ class BashToolExecutor(ToolExecutor):
         - Array operations: ${arr[@]}
         """
         import re
-        
-        # Get Claude home directory from path_translator
-        claude_home = self.path_translator.get_claude_home_unix()
-        
+
+        # NOTE: claude_home_unix is passed via __init__, no PathTranslator needed
+        claude_home = self.claude_home_unix
+
         # 1. Tilde expansion: ~/path → /home/claude/path
         if command.startswith('~/'):
             command = claude_home + '/' + command[2:]
-        
+
         # Also expand tilde in arguments: cmd ~/path
         command = re.sub(r'\s~/', f' {claude_home}/', command)
         
@@ -6121,6 +6504,7 @@ class BashToolExecutor(ToolExecutor):
         command = re.sub(length_pattern, expand_length, command)
 
         # 5b. Remove prefix: ${var#pattern} and ${var##pattern}
+        # Pattern: ${var#pattern} or ${var##pattern}
         prefix_pattern = r'\$\{(\w+)(#{1,2})([^}]+)\}'
 
         def expand_remove_prefix(match):
@@ -6132,18 +6516,21 @@ class BashToolExecutor(ToolExecutor):
             if not value:
                 return ''
 
-            # Convert bash glob to regex and match from start
+            # Convert bash glob to regex
             import fnmatch
             regex_pattern = fnmatch.translate(pattern)
+
+            # Convert bash glob to regex and match from start
             regex_pattern = '^' + regex_pattern.rstrip('\\Z')
 
             if op == '#':  # Remove shortest prefix (non-greedy)
-                # Make pattern non-greedy
+                # Make pattern non-greedy by adding '?' after '*'
                 regex_pattern_ng = regex_pattern.replace('*', '*?')
                 match_obj = re.match(regex_pattern_ng, value)
                 if match_obj:
                     return value[len(match_obj.group(0)):]
             else:  # ## Remove longest prefix (greedy - default)
+                # fnmatch patterns are already greedy by default
                 match_obj = re.match(regex_pattern, value)
                 if match_obj:
                     return value[len(match_obj.group(0)):]
@@ -6233,27 +6620,39 @@ class BashToolExecutor(ToolExecutor):
 
         command = re.sub(case_pattern, expand_case, command)
 
-        # 6. Simple variable expansion: ${VAR} and $VAR
-        # This must be done LAST, after all other ${...} patterns
+        # ================================================================
+        # ARTIGIANO: Simple Variable Expansion
+        # ================================================================
+        # CRITICAL: Must expand basic $VAR and ${VAR} forms!
+        # Previous code only handled ${VAR:-default}, missing simple expansion.
+        #
+        # This BROKE commands like:
+        #   cd $HOME        → cd $HOME (literal! Wrong!)
+        #   echo $PATH      → echo $PATH (literal!)
+        #   cp file $USER/  → cp file $USER/ (fails!)
+        #
+        # 6. Simple ${VAR} expansion
+        simple_brace_pattern = r'\$\{(\w+)\}'
 
-        # 6a. ${VAR} - simple braced variable
-        simple_braced_pattern = r'\$\{(\w+)\}'
-
-        def expand_simple_braced(match):
+        def expand_simple_brace(match):
             var_name = match.group(1)
             value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${{{var_name}}} not found in environment, expanding to empty string")
             return value
 
-        command = re.sub(simple_braced_pattern, expand_simple_braced, command)
+        command = re.sub(simple_brace_pattern, expand_simple_brace, command)
 
-        # 6b. $VAR - simple unbraced variable (but NOT $(...) or $(()
-        # Must not match $(...) command substitution or $((arithmetic))
-        # Pattern: $ followed by word characters, but not followed by ( or ((
-        simple_var_pattern = r'\$(\w+)(?!\()'
+        # 7. Simple $VAR expansion (without braces)
+        # Must be AFTER ${VAR} to avoid double-expansion
+        # Match $VAR but NOT $((, ${, $@, $*, $#, $?, $$, $!, $0-9
+        simple_var_pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
 
         def expand_simple_var(match):
             var_name = match.group(1)
             value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${var_name} not found in environment, expanding to empty string")
             return value
 
         command = re.sub(simple_var_pattern, expand_simple_var, command)
@@ -6327,7 +6726,6 @@ class BashToolExecutor(ToolExecutor):
         In our case, just execute command normally.
 
         IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
-        IMPORTANT: Do NOT match <(...) or >(...) - that's process substitution!
         """
         import re
 
@@ -6351,106 +6749,77 @@ class BashToolExecutor(ToolExecutor):
     def _process_command_grouping(self, command: str) -> str:
         """
         Process command grouping: { cmd1; cmd2; }
-
+        
         Group commands to run in current shell.
         Convert to simple command sequence.
-
-        FIX #9: Must NOT match brace expansions like {1..5} or {a,b,c}
         """
         import re
-
-        # Pattern: { cmd1; cmd2; } but NOT ${var...} and NOT brace expansions
-        # Command groups contain semicolons or newlines
+        
+        # Pattern: { cmd1; cmd2; } but NOT ${var...}
         # Use negative lookbehind: (?<!\$) = "not preceded by $"
-        # FIX #9: Only match if content contains ; or \n (actual command groups)
-        grouping_pattern = r'(?<!\$)\{\s*([^}]*[;\n][^}]*)\s*\}'
-
+        # FIX #7: Prevent matching ${var#pattern}, ${var%pattern}, ${var/pattern/repl}, etc.
+        grouping_pattern = r'(?<!\$)\{\s*([^}]+)\s*\}'
+        
         def expand_grouping(match):
             # Return inner commands
             return match.group(1)
-
+        
         command = re.sub(grouping_pattern, expand_grouping, command)
-
+        
         return command
     
     def _process_xargs(self, command: str) -> str:
         """
         Process xargs patterns: cmd | xargs other_cmd
-
-        FIX #19: Translate the command inside xargs
-
+        
         Converts to PowerShell ForEach-Object or cmd.exe for loop.
         """
         import re
-
+        
         if 'xargs' not in command:
             return command
-
+        
         # Pattern: ... | xargs cmd
         xargs_pattern = r'(.+?)\|\s*xargs\s+(.+)'
-
+        
         match = re.match(xargs_pattern, command)
         if not match:
             return command
-
+        
         input_cmd = match.group(1).strip()
         xargs_cmd = match.group(2).strip()
-
-        # FIX #19: Translate the xargs command (grep → Select-String, wc → Measure-Object, etc.)
-        translated_xargs, _, _ = self.command_translator.translate(xargs_cmd, force_translate=True)
-
-        # Clean up cmd /c wrapper if present
-        if translated_xargs.startswith('cmd /c '):
-            translated_xargs = translated_xargs[7:]
-        elif translated_xargs.startswith('cmd.exe /c '):
-            translated_xargs = translated_xargs[11:]
-
-        # Replace placeholder $_ in translated command
-        # Note: xargs passes the input as argument, represented by $_
-        ps_command = f"{input_cmd} | ForEach-Object {{ {translated_xargs} $_ }}"
-
+        
+        # Convert to PowerShell ForEach-Object
+        # input_cmd | ForEach-Object { xargs_cmd $_ }
+        ps_command = f"{input_cmd} | ForEach-Object {{ {xargs_cmd} $_ }}"
+        
         return ps_command
     
     def _process_find_exec(self, command: str) -> str:
         """
         Process find ... -exec patterns
-
-        FIX #11: Translate the command inside -exec (grep → Select-String, etc.)
-
+        
         Converts to PowerShell Get-ChildItem with ForEach-Object.
         """
         import re
-
+        
         if 'find' not in command or '-exec' not in command:
             return command
-
+        
         # Pattern: find path -exec cmd {} \;
         exec_pattern = r'find\s+([^\s]+)\s+.*?-exec\s+(.+?)\s*\{\}\s*\\;'
-
+        
         match = re.search(exec_pattern, command)
         if not match:
             return command
-
+        
         path = match.group(1)
         exec_cmd = match.group(2).strip()
-
-        # FIX #11: TRANSLATE the exec_cmd (grep → Select-String, wc → Measure-Object, etc.)
-        # Use command_translator to translate the command
-        translated_exec, _, _ = self.command_translator.translate(exec_cmd, force_translate=True)
-
-        # Clean up cmd /c wrapper if present (not needed inside PowerShell)
-        if translated_exec.startswith('cmd /c '):
-            translated_exec = translated_exec[7:]
-        elif translated_exec.startswith('cmd.exe /c '):
-            translated_exec = translated_exec[11:]
-
+        
         # Convert to PowerShell
-        # Get-ChildItem path -Recurse | ForEach-Object { translated_exec $_.FullName }
-        # Replace {} placeholder in translated command with $_.FullName
-        ps_exec_cmd = translated_exec.replace('{}', '$_.FullName')
-
-        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {ps_exec_cmd} }}"
-
+        # Get-ChildItem path -Recurse | ForEach-Object { exec_cmd $_.FullName }
+        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {exec_cmd} $_.FullName }}"
+        
         return ps_command
     
     def _process_escape_sequences(self, command: str) -> str:
@@ -6795,65 +7164,12 @@ class BashToolExecutor(ToolExecutor):
             self.logger.error(f"Unexpected error creating venv: {e}")
             raise RuntimeError(f"Virtual environment setup failed: {e}")
     
-    def _process_variable_assignments(self, command: str) -> str:
-        """
-        FIX #8: Process variable assignments in command chains.
-
-        Handles patterns like:
-        - file="test.tar.gz"; echo ${file%.*}
-        - var1=val1; var2=val2; echo $var1 $var2
-        - x=5; y=10; echo $((x + y))
-
-        Extracts variable assignments and adds them to os.environ
-        so they're available for subsequent ${var} expansions.
-
-        Returns:
-            Command with variable assignments processed
-        """
-        import re
-
-        # Pattern: var=value (at start of command or after ; or &&)
-        # Handles: var="value" or var='value' or var=value
-        # Must be at word boundary (after whitespace, ;, or &&)
-        assign_pattern = r'(?:^|;\s*|&&\s*)(\w+)=((?:"[^"]*"|\'[^\']*\'|[^\s;]+))'
-
-        matches = list(re.finditer(assign_pattern, command))
-
-        if not matches:
-            return command
-
-        # Extract assignments and set in environment
-        for match in matches:
-            var_name = match.group(1)
-            var_value = match.group(2)
-
-            # Remove quotes if present
-            if (var_value.startswith('"') and var_value.endswith('"')) or \
-               (var_value.startswith("'") and var_value.endswith("'")):
-                var_value = var_value[1:-1]
-
-            # Set in environment for subsequent expansions
-            os.environ[var_name] = var_value
-
-            self.logger.debug(f"[VAR ASSIGN] {var_name}={var_value}")
-
-        # Remove assignments from command (they're now in environment)
-        # Replace assignment with empty string (keep separator if present)
-        cleaned_command = re.sub(assign_pattern, '', command)
-
-        # Clean up extra semicolons/whitespace that may be left
-        cleaned_command = re.sub(r';\s*;', ';', cleaned_command)
-        cleaned_command = re.sub(r'^;\s*', '', cleaned_command)
-        cleaned_command = re.sub(r'\s*;\s*$', '', cleaned_command)
-        cleaned_command = cleaned_command.strip()
-
-        return cleaned_command
-
     def execute(self, tool_input: dict) -> str:
         """Execute bash command with FULL pattern emulation"""
         command = tool_input.get('command', '')
         description = tool_input.get('description', '')
-        
+
+
         if not command:
             return "Error: command parameter is required"
         
@@ -6868,9 +7184,6 @@ class BashToolExecutor(ToolExecutor):
         try:
             # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
 
-            # STEP 0.-1: Extract and process variable assignments
-            # FIX #8: Handle variable assignment chains like: file="test"; echo ${file}
-            command = self._process_variable_assignments(command)
 
             # STEP 0.0: Expand aliases (ll, la, etc.)
             command = self._expand_aliases(command)
@@ -6903,16 +7216,15 @@ class BashToolExecutor(ToolExecutor):
             
             # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
             command = self._expand_variables(command)
-            
+
             # STEP 0.8: xargs patterns
             command = self._process_xargs(command)
-            
+
             # STEP 0.9: find ... -exec patterns
             command = self._process_find_exec(command)
             
             # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
-            # FIX #21: Returns placeholders to prevent double-translation
-            command, cmd_subst_map = self._process_command_substitution_recursive(command)
+            command = self._process_command_substitution_recursive(command)
             
             # STEP 1: Detect if PowerShell needed (if not already set by control structures)
             if 'use_powershell' not in locals():
@@ -6922,32 +7234,27 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.debug("Using PowerShell for advanced patterns")
             
             # STEP 2: Translate Unix paths → Windows paths
-            command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
+            if self.path_translator:
+                # PRODUCTION MODE: Translate paths
+                command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
+            else:
+                # TEST MODE: Skip path translation (not needed for testing command logic)
+                command_with_win_paths = command
+                self.logger.debug("TEST MODE: Skipping path translation")
 
             # STEP 3: Translate Unix commands → Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(
                 command_with_win_paths
             )
-
-            # FIX #21: Restore command substitution placeholders
-            # This prevents double-translation of already-translated $(...) content
-            for placeholder, subst_content in cmd_subst_map.items():
-                translated_cmd = translated_cmd.replace(placeholder, subst_content)
-
+            
             # STEP 3.5: Execute bash - Strategy selection (NUOVO!)
             # CommandExecutor decide: bash.exe? native binary? PowerShell emulation?
             # Parse command into parts for executor
-            # FIX #21: Use shlex.split() to properly handle quotes in translated PowerShell commands
-            import shlex
-            try:
-                parts = shlex.split(translated_cmd) if translated_cmd else []
-            except ValueError:
-                # Fallback to simple split if parsing fails
-                parts = translated_cmd.split() if translated_cmd else []
+            parts = translated_cmd.split() if translated_cmd else []
             executable_cmd, executor_needs_ps = self.command_executor.execute_bash(
                 translated_cmd, parts
             )
-
+            
             # Update command and PowerShell flag based on executor decision
             translated_cmd = executable_cmd
             if executor_needs_ps:
@@ -6961,29 +7268,21 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.debug(f"Translated: {translated_cmd[:100]}")
 
             # STEP 5: Validate command
-            is_safe, reason = self.sandbox_validator.validate_command(translated_cmd)
-            if not is_safe:
-                return f"Error: Security - {reason}"
+            if self.sandbox_validator:
+                is_safe, reason = self.sandbox_validator.validate_command(translated_cmd)
+                if not is_safe:
+                    return f"Error: Security - {reason}"
+            else:
+                # TEST MODE: Skip validation
+                self.logger.debug("TEST MODE: Skipping sandbox validation")
             
             # Working directory
             cwd = self.scratch_dir
             
             # Setup environment
             env = self._setup_environment()
-
+            
             # STEP 6: Execute
-            # TESTMODE: Simulate execution without running commands
-            if self.testmode:
-                # Create mock result
-                from types import SimpleNamespace
-                result = SimpleNamespace(
-                    returncode=0,
-                    stdout=f"[TEST MODE] Would execute: {translated_cmd[:200]}",
-                    stderr=""
-                )
-                self.logger.info(f"[TESTMODE] Simulated: {command[:100]}")
-                return self._format_result(result, command, translated_cmd, method)
-
             if 'powershell' in translated_cmd.lower() and '-File' in translated_cmd:
                 # Already a PowerShell script command (from control structures)
                 # Execute directly without additional wrapping
@@ -7066,15 +7365,23 @@ class BashToolExecutor(ToolExecutor):
         # Stdout - translate Windows paths back to Unix
         if result.stdout:
             lines.append("")
-            stdout_unix = self.path_translator.translate_paths_in_string(result.stdout, 'to_unix')
+            if self.path_translator:
+                stdout_unix = self.path_translator.translate_paths_in_string(result.stdout, 'to_unix')
+            else:
+                # TEST MODE: No path translation
+                stdout_unix = result.stdout
             lines.append(stdout_unix.rstrip())
-        
+
         # Stderr - translate Windows paths back to Unix
         if result.stderr:
             lines.append("")
             if result.stdout:
                 lines.append("--- stderr ---")
-            stderr_unix = self.path_translator.translate_paths_in_string(result.stderr, 'to_unix')
+            if self.path_translator:
+                stderr_unix = self.path_translator.translate_paths_in_string(result.stderr, 'to_unix')
+            else:
+                # TEST MODE: No path translation
+                stderr_unix = result.stderr
             lines.append(stderr_unix.rstrip())
         
         return '\n'.join(lines)
