@@ -530,7 +530,7 @@ class CommandExecutor:
     }
 
     def __init__(self, command_translator=None,
-                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None):
+                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
 
@@ -544,11 +544,15 @@ class CommandExecutor:
             git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
+            test_mode: If True, use ExecutionEngine in test mode
         """
         self.command_translator = command_translator
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
+
+        # ExecutionEngine - UNICO PUNTO per subprocess
+        self.executor = ExecutionEngine(test_mode=test_mode, logger=self.logger)
 
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
@@ -5921,7 +5925,8 @@ class BashToolExecutor(ToolExecutor):
             command_translator=self.command_translator,
             git_bash_exe=self.git_bash_exe,
             claude_home_unix=self.claude_home_unix,
-            logger=self.logger
+            logger=self.logger,
+            test_mode=self.TESTMODE
         )
         
         self.logger.info(
@@ -6182,12 +6187,11 @@ EXPAND_DELIMITER'''
 {content}
 EXPAND_DELIMITER'''
 
-                        # Execute via bash.exe
+                        # Execute via bash.exe through ExecutionEngine
                         bash_path = self.git_bash_exe
-                        result = subprocess.run(
-                            [bash_path, '-c', expansion_script],
-                            capture_output=True,
-                            text=True,
+                        result = self.command_executor.executor.execute_bash(
+                            bash_path,
+                            expansion_script,
                             timeout=5,
                             cwd=str(self.scratch_dir),
                             env=self._setup_environment(),
@@ -6274,12 +6278,10 @@ EXPAND_DELIMITER'''
 
                 # Translate command
                 translated, _, _ = self.command_translator.translate(cmd)
-                
-                # Execute
-                result = subprocess.run(
-                    ['cmd', '/c', translated],
-                    capture_output=True,
-                    text=True,
+
+                # Execute via ExecutionEngine
+                result = self.command_executor.executor.execute_cmd(
+                    translated,
                     timeout=30,
                     cwd=str(cwd),
                     env=env,
@@ -7404,14 +7406,13 @@ EXPAND_DELIMITER'''
             # Setup environment
             env = self._setup_environment()
             
-            # STEP 6: Execute
+            # STEP 6: Execute via ExecutionEngine
             if 'powershell' in translated_cmd.lower() and '-File' in translated_cmd:
                 # Already a PowerShell script command (from control structures)
                 # Execute directly without additional wrapping
-                result = subprocess.run(
+                # Extract the command after 'powershell'
+                result = self.command_executor.executor.execute_powershell(
                     translated_cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=timeout,
                     cwd=str(cwd),
                     env=env,
@@ -7420,10 +7421,8 @@ EXPAND_DELIMITER'''
                     shell=True
                 )
             elif use_powershell:
-                result = subprocess.run(
-                    ['powershell', '-NoProfile', '-NonInteractive', '-Command', translated_cmd],
-                    capture_output=True,
-                    text=True,
+                result = self.command_executor.executor.execute_powershell(
+                    translated_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
                     env=env,
@@ -7431,10 +7430,8 @@ EXPAND_DELIMITER'''
                     encoding='utf-8'
                 )
             else:
-                result = subprocess.run(
-                    ['cmd', '/c', translated_cmd],
-                    capture_output=True,
-                    text=True,
+                result = self.command_executor.executor.execute_cmd(
+                    translated_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
                     env=env,
