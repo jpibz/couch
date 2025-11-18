@@ -530,7 +530,7 @@ class CommandExecutor:
     }
 
     def __init__(self, command_translator=None,
-                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
+                 git_bash_exe=None, claude_home_unix="/home/claude", scratch_dir=None, logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
 
@@ -543,12 +543,14 @@ class CommandExecutor:
             command_translator: CommandTranslator instance (for delegation)
             git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
+            scratch_dir: Scratch directory for temp files (for preprocessing)
             logger: Logger instance
             test_mode: If True, use ExecutionEngine in test mode
         """
         self.command_translator = command_translator
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
+        self.scratch_dir = scratch_dir
         self.logger = logger or logging.getLogger('CommandExecutor')
 
         # ExecutionEngine - UNICO PUNTO per subprocess
@@ -565,8 +567,7 @@ class CommandExecutor:
     # MAIN EXECUTION ENTRY POINT
     # ========================================================================
 
-    def execute(self, command: str, timeout: int, cwd: Path, env: dict,
-                preprocessing_callbacks: dict = None) -> Tuple[subprocess.CompletedProcess, str, str]:
+    def execute(self, command: str, timeout: int, cwd: Path, env: dict) -> Tuple[subprocess.CompletedProcess, str, str, List[Path]]:
         """
         Main entry point for command execution.
 
@@ -579,24 +580,21 @@ class CommandExecutor:
             timeout: Command timeout in seconds
             cwd: Working directory
             env: Environment variables
-            preprocessing_callbacks: Dict of preprocessing methods from BashToolExecutor
-                                   (temporary - will be moved here)
 
         Returns:
-            Tuple[CompletedProcess, translated_cmd, method]:
+            Tuple[CompletedProcess, translated_cmd, method, temp_files]:
                 - result: execution result
                 - translated_cmd: translated command (for logging)
                 - method: translation method (for logging)
+                - temp_files: temp files created during preprocessing (for cleanup)
         """
-        # Temp files tracking for cleanup
         temp_files = []
 
         try:
-            # NOTE: Preprocessing methods are still in BashToolExecutor
-            # They will be moved here in next iteration
-            # For now, preprocessing must be done by BashToolExecutor before calling this
+            # STEP 1: Preprocessing (aliases, braces, heredocs, substitution, etc.)
+            command, temp_files = self.preprocess_command(command)
 
-            # STEP 1: Translate Unix commands → Windows commands
+            # STEP 2: Translate Unix commands → Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(command)
 
             # STEP 2: Strategy selection - decide execution method
@@ -635,7 +633,7 @@ class CommandExecutor:
                     encoding='utf-8'
                 )
 
-            return result, translated_cmd, method
+            return result, translated_cmd, method, temp_files
 
         except subprocess.TimeoutExpired as e:
             # Re-raise with original exception
@@ -5883,225 +5881,6 @@ class CommandExecutor:
 # BASHTOOLEXECUTOR - ORCHESTRATION LAYER
 # ============================================================================
 
-class BashToolExecutor(ToolExecutor):
-    """
-    Bash command executor integrated with COUCH architecture.
-    
-    Receives params dict from ExecutorDefinition - NO separate config class.
-    
-    ============================================================================
-    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
-    ============================================================================
-    
-    This executor uses native Unix binaries on Windows for 100% compatibility.
-    Install these once, system-wide:
-    
-    1. GIT FOR WINDOWS (covers 90% of tools)
-       Download: https://git-scm.com/download/win
-       Install options:
-       - "Use Git and optional Unix tools from Command Prompt" ✓
-       - "Use Windows' default console window" ✓
-       - Credential manager: "None" ✓
-       
-       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
-       
-       Verify:
-         diff --version
-         awk --version
-    
-    2. JQ (JSON processor)
-       Download: https://github.com/jqlang/jq/releases/latest
-       Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
-       
-       Verify:
-         jq --version
-    
-    RESULT:
-    All commands callable directly from CMD/PowerShell.
-    Translator uses native binaries (100% GNU compatible) with PowerShell 
-    fallback for edge cases where binary missing.
-    
-    ============================================================================
-    """
-    
-    def __init__(self, working_dir: str, enabled: bool = False,
-                 python_executable: Optional[str] = None,
-                 virtual_env: Optional[str] = None,
-                 default_timeout: int = 30,
-                 python_timeout: int = 60,
-                 use_git_bash: bool = False,
-                 **kwargs):
-        """
-        Initialize BashToolExecutor
-        
-        Args:
-            working_dir: Tool working directory (from ConfigurationManager)
-            enabled: Tool enabled state
-            python_executable: Python path (OPTIONAL - auto-detected if missing)
-            virtual_env: Virtual env path (OPTIONAL - defaults to BASH_TOOL_ENV)
-            default_timeout: Default command timeout
-            python_timeout: Python script timeout
-            use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
-            
-        Raises:
-            RuntimeError: If Python not found and python_executable not provided
-        """
-        super().__init__('bash_tool', enabled)
-
-        # TESTMODE flag for testing purposes
-        TESTMODE = True  # Set to True for testing
-        self.TESTMODE = TESTMODE
-
-        self.working_dir = Path(working_dir)
-        self.default_timeout = default_timeout
-        self.python_timeout = python_timeout
-        self.use_git_bash = use_git_bash
-
-        # Initialize components
-        self.path_translator = PathTranslator()
-        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
-        self.command_translator = CommandTranslator(self.path_translator)
-        
-        # Initialize CommandExecutor (execution strategy layer)
-        # Will be fully initialized after Git Bash detection
-        self.command_executor = None
-
-        # Create tool-specific scratch directory
-        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
-
-        # Git Bash detection (if enabled)
-        self.git_bash_exe = None
-        if use_git_bash:
-            self.git_bash_exe = self._detect_git_bash()
-            if self.git_bash_exe:
-                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
-            else:
-                self.logger.warning("Git Bash not found - falling back to command translation")
-        
-        # Python executable - CRITICAL DEPENDENCY
-        try:
-            if python_executable:
-                # Validate provided executable
-                result = subprocess.run(
-                    [python_executable, '--version'],
-                    capture_output=True,
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
-
-                self.python_executable = python_executable
-                self.logger.info(f"Using provided Python: {python_executable}")
-            else:
-                # Auto-detect (may raise RuntimeError)
-                self.python_executable = self._detect_system_python()
-
-        except RuntimeError as e:
-            # Python detection failed - tool disabled
-            self.python_executable = None
-            self.virtual_env = None
-            self.logger.error(f"BashToolExecutor initialization failed: {e}")
-            raise
-
-        # Virtual environment - only if Python available
-        self.virtual_env = self._setup_virtual_env(virtual_env)
-
-        # Initialize CommandExecutor with all dependencies now available
-        # Get claude home directory (needed for tilde expansion in _expand_variables)
-        # NOTE: Only BashToolExecutor has _expand_variables, but pass to CommandExecutor
-        #       in case it needs config info in future
-        self.claude_home_unix = self.path_translator.get_claude_home_unix()
-
-        # Initialize CommandExecutor
-        self.command_executor = CommandExecutor(
-            command_translator=self.command_translator,
-            git_bash_exe=self.git_bash_exe,
-            claude_home_unix=self.claude_home_unix,
-            logger=self.logger,
-            test_mode=self.TESTMODE
-        )
-        
-        self.logger.info(
-            f"BashToolExecutor initialized: Python={self.python_executable}, "
-            f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
-        )
-    
-    def _detect_git_bash(self) -> Optional[str]:
-        """
-        Detect Git Bash executable.
-        
-        Standard locations:
-        - C:\Program Files\Git\bin\bash.exe
-        - C:\Program Files (x86)\Git\bin\bash.exe
-        """
-        candidates = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ]
-        
-        for path in candidates:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                return path
-        
-        # Try PATH
-        try:
-            result = subprocess.run(
-                ['where', 'bash.exe'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                bash_path = result.stdout.strip().split('\n')[0]
-                if 'Git' in bash_path:
-                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
-                    return bash_path
-        except:
-            pass
-        
-        return None
-    
-    def _detect_system_python(self) -> str:
-        """
-        Detect system Python - FAIL FAST if missing.
-        
-        Bash tool without Python is INCOMPLETE and should be disabled.
-        """
-        candidates = ['python', 'python.exe']
-        
-        for cmd in candidates:
-            try:
-                result = subprocess.run(
-                    [cmd, '--version'], 
-                    capture_output=True, 
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode == 0:
-                    version = result.stdout.strip()
-                    self.logger.info(f"Detected Python: {cmd} ({version})")
-                    return cmd
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                continue
-        
-        # Python NOT FOUND - tool is incomplete
-        self.logger.critical("CRITICAL: Python not found in system PATH")
-        self.logger.critical("Bash tool requires Python for full functionality")
-        
-        # Disable tool immediately
-        self.enabled = False
-        
-        raise RuntimeError(
-            "Python executable not found in system PATH. "
-            "Bash tool is incomplete without Python and has been disabled. "
-            "Install Python or provide python_executable parameter explicitly."
-        )
-    
     def _expand_braces(self, command: str) -> str:
         """
         Expand brace patterns: {1..10}, {a..z}, {a,b,c}
@@ -6285,12 +6064,12 @@ EXPAND_DELIMITER'''
 
                         # Execute via bash.exe through ExecutionEngine
                         bash_path = self.git_bash_exe
-                        result = self.command_executor.executor.execute_bash(
+                        result = self.executor.execute_bash(
                             bash_path,
                             expansion_script,
                             timeout=5,
                             cwd=str(self.scratch_dir),
-                            env=self._setup_environment(),
+                            env=self._get_default_environment(),
                             errors='replace',
                             encoding='utf-8'
                         )
@@ -6361,8 +6140,8 @@ EXPAND_DELIMITER'''
         output_pattern = r'>\(([^)]+)\)'
         
         cwd = self.scratch_dir
-        env = self._setup_environment()
-        
+        env = self._get_default_environment()
+
         def replace_input_substitution(match):
             """Replace <(cmd) with temp file containing cmd output"""
             cmd = match.group(1)
@@ -6376,7 +6155,7 @@ EXPAND_DELIMITER'''
                 translated, _, _ = self.command_translator.translate(cmd)
 
                 # Execute via ExecutionEngine
-                result = self.command_executor.executor.execute_cmd(
+                result = self.executor.execute_cmd(
                     translated,
                     timeout=30,
                     cwd=str(cwd),
@@ -7336,7 +7115,289 @@ EXPAND_DELIMITER'''
         
         return adapted
     
-    def _setup_virtual_env(self, virtual_env: Optional[str]) -> Optional[Path]:
+
+    # ========================================================================
+    # PREPROCESSING ORCHESTRATION
+    # ========================================================================
+
+    def preprocess_command(self, command: str) -> Tuple[str, List[Path]]:
+        """
+        Apply all preprocessing steps to command before translation.
+
+        Returns:
+            (preprocessed_command, temp_files_list)
+        """
+        temp_files = []
+
+        # STEP 0.0: Expand aliases (ll, la, etc.)
+        command = self._expand_aliases(command)
+
+        # STEP 0.1: Process subshell and command grouping
+        command = self._process_subshell(command)
+        command = self._process_command_grouping(command)
+
+        # STEP 0.2: Control structures (for, while, if, case)
+        if self._has_control_structures(command):
+            command, script_file = self._convert_control_structures_to_script(command)
+            if script_file:
+                temp_files.append(script_file)
+
+        # STEP 0.3: Test commands [ ] and [[ ]]
+        command = self._preprocess_test_commands(command)
+
+        # STEP 0.4: Brace expansion {1..10}, {a,b,c}
+        command = self._expand_braces(command)
+
+        # STEP 0.5: Here documents <<EOF
+        command, heredoc_files = self._process_heredocs(command)
+        temp_files.extend(heredoc_files)
+
+        # STEP 0.6: Process substitution <(cmd) >(cmd)
+        command, procsub_files = self._process_substitution(command)
+        temp_files.extend(procsub_files)
+
+        # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
+        command = self._expand_variables(command)
+
+        # STEP 0.8: xargs patterns
+        command = self._process_xargs(command)
+
+        # STEP 0.9: find ... -exec patterns
+        command = self._process_find_exec(command)
+
+        # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
+        command = self._process_command_substitution_recursive(command)
+
+        return command, temp_files
+
+    def _get_default_environment(self) -> dict:
+        """Get default execution environment for preprocessing operations"""
+        env = os.environ.copy()
+        # UTF-8 encoding
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUNBUFFERED'] = '1'
+        return env
+
+class BashToolExecutor(ToolExecutor):
+    """
+    Bash command executor integrated with COUCH architecture.
+    
+    Receives params dict from ExecutorDefinition - NO separate config class.
+    
+    ============================================================================
+    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
+    ============================================================================
+    
+    This executor uses native Unix binaries on Windows for 100% compatibility.
+    Install these once, system-wide:
+    
+    1. GIT FOR WINDOWS (covers 90% of tools)
+       Download: https://git-scm.com/download/win
+       Install options:
+       - "Use Git and optional Unix tools from Command Prompt" ✓
+       - "Use Windows' default console window" ✓
+       - Credential manager: "None" ✓
+       
+       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
+       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
+       
+       Verify:
+         diff --version
+         awk --version
+    
+    2. JQ (JSON processor)
+       Download: https://github.com/jqlang/jq/releases/latest
+       Binary: jq-windows-amd64.exe (rename to jq.exe)
+       Install: Copy to C:\Windows\System32 (already in PATH)
+       
+       Verify:
+         jq --version
+    
+    RESULT:
+    All commands callable directly from CMD/PowerShell.
+    Translator uses native binaries (100% GNU compatible) with PowerShell 
+    fallback for edge cases where binary missing.
+    
+    ============================================================================
+    """
+    
+    def __init__(self, working_dir: str, enabled: bool = False,
+                 python_executable: Optional[str] = None,
+                 virtual_env: Optional[str] = None,
+                 default_timeout: int = 30,
+                 python_timeout: int = 60,
+                 use_git_bash: bool = False,
+                 **kwargs):
+        """
+        Initialize BashToolExecutor
+        
+        Args:
+            working_dir: Tool working directory (from ConfigurationManager)
+            enabled: Tool enabled state
+            python_executable: Python path (OPTIONAL - auto-detected if missing)
+            virtual_env: Virtual env path (OPTIONAL - defaults to BASH_TOOL_ENV)
+            default_timeout: Default command timeout
+            python_timeout: Python script timeout
+            use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
+            
+        Raises:
+            RuntimeError: If Python not found and python_executable not provided
+        """
+        super().__init__('bash_tool', enabled)
+
+        # TESTMODE flag for testing purposes
+        TESTMODE = True  # Set to True for testing
+        self.TESTMODE = TESTMODE
+
+        self.working_dir = Path(working_dir)
+        self.default_timeout = default_timeout
+        self.python_timeout = python_timeout
+        self.use_git_bash = use_git_bash
+
+        # Initialize components
+        self.path_translator = PathTranslator()
+        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
+        self.command_translator = CommandTranslator(self.path_translator)
+        
+        # Initialize CommandExecutor (execution strategy layer)
+        # Will be fully initialized after Git Bash detection
+        self.command_executor = None
+
+        # Create tool-specific scratch directory
+        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Git Bash detection (if enabled)
+        self.git_bash_exe = None
+        if use_git_bash:
+            self.git_bash_exe = self._detect_git_bash()
+            if self.git_bash_exe:
+                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+            else:
+                self.logger.warning("Git Bash not found - falling back to command translation")
+        
+        # Python executable - CRITICAL DEPENDENCY
+        try:
+            if python_executable:
+                # Validate provided executable
+                result = subprocess.run(
+                    [python_executable, '--version'],
+                    capture_output=True,
+                    timeout=2,
+                    text=True
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
+
+                self.python_executable = python_executable
+                self.logger.info(f"Using provided Python: {python_executable}")
+            else:
+                # Auto-detect (may raise RuntimeError)
+                self.python_executable = self._detect_system_python()
+
+        except RuntimeError as e:
+            # Python detection failed - tool disabled
+            self.python_executable = None
+            self.virtual_env = None
+            self.logger.error(f"BashToolExecutor initialization failed: {e}")
+            raise
+
+        # Virtual environment - only if Python available
+        self.virtual_env = self._setup_virtual_env(virtual_env)
+
+        # Initialize CommandExecutor with all dependencies now available
+        # Get claude home directory (needed for tilde expansion in _expand_variables)
+        # NOTE: Only BashToolExecutor has _expand_variables, but pass to CommandExecutor
+        #       in case it needs config info in future
+        self.claude_home_unix = self.path_translator.get_claude_home_unix()
+
+        # Initialize CommandExecutor
+        self.command_executor = CommandExecutor(
+            command_translator=self.command_translator,
+            git_bash_exe=self.git_bash_exe,
+            claude_home_unix=self.claude_home_unix,
+            scratch_dir=self.scratch_dir,
+            logger=self.logger,
+            test_mode=self.TESTMODE
+        )
+        
+        self.logger.info(
+            f"BashToolExecutor initialized: Python={self.python_executable}, "
+            f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
+        )
+    
+    def _detect_git_bash(self) -> Optional[str]:
+        """
+        Detect Git Bash executable.
+        
+        Standard locations:
+        - C:\Program Files\Git\bin\bash.exe
+        - C:\Program Files (x86)\Git\bin\bash.exe
+        """
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
+        
+        for path in candidates:
+            if Path(path).exists():
+                self.logger.info(f"Found Git Bash: {path}")
+                return path
+        
+        # Try PATH
+        try:
+            result = subprocess.run(
+                ['where', 'bash.exe'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                bash_path = result.stdout.strip().split('\n')[0]
+                if 'Git' in bash_path:
+                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                    return bash_path
+        except:
+            pass
+        
+        return None
+    
+    def _detect_system_python(self) -> str:
+        """
+        Detect system Python - FAIL FAST if missing.
+        
+        Bash tool without Python is INCOMPLETE and should be disabled.
+        """
+        candidates = ['python', 'python.exe']
+        
+        for cmd in candidates:
+            try:
+                result = subprocess.run(
+                    [cmd, '--version'], 
+                    capture_output=True, 
+                    timeout=2,
+                    text=True
+                )
+                if result.returncode == 0:
+                    version = result.stdout.strip()
+                    self.logger.info(f"Detected Python: {cmd} ({version})")
+                    return cmd
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+        
+        # Python NOT FOUND - tool is incomplete
+        self.logger.critical("CRITICAL: Python not found in system PATH")
+        self.logger.critical("Bash tool requires Python for full functionality")
+        
+        # Disable tool immediately
+        self.enabled = False
+        
+        raise RuntimeError(
+            "Python executable not found in system PATH. "
+            "Bash tool is incomplete without Python and has been disabled. "
+            "Install Python or provide python_executable parameter explicitly."
+        )
+    
         """Setup virtual environment - BLOCKING at initialization is acceptable.
         
         Creates venv at initialization if missing. System blocks once at startup,
@@ -7385,107 +7446,57 @@ EXPAND_DELIMITER'''
             raise RuntimeError(f"Virtual environment setup failed: {e}")
     
     def execute(self, tool_input: dict) -> str:
-        """Execute bash command with FULL pattern emulation"""
+        """
+        Execute bash command - SIMPLIFIED ORCHESTRATOR
+
+        RESPONSIBILITIES:
+        1. Translate Unix paths → Windows paths
+        2. Security validation
+        3. Delegate to CommandExecutor (preprocessing + translation + execution)
+        4. Translate Windows paths → Unix paths in results
+        5. Return formatted result
+        """
         command = tool_input.get('command', '')
         description = tool_input.get('description', '')
 
-
         if not command:
             return "Error: command parameter is required"
-        
+
         # Determine timeout
         timeout = self.python_timeout if 'python' in command.lower() else self.default_timeout
-        
+
         self.logger.info(f"Executing: {command[:100]}")
-        
-        # Temp files tracking for cleanup
+
         temp_files = []
-        
+
         try:
-            # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
-
-
-            # STEP 0.0: Expand aliases (ll, la, etc.)
-            command = self._expand_aliases(command)
-            
-            # STEP 0.1: Process subshell and command grouping
-            command = self._process_subshell(command)
-            command = self._process_command_grouping(command)
-            
-            # STEP 0.2: Control structures (for, while, if, case)
-            if self._has_control_structures(command):
-                command, script_file = self._convert_control_structures_to_script(command)
-                if script_file:
-                    temp_files.append(script_file)
-                    # Script execution will use PowerShell directly
-                    use_powershell = True
-            
-            # STEP 0.3: Test commands [ ] and [[ ]]
-            command = self._preprocess_test_commands(command)
-            
-            # STEP 0.4: Brace expansion {1..10}, {a,b,c}
-            command = self._expand_braces(command)
-            
-            # STEP 0.5: Here documents <<EOF
-            command, heredoc_files = self._process_heredocs(command)
-            temp_files.extend(heredoc_files)
-            
-            # STEP 0.6: Process substitution <(cmd) >(cmd)
-            command, procsub_files = self._process_substitution(command)
-            temp_files.extend(procsub_files)
-            
-            # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
-            command = self._expand_variables(command)
-
-            # STEP 0.8: xargs patterns
-            command = self._process_xargs(command)
-
-            # STEP 0.9: find ... -exec patterns
-            command = self._process_find_exec(command)
-            
-            # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
-            command = self._process_command_substitution_recursive(command)
-            
-            # STEP 1: Detect if PowerShell needed (if not already set by control structures)
-            if 'use_powershell' not in locals():
-                use_powershell = self._needs_powershell(command)
-            
-            if use_powershell:
-                self.logger.debug("Using PowerShell for advanced patterns")
-            
-            # STEP 2: Translate Unix paths → Windows paths
+            # STEP 1: Translate Unix paths → Windows paths
             if self.path_translator:
-                # PRODUCTION MODE: Translate paths
                 command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
             else:
-                # TEST MODE: Skip path translation (not needed for testing command logic)
                 command_with_win_paths = command
                 self.logger.debug("TEST MODE: Skipping path translation")
 
-            # STEP 3: Security validation (before execution)
-            # NOTE: Validation done on command_with_win_paths (before translation)
-            # to catch malicious patterns early
+            # STEP 2: Security validation
             if self.sandbox_validator:
                 is_safe, reason = self.sandbox_validator.validate_command(command_with_win_paths)
                 if not is_safe:
                     return f"Error: Security - {reason}"
             else:
-                # TEST MODE: Skip validation
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
-            # STEP 4: Execute via CommandExecutor
-            # CommandExecutor handles: translation + strategy + execution
+            # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
             cwd = self.scratch_dir
             env = self._setup_environment()
 
-            result, translated_cmd, method = self.command_executor.execute(
+            result, translated_cmd, method, temp_files = self.command_executor.execute(
                 command=command_with_win_paths,
                 timeout=timeout,
                 cwd=cwd,
                 env=env
             )
 
-            # STEP 5: Format result
+            # STEP 4: Format result (with path reverse translation)
             return self._format_result(result, command, translated_cmd, method)
         
         except subprocess.TimeoutExpired:
