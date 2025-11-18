@@ -530,7 +530,7 @@ class CommandExecutor:
     }
 
     def __init__(self, command_translator=None,
-                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None):
+                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
 
@@ -544,11 +544,15 @@ class CommandExecutor:
             git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
+            test_mode: If True, use ExecutionEngine in test mode
         """
         self.command_translator = command_translator
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
+
+        # ExecutionEngine - UNICO PUNTO per subprocess
+        self.executor = ExecutionEngine(test_mode=test_mode, logger=self.logger)
 
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
@@ -556,11 +560,90 @@ class CommandExecutor:
         self.logger.info(f"CommandExecutor initialized")
         self.logger.info(f"Git Bash: {'available' if git_bash_exe else 'not available'}")
         self.logger.info(f"Native binaries: {len(self.available_bins)} detected")
-    
+
     # ========================================================================
     # MAIN EXECUTION ENTRY POINT
     # ========================================================================
-    
+
+    def execute(self, command: str, timeout: int, cwd: Path, env: dict,
+                preprocessing_callbacks: dict = None) -> Tuple[subprocess.CompletedProcess, str, str]:
+        """
+        Main entry point for command execution.
+
+        ARCHITECTURE:
+        BashToolExecutor handles path translation and security validation.
+        CommandExecutor handles preprocessing, translation, and execution.
+
+        Args:
+            command: Command with Windows paths (already translated by BashToolExecutor)
+            timeout: Command timeout in seconds
+            cwd: Working directory
+            env: Environment variables
+            preprocessing_callbacks: Dict of preprocessing methods from BashToolExecutor
+                                   (temporary - will be moved here)
+
+        Returns:
+            Tuple[CompletedProcess, translated_cmd, method]:
+                - result: execution result
+                - translated_cmd: translated command (for logging)
+                - method: translation method (for logging)
+        """
+        # Temp files tracking for cleanup
+        temp_files = []
+
+        try:
+            # NOTE: Preprocessing methods are still in BashToolExecutor
+            # They will be moved here in next iteration
+            # For now, preprocessing must be done by BashToolExecutor before calling this
+
+            # STEP 1: Translate Unix commands → Windows commands
+            translated_cmd, use_shell, method = self.command_translator.translate(command)
+
+            # STEP 2: Strategy selection - decide execution method
+            parts = translated_cmd.split() if translated_cmd else []
+            executable_cmd, use_powershell = self.execute_bash(translated_cmd, parts)
+            final_cmd = executable_cmd
+
+            # STEP 3: Execute via ExecutionEngine
+            if 'powershell' in final_cmd.lower() and '-File' in final_cmd:
+                # PowerShell script command (from control structures)
+                result = self.executor.execute_powershell(
+                    final_cmd,
+                    timeout=timeout,
+                    cwd=str(cwd),
+                    env=env,
+                    errors='replace',
+                    encoding='utf-8',
+                    shell=True
+                )
+            elif use_powershell:
+                result = self.executor.execute_powershell(
+                    final_cmd,
+                    timeout=timeout,
+                    cwd=str(cwd),
+                    env=env,
+                    errors='replace',
+                    encoding='utf-8'
+                )
+            else:
+                result = self.executor.execute_cmd(
+                    final_cmd,
+                    timeout=timeout,
+                    cwd=str(cwd),
+                    env=env,
+                    errors='replace',
+                    encoding='utf-8'
+                )
+
+            return result, translated_cmd, method
+
+        except subprocess.TimeoutExpired as e:
+            # Re-raise with original exception
+            raise
+        except Exception as e:
+            self.logger.error(f"Execution error: {e}", exc_info=True)
+            raise
+
     def execute_bash(self, command: str, parts: List[str]) -> Tuple[str, bool]:
         """
         Execute bash command with optimal strategy.
@@ -5778,6 +5861,23 @@ class CommandExecutor:
         
         return f'powershell -Command "{ps_script}"', True
 
+    # ========================================================================
+    # PREPROCESSING METHODS - Moved from BashToolExecutor
+    # ========================================================================
+    # These methods handle complex bash patterns that need preprocessing
+    # BEFORE translation. They require access to:
+    # - command_translator (for recursive translation)
+    # - executor (for execution in preprocessing phase)
+    # - scratch_dir, git_bash_exe (passed via BashToolExecutor callbacks - temporary)
+    #
+    # TODO ITERATION 2: Accept these dependencies via __init__ or method params
+    # ========================================================================
+
+    # NOTE: These methods will be called from BashToolExecutor.execute()
+    # until we move preprocessing logic to CommandExecutor.execute()
+    # They need access to: scratch_dir, git_bash_exe, logger
+    # For now, they'll be called as: command_executor.method(command, scratch_dir, git_bash_exe)
+
 
 # ============================================================================
 # BASHTOOLEXECUTOR - ORCHESTRATION LAYER
@@ -5921,7 +6021,8 @@ class BashToolExecutor(ToolExecutor):
             command_translator=self.command_translator,
             git_bash_exe=self.git_bash_exe,
             claude_home_unix=self.claude_home_unix,
-            logger=self.logger
+            logger=self.logger,
+            test_mode=self.TESTMODE
         )
         
         self.logger.info(
@@ -6182,12 +6283,11 @@ EXPAND_DELIMITER'''
 {content}
 EXPAND_DELIMITER'''
 
-                        # Execute via bash.exe
+                        # Execute via bash.exe through ExecutionEngine
                         bash_path = self.git_bash_exe
-                        result = subprocess.run(
-                            [bash_path, '-c', expansion_script],
-                            capture_output=True,
-                            text=True,
+                        result = self.command_executor.executor.execute_bash(
+                            bash_path,
+                            expansion_script,
                             timeout=5,
                             cwd=str(self.scratch_dir),
                             env=self._setup_environment(),
@@ -6274,12 +6374,10 @@ EXPAND_DELIMITER'''
 
                 # Translate command
                 translated, _, _ = self.command_translator.translate(cmd)
-                
-                # Execute
-                result = subprocess.run(
-                    ['cmd', '/c', translated],
-                    capture_output=True,
-                    text=True,
+
+                # Execute via ExecutionEngine
+                result = self.command_executor.executor.execute_cmd(
+                    translated,
                     timeout=30,
                     cwd=str(cwd),
                     env=env,
@@ -7364,84 +7462,30 @@ EXPAND_DELIMITER'''
                 command_with_win_paths = command
                 self.logger.debug("TEST MODE: Skipping path translation")
 
-            # STEP 3: Translate Unix commands → Windows commands
-            translated_cmd, use_shell, method = self.command_translator.translate(
-                command_with_win_paths
-            )
-            
-            # STEP 3.5: Execute bash - Strategy selection (NUOVO!)
-            # CommandExecutor decide: bash.exe? native binary? PowerShell emulation?
-            # Parse command into parts for executor
-            parts = translated_cmd.split() if translated_cmd else []
-            executable_cmd, executor_needs_ps = self.command_executor.execute_bash(
-                translated_cmd, parts
-            )
-            
-            # Update command and PowerShell flag based on executor decision
-            translated_cmd = executable_cmd
-            if executor_needs_ps:
-                use_powershell = True
-            
-            # STEP 4: Adapt for PowerShell if needed
-            if use_powershell:
-                translated_cmd = self._adapt_for_powershell(translated_cmd)
-                self.logger.debug(f"PowerShell adapted: {translated_cmd[:100]}")
-            elif method == 'mapped':
-                self.logger.debug(f"Translated: {translated_cmd[:100]}")
-
-            # STEP 5: Validate command
+            # STEP 3: Security validation (before execution)
+            # NOTE: Validation done on command_with_win_paths (before translation)
+            # to catch malicious patterns early
             if self.sandbox_validator:
-                is_safe, reason = self.sandbox_validator.validate_command(translated_cmd)
+                is_safe, reason = self.sandbox_validator.validate_command(command_with_win_paths)
                 if not is_safe:
                     return f"Error: Security - {reason}"
             else:
                 # TEST MODE: Skip validation
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
-            
-            # Working directory
+
+            # STEP 4: Execute via CommandExecutor
+            # CommandExecutor handles: translation + strategy + execution
             cwd = self.scratch_dir
-            
-            # Setup environment
             env = self._setup_environment()
-            
-            # STEP 6: Execute
-            if 'powershell' in translated_cmd.lower() and '-File' in translated_cmd:
-                # Already a PowerShell script command (from control structures)
-                # Execute directly without additional wrapping
-                result = subprocess.run(
-                    translated_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8',
-                    shell=True
-                )
-            elif use_powershell:
-                result = subprocess.run(
-                    ['powershell', '-NoProfile', '-NonInteractive', '-Command', translated_cmd],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8'
-                )
-            else:
-                result = subprocess.run(
-                    ['cmd', '/c', translated_cmd],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8'
-                )
-            
+
+            result, translated_cmd, method = self.command_executor.execute(
+                command=command_with_win_paths,
+                timeout=timeout,
+                cwd=cwd,
+                env=env
+            )
+
+            # STEP 5: Format result
             return self._format_result(result, command, translated_cmd, method)
         
         except subprocess.TimeoutExpired:
