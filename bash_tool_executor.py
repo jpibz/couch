@@ -7381,7 +7381,30 @@ EXPAND_DELIMITER'''
     
 
 
-    # ==================== SETUP/DETECTION METHODS (migrated from BashToolExecutor) ====================
+# ============================================================================
+# BASH TOOL EXECUTOR - Main tool class
+# ============================================================================
+
+class BashToolExecutor(ToolExecutor):
+    """
+    Bash command executor for Windows - PRODUCTION VERSION.
+
+    RESPONSIBILITIES:
+    - Entry point for bash tool execution
+    - Path translation (Unix <-> Windows)
+    - Security validation (sandbox)
+    - Preprocessing (heredocs, substitution, expansions)
+    - Delegation to CommandExecutor for execution
+
+    ARCHITECTURE:
+    This is a THIN COORDINATOR that delegates to specialized components:
+    - PathTranslator: Unix/Windows path conversion
+    - SandboxValidator: Security checks
+    - CommandExecutor: Command execution strategy
+    - ExecutionEngine: Subprocess management
+    """
+
+    # ==================== SETUP/DETECTION METHODS ====================
 
     def _detect_git_bash(self) -> Optional[str]:
         """
