@@ -7446,49 +7446,48 @@ EXPAND_DELIMITER'''
                 self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
     
 
-class BashToolExecutor(ToolExecutor):
-    """
-    Bash command executor integrated with COUCH architecture.
-    
-    Receives params dict from ExecutorDefinition - NO separate config class.
-    
-    ============================================================================
-    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
-    ============================================================================
-    
-    This executor uses native Unix binaries on Windows for 100% compatibility.
-    Install these once, system-wide:
-    
-    1. GIT FOR WINDOWS (covers 90% of tools)
-       Download: https://git-scm.com/download/win
-       Install options:
-       - "Use Git and optional Unix tools from Command Prompt" ✓
-       - "Use Windows' default console window" ✓
-       - Credential manager: "None" ✓
-       
-       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
-       
-       Verify:
-         diff --version
-         awk --version
-    
-    2. JQ (JSON processor)
-       Download: https://github.com/jqlang/jq/releases/latest
-       Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
-       
-       Verify:
-         jq --version
-    
-    RESULT:
-    All commands callable directly from CMD/PowerShell.
-    Translator uses native binaries (100% GNU compatible) with PowerShell 
-    fallback for edge cases where binary missing.
-    
-    ============================================================================
-    """
-    
+
+    # ==================== SETUP/DETECTION METHODS (migrated from BashToolExecutor) ====================
+
+    def _detect_git_bash(self) -> Optional[str]:
+        """
+        Detect Git Bash executable.
+
+        Standard locations:
+        - C:\Program Files\Git\bin\bash.exe
+        - C:\Program Files (x86)\Git\bin\bash.exe
+        """
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
+
+        for path in candidates:
+            if Path(path).exists():
+                self.logger.info(f"Found Git Bash: {path}")
+                return path
+
+        # Try PATH
+        try:
+            result = subprocess.run(
+                ['where', 'bash.exe'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                bash_path = result.stdout.strip().split('\n')[0]
+                if 'Git' in bash_path:
+                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                    return bash_path
+        except:
+            pass
+
+        return None
+
+
+
+
     def __init__(self, working_dir: str, enabled: bool = False,
                  python_executable: Optional[str] = None,
                  virtual_env: Optional[str] = None,
@@ -7603,42 +7602,7 @@ class BashToolExecutor(ToolExecutor):
             f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
         )
     
-    def _detect_git_bash(self) -> Optional[str]:
-        """
-        Detect Git Bash executable.
-        
-        Standard locations:
-        - C:\Program Files\Git\bin\bash.exe
-        - C:\Program Files (x86)\Git\bin\bash.exe
-        """
-        candidates = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ]
-        
-        for path in candidates:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                return path
-        
-        # Try PATH
-        try:
-            result = subprocess.run(
-                ['where', 'bash.exe'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                bash_path = result.stdout.strip().split('\n')[0]
-                if 'Git' in bash_path:
-                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
-                    return bash_path
-        except:
-            pass
-        
-        return None
-    
+
     def _detect_system_python(self) -> str:
         """
         Detect system Python - FAIL FAST if missing.
