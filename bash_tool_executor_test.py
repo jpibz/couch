@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from unittest.mock import Mock, patch, MagicMock
 
 # Import the real CommandExecutor to inherit from
-from bash_tool_executor_REFACTORED import CommandExecutor
+from bash_tool_executor import CommandExecutor
 
 
 # ============================================================================
@@ -58,7 +58,7 @@ class CommandExecutorTest(CommandExecutor):
 
     def _patch_subprocess(self):
         """Monkey-patch subprocess.run to use our fake version"""
-        import bash_tool_executor_REFACTORED as executor_module
+        import bash_tool_executor as executor_module
         import subprocess
 
         # Save original
@@ -70,7 +70,7 @@ class CommandExecutorTest(CommandExecutor):
 
     def _unpatch_subprocess(self):
         """Restore original subprocess.run"""
-        import bash_tool_executor_REFACTORED as executor_module
+        import bash_tool_executor as executor_module
         import subprocess
 
         if hasattr(self, '_original_subprocess_run'):
