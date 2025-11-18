@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, CommandTranslator
+from unix_translator import PathTranslator, SimpleTranslator, PipelineTranslator, EmulativeTranslator
 
 
 class SandboxValidator:
@@ -1247,7 +1247,7 @@ class CommandExecutor:
         'jq': 'jq.exe',
     }
 
-    def __init__(self, command_translator=None,
+    def __init__(self, simple_translator=None, emulative_translator=None, pipeline_translator=None,
                  git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
@@ -1258,13 +1258,17 @@ class CommandExecutor:
         commands reach this layer.
 
         Args:
-            command_translator: CommandTranslator instance (for delegation)
+            simple_translator: SimpleTranslator instance
+            emulative_translator: EmulativeTranslator instance
+            pipeline_translator: PipelineTranslator instance
             git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
             test_mode: If True, use ExecutionEngine in test mode
         """
-        self.command_translator = command_translator
+        self.simple_translator = simple_translator
+        self.emulative_translator = emulative_translator
+        self.pipeline_translator = pipeline_translator
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
@@ -1302,19 +1306,13 @@ class CommandExecutor:
         """
         Lazy initialization of ExecuteUnixSingleCommand.
 
-        Needs command_translator to be available for accessing translators.
+        Uses translators passed during initialization.
         """
         if self._single_executor is None:
-            # Get translators from command_translator
-            if self.command_translator:
-                simple_translator = self.command_translator.simple
-                emulative_translator = self.command_translator.emulative
-                pipeline_translator = self.command_translator.pipeline
-            else:
-                # Fallback: no translators available
-                simple_translator = None
-                emulative_translator = None
-                pipeline_translator = None
+            # Use translators from instance variables
+            simple_translator = self.simple_translator
+            emulative_translator = self.emulative_translator
+            pipeline_translator = self.pipeline_translator
 
             self._single_executor = ExecuteUnixSingleCommand(
                 simple_translator=simple_translator,
@@ -3104,46 +3102,7 @@ class CommandExecutor:
         '''
         
         return f'powershell -Command "{ps_script}"', True
-    
-    def _awk_to_ps_statement(self, awk_stmt: str) -> str:
-        """Convert awk statement to PowerShell"""
-        # Handle print statements
-        if 'print' in awk_stmt:
-            # Extract what to print
-            print_match = re.search(r'print\s+(.+)', awk_stmt)
-            if print_match:
-                expr = print_match.group(1).strip()
-                # Convert field references
-                expr = re.sub(r'\$(\d+)', r'$F[\1-1]', expr)
-                expr = expr.replace('$NF', '$F[$NF-1]')
-                expr = expr.replace('$(NF-1)', '$F[$NF-2]')
-                return f'Write-Output {expr}'
-        
-        # Handle variable assignments
-        if '=' in awk_stmt and not '==' in awk_stmt:
-            # x=0 or x+=$1
-            var_match = re.match(r'(\w+)\s*([+\-*/]?=)\s*(.+)', awk_stmt)
-            if var_match:
-                var_name = var_match.group(1)
-                operator = var_match.group(2)
-                value = var_match.group(3).strip()
-                # Convert field references in value
-                value = re.sub(r'\$(\d+)', r'$F[\1-1]', value)
-                return f'${var_name} {operator} {value}'
-        
-        # Handle increment/decrement
-        if '++' in awk_stmt or '--' in awk_stmt:
-            return awk_stmt.replace('$', '')
-        
-        return awk_stmt
-    
-    def _awk_to_ps_condition(self, awk_cond: str) -> str:
-        """Convert awk condition to PowerShell"""
-        # Convert field references
-        ps_cond = re.sub(r'\$(\d+)', r'$F[\1-1]', awk_cond)
-        ps_cond = ps_cond.replace('$NF', '$NF')
-        return ps_cond
-    
+
 
 
 # ======== sort (1550-1739) ========
@@ -4504,31 +4463,7 @@ class CommandExecutor:
         '''
         
         return f'powershell -Command "{ps_script}"', True
-    
-    def _parse_duration(self, duration_str: str) -> int:
-        """
-        Parse duration string to seconds.
-        
-        Formats: 10, 10s, 1m, 1h, 1d
-        """
-        import re
-        
-        match = re.match(r'^(\d+)([smhd])?$', duration_str)
-        if not match:
-            return 10  # Default fallback
-        
-        value = int(match.group(1))
-        unit = match.group(2) or 's'
-        
-        multipliers = {
-            's': 1,
-            'm': 60,
-            'h': 3600,
-            'd': 86400
-        }
-        
-        return value * multipliers.get(unit, 1)
-    
+
 
 
 # ======== sed (2591-2823) ========
@@ -7541,16 +7476,11 @@ EXPAND_DELIMITER'''
         # Get claude home directory (needed for preprocessing)
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
-        # Initialize CommandTranslator with preprocessing dependencies
-        # Note: command_executor will be set later (circular dependency)
-        self.command_translator = CommandTranslator(
-            path_translator=self.path_translator,
-            git_bash_exe=self.git_bash_exe,
-            scratch_dir=self.scratch_dir,
-            logger=self.logger,
-            command_executor=None,  # Will be set after CommandExecutor initialization
-            claude_home_unix=self.claude_home_unix
-        )
+        # Initialize translators (SimpleTranslator, EmulativeTranslator, PipelineTranslator)
+        # CommandTranslator has been eliminated - use translators directly
+        self.simple_translator = SimpleTranslator()
+        self.emulative_translator = EmulativeTranslator()
+        self.pipeline_translator = PipelineTranslator()
 
         # Initialize CommandExecutor (execution strategy layer)
         # Will be fully initialized after Git Bash detection
@@ -7587,15 +7517,14 @@ EXPAND_DELIMITER'''
 
         # Initialize CommandExecutor with all dependencies now available
         self.command_executor = CommandExecutor(
-            command_translator=self.command_translator,
+            simple_translator=self.simple_translator,
+            emulative_translator=self.emulative_translator,
+            pipeline_translator=self.pipeline_translator,
             git_bash_exe=self.git_bash_exe,
             claude_home_unix=self.claude_home_unix,
             logger=self.logger,
             test_mode=self.TESTMODE
         )
-
-        # Set command_executor in command_translator (circular dependency resolved)
-        self.command_translator.command_executor = self.command_executor
         
         self.logger.info(
             f"BashToolExecutor initialized: Python={self.python_executable}, "
@@ -7727,11 +7656,11 @@ EXPAND_DELIMITER'''
             else:
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
-            # STEP 3: Execute via CommandTranslator (preprocessing + translation + execution)
+            # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
             cwd = self.scratch_dir
             env = self._setup_environment()
 
-            result, translated_cmd, method, temp_files = self.command_translator.execute_command(
+            result, translated_cmd, method = self.command_executor.execute(
                 command=command_with_win_paths,
                 timeout=timeout,
                 cwd=cwd,
