@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, CommandTranslator
+from unix_translator import PathTranslator, SimpleTranslator, PipelineTranslator, EmulativeTranslator
 
 
 class SandboxValidator:
@@ -239,12 +239,13 @@ class ExecutionEngine:
             'total': 0
         }
 
-    def execute_cmd(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_cmd(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via cmd.exe
 
         Args:
             command: Command string to execute
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -256,10 +257,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-CMD] {command}")
             print(f"[TEST MODE] Would execute (CMD): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] cmd: {command}"
+
             return subprocess.CompletedProcess(
                 args=['cmd', '/c', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] cmd: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -271,12 +276,13 @@ class ExecutionEngine:
             **kwargs
         )
 
-    def execute_powershell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_powershell(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via PowerShell
 
         Args:
             command: PowerShell command string
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -288,10 +294,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-PowerShell] {command}")
             print(f"[TEST MODE] Would execute (PowerShell): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] powershell: {command}"
+
             return subprocess.CompletedProcess(
                 args=['powershell', '-Command', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] powershell: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -303,13 +313,14 @@ class ExecutionEngine:
             **kwargs
         )
 
-    def execute_bash(self, bash_path: str, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_bash(self, bash_path: str, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via Git Bash
 
         Args:
             bash_path: Path to bash.exe
             command: Bash command string
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -321,10 +332,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-Git Bash] {command}")
             print(f"[TEST MODE] Would execute (Git Bash): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] bash: {command}"
+
             return subprocess.CompletedProcess(
                 args=[bash_path, '-c', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] bash: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -1247,7 +1262,7 @@ class CommandExecutor:
         'jq': 'jq.exe',
     }
 
-    def __init__(self, command_translator=None,
+    def __init__(self, simple_translator=None, emulative_translator=None, pipeline_translator=None,
                  git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
@@ -1258,20 +1273,24 @@ class CommandExecutor:
         commands reach this layer.
 
         Args:
-            command_translator: CommandTranslator instance (for delegation)
+            simple_translator: SimpleTranslator instance
+            emulative_translator: EmulativeTranslator instance
+            pipeline_translator: PipelineTranslator instance
             git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
             test_mode: If True, use ExecutionEngine in test mode
         """
-        self.command_translator = command_translator
+        self.simple_translator = simple_translator
+        self.emulative_translator = emulative_translator
+        self.pipeline_translator = pipeline_translator
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
         self.test_mode = test_mode
 
         # ExecutionEngine - UNICO PUNTO per subprocess
-        self.executor = ExecutionEngine(test_mode=test_mode, logger=self.logger)
+        self.engine = ExecutionEngine(test_mode=test_mode, logger=self.logger)
 
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
@@ -1302,19 +1321,13 @@ class CommandExecutor:
         """
         Lazy initialization of ExecuteUnixSingleCommand.
 
-        Needs command_translator to be available for accessing translators.
+        Uses translators passed during initialization.
         """
         if self._single_executor is None:
-            # Get translators from command_translator
-            if self.command_translator:
-                simple_translator = self.command_translator.simple
-                emulative_translator = self.command_translator.emulative
-                pipeline_translator = self.command_translator.pipeline
-            else:
-                # Fallback: no translators available
-                simple_translator = None
-                emulative_translator = None
-                pipeline_translator = None
+            # Use translators from instance variables
+            simple_translator = self.simple_translator
+            emulative_translator = self.emulative_translator
+            pipeline_translator = self.pipeline_translator
 
             self._single_executor = ExecuteUnixSingleCommand(
                 simple_translator=simple_translator,
@@ -1376,7 +1389,7 @@ class CommandExecutor:
             # STEP 3: Execute via ExecutionEngine
             if 'powershell' in final_cmd.lower() and '-File' in final_cmd:
                 # PowerShell script command (from control structures)
-                result = self.executor.execute_powershell(
+                result = self.engine.execute_powershell(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -1386,7 +1399,7 @@ class CommandExecutor:
                     shell=True
                 )
             elif use_powershell:
-                result = self.executor.execute_powershell(
+                result = self.engine.execute_powershell(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -1395,7 +1408,7 @@ class CommandExecutor:
                     encoding='utf-8'
                 )
             else:
-                result = self.executor.execute_cmd(
+                result = self.engine.execute_cmd(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -3104,46 +3117,7 @@ class CommandExecutor:
         '''
         
         return f'powershell -Command "{ps_script}"', True
-    
-    def _awk_to_ps_statement(self, awk_stmt: str) -> str:
-        """Convert awk statement to PowerShell"""
-        # Handle print statements
-        if 'print' in awk_stmt:
-            # Extract what to print
-            print_match = re.search(r'print\s+(.+)', awk_stmt)
-            if print_match:
-                expr = print_match.group(1).strip()
-                # Convert field references
-                expr = re.sub(r'\$(\d+)', r'$F[\1-1]', expr)
-                expr = expr.replace('$NF', '$F[$NF-1]')
-                expr = expr.replace('$(NF-1)', '$F[$NF-2]')
-                return f'Write-Output {expr}'
-        
-        # Handle variable assignments
-        if '=' in awk_stmt and not '==' in awk_stmt:
-            # x=0 or x+=$1
-            var_match = re.match(r'(\w+)\s*([+\-*/]?=)\s*(.+)', awk_stmt)
-            if var_match:
-                var_name = var_match.group(1)
-                operator = var_match.group(2)
-                value = var_match.group(3).strip()
-                # Convert field references in value
-                value = re.sub(r'\$(\d+)', r'$F[\1-1]', value)
-                return f'${var_name} {operator} {value}'
-        
-        # Handle increment/decrement
-        if '++' in awk_stmt or '--' in awk_stmt:
-            return awk_stmt.replace('$', '')
-        
-        return awk_stmt
-    
-    def _awk_to_ps_condition(self, awk_cond: str) -> str:
-        """Convert awk condition to PowerShell"""
-        # Convert field references
-        ps_cond = re.sub(r'\$(\d+)', r'$F[\1-1]', awk_cond)
-        ps_cond = ps_cond.replace('$NF', '$NF')
-        return ps_cond
-    
+
 
 
 # ======== sort (1550-1739) ========
@@ -4504,31 +4478,7 @@ class CommandExecutor:
         '''
         
         return f'powershell -Command "{ps_script}"', True
-    
-    def _parse_duration(self, duration_str: str) -> int:
-        """
-        Parse duration string to seconds.
-        
-        Formats: 10, 10s, 1m, 1h, 1d
-        """
-        import re
-        
-        match = re.match(r'^(\d+)([smhd])?$', duration_str)
-        if not match:
-            return 10  # Default fallback
-        
-        value = int(match.group(1))
-        unit = match.group(2) or 's'
-        
-        multipliers = {
-            's': 1,
-            'm': 60,
-            'h': 3600,
-            'd': 86400
-        }
-        
-        return value * multipliers.get(unit, 1)
-    
+
 
 
 # ======== sed (2591-2823) ========
@@ -6646,24 +6596,16 @@ EXPAND_DELIMITER'''
 
                         # Execute via bash.exe through ExecutionEngine
                         bash_path = self.git_bash_exe
-                        result = self.command_executor.executor.execute_bash(
+                        result = self.command_executor.engine.execute_bash(
                             bash_path,
                             expansion_script,
+                            test_mode_stdout=content,  # AS IF: content expanded (in TESTMODE)
                             timeout=5,
                             cwd=str(self.scratch_dir),
                             env=self._setup_environment(),
                             errors='replace',
                             encoding='utf-8'
                         )
-
-                        # TESTMODE EXECUTOR: simula output realistico per step successivo
-                        if self.TESTMODE:
-                            result = subprocess.CompletedProcess(
-                                args=result.args,
-                                returncode=0,
-                                stdout=content,  # AS IF: usa contenuto originale come "espanso"
-                                stderr=""
-                            )
 
                         if result.returncode == 0:
                             # Use expanded content
@@ -6746,22 +6688,14 @@ EXPAND_DELIMITER'''
                 translated, _, _ = self.command_translator.translate(cmd)
 
                 # Execute via ExecutionEngine
-                result = self.command_executor.executor.execute_cmd(
+                result = self.command_executor.engine.execute_cmd(
                     translated,
+                    test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
                     timeout=30,
                     cwd=str(cwd),
                     env=env,
                     errors='replace'
                 )
-
-                # TESTMODE EXECUTOR: simula output realistico per step successivo
-                if self.TESTMODE:
-                    result = subprocess.CompletedProcess(
-                        args=result.args,
-                        returncode=0,
-                        stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
-                        stderr=""
-                    )
 
                 # Create temp file with output
                 temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
@@ -7446,49 +7380,48 @@ EXPAND_DELIMITER'''
                 self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
     
 
-class BashToolExecutor(ToolExecutor):
-    """
-    Bash command executor integrated with COUCH architecture.
-    
-    Receives params dict from ExecutorDefinition - NO separate config class.
-    
-    ============================================================================
-    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
-    ============================================================================
-    
-    This executor uses native Unix binaries on Windows for 100% compatibility.
-    Install these once, system-wide:
-    
-    1. GIT FOR WINDOWS (covers 90% of tools)
-       Download: https://git-scm.com/download/win
-       Install options:
-       - "Use Git and optional Unix tools from Command Prompt" ✓
-       - "Use Windows' default console window" ✓
-       - Credential manager: "None" ✓
-       
-       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
-       
-       Verify:
-         diff --version
-         awk --version
-    
-    2. JQ (JSON processor)
-       Download: https://github.com/jqlang/jq/releases/latest
-       Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
-       
-       Verify:
-         jq --version
-    
-    RESULT:
-    All commands callable directly from CMD/PowerShell.
-    Translator uses native binaries (100% GNU compatible) with PowerShell 
-    fallback for edge cases where binary missing.
-    
-    ============================================================================
-    """
-    
+
+    # ==================== SETUP/DETECTION METHODS (migrated from BashToolExecutor) ====================
+
+    def _detect_git_bash(self) -> Optional[str]:
+        """
+        Detect Git Bash executable.
+
+        Standard locations:
+        - C:\Program Files\Git\bin\bash.exe
+        - C:\Program Files (x86)\Git\bin\bash.exe
+        """
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
+
+        for path in candidates:
+            if Path(path).exists():
+                self.logger.info(f"Found Git Bash: {path}")
+                return path
+
+        # Try PATH
+        try:
+            result = subprocess.run(
+                ['where', 'bash.exe'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                bash_path = result.stdout.strip().split('\n')[0]
+                if 'Git' in bash_path:
+                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                    return bash_path
+        except:
+            pass
+
+        return None
+
+
+
+
     def __init__(self, working_dir: str, enabled: bool = False,
                  python_executable: Optional[str] = None,
                  virtual_env: Optional[str] = None,
@@ -7542,16 +7475,11 @@ class BashToolExecutor(ToolExecutor):
         # Get claude home directory (needed for preprocessing)
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
-        # Initialize CommandTranslator with preprocessing dependencies
-        # Note: command_executor will be set later (circular dependency)
-        self.command_translator = CommandTranslator(
-            path_translator=self.path_translator,
-            git_bash_exe=self.git_bash_exe,
-            scratch_dir=self.scratch_dir,
-            logger=self.logger,
-            command_executor=None,  # Will be set after CommandExecutor initialization
-            claude_home_unix=self.claude_home_unix
-        )
+        # Initialize translators (SimpleTranslator, EmulativeTranslator, PipelineTranslator)
+        # CommandTranslator has been eliminated - use translators directly
+        self.simple_translator = SimpleTranslator()
+        self.emulative_translator = EmulativeTranslator()
+        self.pipeline_translator = PipelineTranslator()
 
         # Initialize CommandExecutor (execution strategy layer)
         # Will be fully initialized after Git Bash detection
@@ -7588,57 +7516,21 @@ class BashToolExecutor(ToolExecutor):
 
         # Initialize CommandExecutor with all dependencies now available
         self.command_executor = CommandExecutor(
-            command_translator=self.command_translator,
+            simple_translator=self.simple_translator,
+            emulative_translator=self.emulative_translator,
+            pipeline_translator=self.pipeline_translator,
             git_bash_exe=self.git_bash_exe,
             claude_home_unix=self.claude_home_unix,
             logger=self.logger,
             test_mode=self.TESTMODE
         )
-
-        # Set command_executor in command_translator (circular dependency resolved)
-        self.command_translator.command_executor = self.command_executor
         
         self.logger.info(
             f"BashToolExecutor initialized: Python={self.python_executable}, "
             f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
         )
     
-    def _detect_git_bash(self) -> Optional[str]:
-        """
-        Detect Git Bash executable.
-        
-        Standard locations:
-        - C:\Program Files\Git\bin\bash.exe
-        - C:\Program Files (x86)\Git\bin\bash.exe
-        """
-        candidates = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ]
-        
-        for path in candidates:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                return path
-        
-        # Try PATH
-        try:
-            result = subprocess.run(
-                ['where', 'bash.exe'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                bash_path = result.stdout.strip().split('\n')[0]
-                if 'Git' in bash_path:
-                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
-                    return bash_path
-        except:
-            pass
-        
-        return None
-    
+
     def _detect_system_python(self) -> str:
         """
         Detect system Python - FAIL FAST if missing.
@@ -7763,11 +7655,11 @@ class BashToolExecutor(ToolExecutor):
             else:
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
-            # STEP 3: Execute via CommandTranslator (preprocessing + translation + execution)
+            # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
             cwd = self.scratch_dir
             env = self._setup_environment()
 
-            result, translated_cmd, method, temp_files = self.command_translator.execute_command(
+            result, translated_cmd, method = self.command_executor.execute(
                 command=command_with_win_paths,
                 timeout=timeout,
                 cwd=cwd,
