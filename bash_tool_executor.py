@@ -459,7 +459,7 @@ class PipelineStrategy:
     }
 
     # Pipeline strategies - Pattern matching for command chains
-    # Format: regex pattern → strategy type
+    # Format: regex pattern -> strategy type
     PIPELINE_STRATEGIES = {
         # ===== BASH.EXE REQUIRED (Complex, no alternative) =====
 
@@ -932,6 +932,289 @@ class ExecuteUnixSingleCommand:
         self.logger.warning(f"Unknown command: {cmd_name} - passing through")
         return command, False
 
+    # ==================== CONTROL STRUCTURE METHODS (migrated) ====================
+
+    def _has_control_structures(self, command: str) -> bool:
+        """Check if command contains bash control structures"""
+        keywords = ['for ', 'while ', 'if ', 'case ', 'function ', 'until ']
+        return any(kw in command for kw in keywords)
+    
+    def _convert_control_structures_to_script(self, command: str) -> Tuple[str, Optional[Path]]:
+        """
+        Convert bash control structures to PowerShell script.
+        
+        For complex structures (for, while, if), create temp PowerShell script.
+        
+        Returns:
+            (modified_command, temp_script_file)
+        """
+        if not self._has_control_structures(command):
+            return command, None
+        
+        # Create PowerShell script with bash-like logic
+        cwd = self.scratch_dir
+        script_file = cwd / f'bash_script_{threading.get_ident()}.ps1'
+        
+        try:
+            # Convert bash script to PowerShell
+            ps_script = self._bash_to_powershell(command)
+            
+            with open(script_file, 'w', encoding='utf-8') as f:
+                f.write(ps_script)
+            
+            # Return command to execute script
+            new_command = f'powershell -ExecutionPolicy Bypass -File "{script_file}"'
+            
+            return new_command, script_file
+        
+        except Exception as e:
+            self.logger.error(f"Failed to convert control structures: {e}")
+            return command, None
+    
+    def _bash_to_powershell(self, bash_script: str) -> str:
+        """
+        Convert bash control structures to PowerShell.
+        
+        Handles:
+        - for loops
+        - while loops
+        - if statements
+        - test conditions conversion
+        - variable references
+        """
+        import re
+        
+        # For loop: for i in {1..10}; do echo $i; done
+        for_pattern = r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.+?);\s*done'
+        
+        def convert_for(match):
+            var = match.group(1)
+            range_expr = match.group(2).strip()
+            body = match.group(3).strip()
+            
+            # Convert bash $var to PowerShell $var (already compatible)
+            # Convert echo to Write-Host
+            body = body.replace('echo ', 'Write-Host ')
+            
+            # Parse range
+            if '..' in range_expr:
+                # Range like 1..10
+                ps = f'foreach (${var} in {range_expr}) {{\n'
+                ps += f'    {body}\n'
+                ps += '}\n'
+            else:
+                # List like "a b c"
+                items = range_expr.split()
+                items_str = ','.join([f'"{item}"' for item in items])
+                ps = f'foreach (${var} in {items_str}) {{\n'
+                ps += f'    {body}\n'
+                ps += '}\n'
+            
+            return ps
+        
+        # Check for for loop
+        if 'for ' in bash_script and ' in ' in bash_script and '; do ' in bash_script:
+            bash_script = re.sub(for_pattern, convert_for, bash_script, flags=re.DOTALL)
+        
+        # While loop: while condition; do ...; done
+        while_pattern = r'while\s+(.+?);\s*do\s+(.+?);\s*done'
+        
+        def convert_while(match):
+            condition = match.group(1).strip()
+            body = match.group(2).strip()
+            
+            # Convert test conditions to PowerShell
+            condition = self._convert_test_to_powershell(condition)
+            
+            # Convert body commands
+            body = body.replace('echo ', 'Write-Host ')
+            
+            ps = f'while ({condition}) {{\n'
+            ps += f'    {body}\n'
+            ps += '}\n'
+            
+            return ps
+        
+        if 'while ' in bash_script:
+            bash_script = re.sub(while_pattern, convert_while, bash_script, flags=re.DOTALL)
+        
+        # If statement: if condition; then ...; fi
+        if_pattern = r'if\s+(.+?);\s*then\s+(.+?);\s*fi'
+        
+        def convert_if(match):
+            condition = match.group(1).strip()
+            body = match.group(2).strip()
+            
+            # Convert test conditions to PowerShell
+            condition = self._convert_test_to_powershell(condition)
+            
+            # Convert body commands
+            body = body.replace('echo ', 'Write-Host ')
+            
+            ps = f'if ({condition}) {{\n'
+            ps += f'    {body}\n'
+            ps += '}\n'
+            
+            return ps
+        
+        if 'if ' in bash_script and ' then ' in bash_script:
+            bash_script = re.sub(if_pattern, convert_if, bash_script, flags=re.DOTALL)
+        
+        # Convert common bash commands to PowerShell equivalents
+        conversions = {
+            'echo ': 'Write-Host ',
+            'cat ': 'Get-Content ',
+            'ls ': 'Get-ChildItem ',
+            'rm ': 'Remove-Item ',
+            'cp ': 'Copy-Item ',
+            'mv ': 'Move-Item ',
+            'mkdir ': 'New-Item -ItemType Directory -Path ',
+        }
+        
+        for bash_cmd, ps_cmd in conversions.items():
+            bash_script = bash_script.replace(bash_cmd, ps_cmd)
+        
+        return bash_script
+    
+    def _convert_test_to_powershell(self, test_expr: str) -> str:
+        """
+        Convert bash test conditions to PowerShell.
+        
+        Examples:
+        [ -f file ] -> Test-Path file
+        [ "$a" = "$b" ] -> $a -eq $b
+        """
+        # Remove [ ] brackets
+        test_expr = test_expr.strip()
+        if test_expr.startswith('[') and test_expr.endswith(']'):
+            test_expr = test_expr[1:-1].strip()
+        
+        # File tests
+        if '-f ' in test_expr:
+            # Extract filename
+            file = test_expr.split('-f ')[1].strip().strip('"')
+            return f'Test-Path "{file}"'
+        elif '-d ' in test_expr:
+            # Directory test
+            dir = test_expr.split('-d ')[1].strip().strip('"')
+            return f'Test-Path "{dir}" -PathType Container'
+        elif '-e ' in test_expr:
+            # Exists test
+            path = test_expr.split('-e ')[1].strip().strip('"')
+            return f'Test-Path "{path}"'
+        
+        # String comparisons
+        elif ' = ' in test_expr or ' == ' in test_expr:
+            parts = re.split(r'\s*=\s*', test_expr)
+            if len(parts) == 2:
+                return f'{parts[0].strip()} -eq {parts[1].strip()}'
+        elif ' != ' in test_expr:
+            parts = test_expr.split(' != ')
+            if len(parts) == 2:
+                return f'{parts[0].strip()} -ne {parts[1].strip()}'
+        
+        # Fallback: return as-is
+        return test_expr
+    
+    def _cleanup_temp_files(self, temp_files: List[Path]):
+        """Cleanup temporary files created during execution"""
+        for temp_file in temp_files:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
+    
+    def _needs_powershell(self, command: str) -> bool:
+        """
+        Detect if command needs PowerShell instead of cmd.exe.
+
+        PowerShell required for:
+        - Command substitution: $(...)
+        - Backticks: `...`
+        - Process substitution: <(...)
+        - Complex variable expansion
+        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
+
+        Returns:
+            True if PowerShell required, False if cmd.exe sufficient
+        """
+        # PowerShell cmdlets
+        powershell_cmdlets = [
+            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
+            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
+            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
+            '$input', '$_'  # PowerShell variables
+        ]
+
+        for cmdlet in powershell_cmdlets:
+            if cmdlet in command:
+                return True
+
+        # Command substitution patterns
+        if '$(' in command:
+            return True
+
+        # Backtick command substitution
+        if '`' in command:
+            # Check it's not just in a string
+            # Simple heuristic: backticks outside of quotes
+            in_quotes = False
+            quote_char = None
+            for i, char in enumerate(command):
+                if char in ('"', "'") and (i == 0 or command[i-1] != '\\'):
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                elif char == '`' and not in_quotes:
+                    return True
+
+        # Process substitution
+        if '<(' in command or '>(' in command:
+            return True
+
+        return False
+    
+    def _adapt_for_powershell(self, command: str) -> str:
+        """
+        Adapt Unix command for PowerShell execution.
+        
+        Translations:
+        - Backticks `cmd` -> $(...) PowerShell syntax
+        - Preserve pipes, redirects, logical operators
+        - Path translations already done by PathTranslator
+        
+        Args:
+            command: Unix command with Windows paths already translated
+            
+        Returns:
+            Command adapted for PowerShell
+        """
+        adapted = command
+        
+        # Convert backticks to PowerShell command substitution
+        # Pattern: `command` -> $(command)
+        # Handle escaped backticks (don't convert)
+        import re
+        
+        # Find all backtick pairs (not escaped)
+        # This is a simple implementation - may need refinement for complex cases
+        backtick_pattern = r'(?<!\\)`([^`]+)`'
+        adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
+        
+        # PowerShell uses different redirection for null
+        # /dev/null -> $null
+        adapted = adapted.replace('/dev/null', '$null')
+        
+        # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
+        
+        return adapted
+    
+
 
 class CommandExecutor:
     """
@@ -1082,7 +1365,7 @@ class CommandExecutor:
             # They will be moved here in next iteration
             # For now, preprocessing must be done by BashToolExecutor before calling this
 
-            # STEP 1: Translate Unix commands → Windows commands
+            # STEP 1: Translate Unix commands -> Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(command)
 
             # STEP 2: Strategy selection - decide execution method
@@ -1140,9 +1423,9 @@ class CommandExecutor:
         1. PipelineStrategy analyzes the command (MACRO level)
         2. PipelineStrategy decides execution strategy
         3. Based on strategy:
-           - BASH_REQUIRED/PREFERRED → Git Bash execution
-           - FAIL → Return error message
-           - SINGLE/POWERSHELL → Delegate to ExecuteUnixSingleCommand (MICRO level)
+           - BASH_REQUIRED/PREFERRED -> Git Bash execution
+           - FAIL -> Return error message
+           - SINGLE/POWERSHELL -> Delegate to ExecuteUnixSingleCommand (MICRO level)
 
         BEFORE: ~200 lines of complex conditional logic
         AFTER: ~30 lines of clean delegation
@@ -1349,9 +1632,9 @@ class CommandExecutor:
         Execute find with COMPLETE test support - STRATEGIC DISPATCH.
 
         ARTIGIANO STRATEGY:
-        - Simple find → PowerShell emulation
-        - Complex -exec → bash.exe (perfect emulation)
-        - Complex tests → bash.exe
+        - Simple find -> PowerShell emulation
+        - Complex -exec -> bash.exe (perfect emulation)
+        - Complex tests -> bash.exe
 
         Complexity triggers (bash.exe required):
         - -exec with sh/bash invocation
@@ -1408,9 +1691,9 @@ class CommandExecutor:
             exec_start = cmd.find('-exec')
             exec_portion = cmd[exec_start:]
             if is_complex_exec(exec_portion):
-                # Complex -exec → bash.exe REQUIRED
+                # Complex -exec -> bash.exe REQUIRED
                 if self.git_bash_exe:
-                    self.logger.debug("find with complex -exec → using bash.exe")
+                    self.logger.debug("find with complex -exec -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
                         return bash_cmd, False
@@ -1424,7 +1707,7 @@ class CommandExecutor:
         for flag in unsupported_flags:
             if flag in cmd:
                 if self.git_bash_exe:
-                    self.logger.debug(f"find with {flag} → using bash.exe")
+                    self.logger.debug(f"find with {flag} -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
                         return bash_cmd, False
@@ -2053,8 +2336,8 @@ class CommandExecutor:
         Translate ln - FULL symlink/hardlink support with fallback.
         
         ARTISAN IMPLEMENTATION:
-        - ln target link → Hard link (mklink /H)
-        - ln -s target link → Symlink (mklink or mklink /D)
+        - ln target link -> Hard link (mklink /H)
+        - ln -s target link -> Symlink (mklink or mklink /D)
         - Fallback: PowerShell New-Item -ItemType SymbolicLink
         - Fallback 2: Copy if symlink fails (no admin)
         
@@ -2180,7 +2463,7 @@ class CommandExecutor:
         Parse find -size specification to bytes.
         
         Format: [+-]N[ckMG]
-        Examples: +1M → 1048576, -100k → 102400, 50 → 50
+        Examples: +1M -> 1048576, -100k -> 102400, 50 -> 50
         """
         import re
         
@@ -2220,8 +2503,8 @@ class CommandExecutor:
         - -a FILENUM: also print unpairable lines from file FILENUM
         
         Usage:
-          join file1 file2                  → join on field 1
-          join -t',' -1 2 -2 1 f1.csv f2.csv → custom fields + separator
+          join file1 file2                  -> join on field 1
+          join -t',' -1 2 -2 1 f1.csv f2.csv -> custom fields + separator
         
         Output: join_field other_fields_f1 other_fields_f2
         """
@@ -2588,7 +2871,7 @@ class CommandExecutor:
 
         ARTIGIANO STRATEGY:
         1. Try awk.exe/gawk.exe (Git for Windows) - 100% GNU awk
-        2. If critical features and no awk.exe → bash.exe
+        2. If critical features and no awk.exe -> bash.exe
         3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
@@ -2650,7 +2933,7 @@ class CommandExecutor:
                     break
 
         if program_str and is_critical_awk(program_str):
-            # CRITICAL awk → native awk.exe or bash.exe REQUIRED
+            # CRITICAL awk -> native awk.exe or bash.exe REQUIRED
             # First try will be awk.exe in the fallback chain
             # But if that fails and we have bash.exe, use it
             if not self.git_bash_exe:
@@ -2661,7 +2944,7 @@ class CommandExecutor:
                     result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
                     if result.returncode != 0:
                         # No awk.exe, use bash.exe
-                        self.logger.debug("Critical awk features + no awk.exe → using bash.exe")
+                        self.logger.debug("Critical awk features + no awk.exe -> using bash.exe")
                         bash_cmd = self._execute_with_gitbash(cmd)
                         if bash_cmd:
                             return bash_cmd, False
@@ -2877,10 +3160,10 @@ class CommandExecutor:
         - Human numeric (-h): 1K, 2M, 3G
         
         Unix behavior:
-          sort file → alphabetic
-          sort -n file → numeric
-          sort -k 2 -t: file → sort by 2nd field, separator ':'
-          sort -h file → human numeric (1K < 1M < 1G)
+          sort file -> alphabetic
+          sort -n file -> numeric
+          sort -k 2 -t: file -> sort by 2nd field, separator ':'
+          sort -h file -> human numeric (1K < 1M < 1G)
         """
         numeric = '-n' in parts or '--numeric-sort' in parts
         reverse = '-r' in parts or '--reverse' in parts
@@ -3064,7 +3347,7 @@ class CommandExecutor:
         CRITICAL: Unix uniq removes CONSECUTIVE duplicates ONLY, not all duplicates!
         
         Example:
-          echo -e "a\\nb\\na" | uniq  →  a, b, a  (NOT a, b)
+          echo -e "a\\nb\\na" | uniq  ->  a, b, a  (NOT a, b)
         
         Flags:
         - -c, --count: Prefix lines with occurrence count
@@ -3363,10 +3646,10 @@ class CommandExecutor:
         - .tar.xz: xz compressed (-J flag)
         
         Common operations:
-        tar -czf archive.tar.gz dir/ → create gzip
-        tar -xzf archive.tar.gz → extract gzip
-        tar -tzf archive.tar.gz → list contents
-        tar -xjf archive.tar.bz2 → extract bzip2
+        tar -czf archive.tar.gz dir/ -> create gzip
+        tar -xzf archive.tar.gz -> extract gzip
+        tar -tzf archive.tar.gz -> list contents
+        tar -xjf archive.tar.bz2 -> extract bzip2
         """
         if len(parts) < 2:
             return 'echo Error: tar requires arguments', True
@@ -3615,9 +3898,9 @@ class CommandExecutor:
         - -r: Recursive (directories)
         
         Behavior (Unix compatible):
-        - gzip file.txt → creates file.txt.gz, deletes file.txt
-        - gzip -k file.txt → creates file.txt.gz, keeps file.txt
-        - gzip -c file.txt → stdout, keeps file.txt
+        - gzip file.txt -> creates file.txt.gz, deletes file.txt
+        - gzip -k file.txt -> creates file.txt.gz, keeps file.txt
+        - gzip -c file.txt -> stdout, keeps file.txt
         """
         stdout_mode = '-c' in parts or '--stdout' in parts
         decompress = '-d' in parts or '--decompress' in parts
@@ -3726,9 +4009,9 @@ class CommandExecutor:
         - -a N: Suffix length (default 2)
         
         Unix behavior:
-          split -l 100 file.txt chunk_  →  chunk_aa, chunk_ab, chunk_ac...
-          split -l 100 -d file.txt chunk_  →  chunk_00, chunk_01, chunk_02...
-          split -b 1M file.bin part_  →  part_aa, part_ab... (1MB chunks)
+          split -l 100 file.txt chunk_  ->  chunk_aa, chunk_ab, chunk_ac...
+          split -l 100 -d file.txt chunk_  ->  chunk_00, chunk_01, chunk_02...
+          split -b 1M file.bin part_  ->  part_aa, part_ab... (1MB chunks)
         
         Output: SILENT (no stdout)
         """
@@ -3919,13 +4202,13 @@ class CommandExecutor:
         STRATEGY FOR 100%:
         1. Try jq.exe (Git for Windows, scoop, chocolatey) - 100% complete
         2. Fallback PowerShell for COMMON patterns (90% real-world use):
-           - .field → select field
-           - .[] → array elements  
-           - .field.nested → nested access
-           - .[N] → array index
-           - keys → object keys
-           - length → count
-           - -r flag → raw output (no quotes)
+           - .field -> select field
+           - .[] -> array elements  
+           - .field.nested -> nested access
+           - .[N] -> array index
+           - keys -> object keys
+           - length -> count
+           - -r flag -> raw output (no quotes)
         
         Complex filters require jq.exe.
         
@@ -3937,9 +4220,9 @@ class CommandExecutor:
         - -s, --slurp: Read entire input as array
         
         Examples:
-          jq '.name' → PowerShell fallback OK
-          jq '.items[].id' → PowerShell fallback OK
-          jq 'map(select(.active))' → Requires jq.exe
+          jq '.name' -> PowerShell fallback OK
+          jq '.items[].id' -> PowerShell fallback OK
+          jq 'map(select(.active))' -> Requires jq.exe
         """
         raw_output = '-r' in parts or '--raw-output' in parts
         compact = '-c' in parts or '--compact-output' in parts
@@ -4064,13 +4347,13 @@ class CommandExecutor:
         Convert simple jq pattern to PowerShell.
         
         Examples:
-        - . → $result = $json
-        - .name → $result = $json.name
-        - .items[] → $result = $json.items
-        - .[0] → $result = $json[0]
-        - .user.email → $result = $json.user.email
-        - keys → $result = $json.PSObject.Properties.Name
-        - length → $result = $json.Count or $json.Length
+        - . -> $result = $json
+        - .name -> $result = $json.name
+        - .items[] -> $result = $json.items
+        - .[0] -> $result = $json[0]
+        - .user.email -> $result = $json.user.email
+        - keys -> $result = $json.PSObject.Properties.Name
+        - length -> $result = $json.Count or $json.Length
         """
         if pattern == '.':
             return '$result = $json\n'
@@ -4139,7 +4422,7 @@ class CommandExecutor:
         Translate timeout - Run command with time limit.
         
         ARTISAN IMPLEMENTATION:
-        - timeout 10s command → PowerShell job with Wait-Job -Timeout
+        - timeout 10s command -> PowerShell job with Wait-Job -Timeout
         - --kill-after: fallback kill if SIGTERM fails
         - Exit codes: 124 if timeout, command exit code otherwise
         
@@ -4305,9 +4588,9 @@ class CommandExecutor:
             return False
 
         if is_critical_sed(cmd):
-            # CRITICAL sed → bash.exe REQUIRED
+            # CRITICAL sed -> bash.exe REQUIRED
             if self.git_bash_exe:
-                self.logger.debug("sed with critical features (hold space, labels) → using bash.exe")
+                self.logger.debug("sed with critical features (hold space, labels) -> using bash.exe")
                 bash_cmd = self._execute_with_gitbash(cmd)
                 if bash_cmd:
                     return bash_cmd, False
@@ -4609,15 +4892,15 @@ class CommandExecutor:
         Translate base64 - Base64 encoding/decoding.
         
         ARTISAN IMPLEMENTATION:
-        - Encode: base64 file → [Convert]::ToBase64String
-        - Decode: base64 -d encoded → [Convert]::FromBase64String
+        - Encode: base64 file -> [Convert]::ToBase64String
+        - Decode: base64 -d encoded -> [Convert]::FromBase64String
         - Stdin: base64 (reads from pipe)
         - -w 0: disable line wrapping (default on Windows anyway)
         
         Unix behavior:
-          base64 file.txt → encode to stdout
-          base64 -d encoded.txt → decode to stdout
-          echo "text" | base64 → encode from stdin
+          base64 file.txt -> encode to stdout
+          base64 -d encoded.txt -> decode to stdout
+          echo "text" | base64 -> encode from stdin
         """
         decode_mode = '-d' in parts or '--decode' in parts
         
@@ -4676,9 +4959,9 @@ class CommandExecutor:
         - -f: Force overwrite
         
         Behavior (Unix compatible):
-        - gunzip file.txt.gz → creates file.txt, deletes file.txt.gz
-        - gunzip -k file.txt.gz → creates file.txt, keeps file.txt.gz
-        - gunzip -c file.txt.gz → stdout, keeps file.txt.gz
+        - gunzip file.txt.gz -> creates file.txt, deletes file.txt.gz
+        - gunzip -k file.txt.gz -> creates file.txt, keeps file.txt.gz
+        - gunzip -c file.txt.gz -> stdout, keeps file.txt.gz
         """
         stdout_mode = '-c' in parts or '--stdout' in parts
         keep = '-k' in parts or '--keep' in parts
@@ -5014,9 +5297,9 @@ class CommandExecutor:
         - -s: serial mode (concatenate all lines of each file)
         
         Usage:
-          paste file1 file2        → line1_f1<TAB>line1_f2
-          paste -d',' f1 f2       → line1_f1,line1_f2
-          paste -s file1          → all_lines_joined_with_TAB
+          paste file1 file2        -> line1_f1<TAB>line1_f2
+          paste -d',' f1 f2       -> line1_f1,line1_f2
+          paste -s file1          -> all_lines_joined_with_TAB
         """
         delimiter = "\\t"
         serial = '-s' in parts
@@ -5109,8 +5392,8 @@ class CommandExecutor:
         - -13: show only unique to file2
         
         Usage:
-          comm file1 file2        → 3 columns
-          comm -12 file1 file2    → only common lines
+          comm file1 file2        -> 3 columns
+          comm -12 file1 file2    -> only common lines
         
         Note: Both files must be sorted!
         """
@@ -5243,10 +5526,10 @@ class CommandExecutor:
         - -c N: first N bytes (not commonly used, skip for now)
 
         Usage:
-          head file.txt           → first 10 lines
-          head -n 20 file.txt     → first 20 lines
-          head -5 file.txt        → first 5 lines
-          cat file | head -10     → from pipeline
+          head file.txt           -> first 10 lines
+          head -n 20 file.txt     -> first 20 lines
+          head -5 file.txt        -> first 5 lines
+          cat file | head -10     -> from pipeline
         """
         line_count = 10  # Default
         files = []
@@ -5361,11 +5644,11 @@ class CommandExecutor:
         - -c N: last N bytes (not commonly used, skip for now)
 
         Usage:
-          tail file.txt           → last 10 lines
-          tail -n 20 file.txt     → last 20 lines
-          tail -5 file.txt        → last 5 lines
-          tail -f log.txt         → follow file
-          cat file | tail -10     → from pipeline
+          tail file.txt           -> last 10 lines
+          tail -n 20 file.txt     -> last 20 lines
+          tail -5 file.txt        -> last 5 lines
+          tail -f log.txt         -> follow file
+          cat file | tail -10     -> from pipeline
         """
         line_count = 10  # Default
         follow = False
@@ -5512,11 +5795,11 @@ class CommandExecutor:
         - -b: number non-blank lines (simplified: same as -n for now)
 
         Usage:
-          cat file.txt               → display file
-          cat file1 file2            → concatenate files
-          cat -n file.txt            → with line numbers
-          echo "text" | cat          → from stdin
-          cat < input.txt            → from redirect
+          cat file.txt               -> display file
+          cat file1 file2            -> concatenate files
+          cat -n file.txt            -> with line numbers
+          echo "text" | cat          -> from stdin
+          cat < input.txt            -> from redirect
         """
         number_lines = '-n' in parts or '-b' in parts
         files = []
@@ -5707,11 +5990,11 @@ class CommandExecutor:
         - (no flags): show lines, words, bytes
 
         Usage:
-          wc file.txt               → lines, words, bytes
-          wc -l file.txt            → lines only
-          wc -w file.txt            → words only
-          cat file | wc -l          → count lines from pipeline
-          ls | wc -l                → count items
+          wc file.txt               -> lines, words, bytes
+          wc -l file.txt            -> lines only
+          wc -w file.txt            -> words only
+          cat file | wc -l          -> count lines from pipeline
+          ls | wc -l                -> count items
         """
         count_lines = '-l' in parts
         count_words = '-w' in parts
@@ -5960,10 +6243,10 @@ class CommandExecutor:
         - =, !=: string comparisons
 
         Usage:
-          test -f file.txt          → check if file exists
-          test -d mydir             → check if directory exists
-          test "a" = "b"            → string comparison
-          [ -f file.txt ]           → same (converted by preprocessor)
+          test -f file.txt          -> check if file exists
+          test -d mydir             -> check if directory exists
+          test "a" = "b"            -> string comparison
+          [ -f file.txt ]           -> same (converted by preprocessor)
         """
         if len(parts) < 2:
             # Empty test is false
@@ -6166,20 +6449,1002 @@ class CommandExecutor:
     # BEFORE translation. They require access to:
     # - command_translator (for recursive translation)
     # - executor (for execution in preprocessing phase)
-    # - scratch_dir, git_bash_exe (passed via BashToolExecutor callbacks - temporary)
+    # - scratch_dir, git_bash_exe, logger (from BashToolExecutor)
     #
-    # TODO ITERATION 2: Accept these dependencies via __init__ or method params
+    # NOTE: These methods reference BashToolExecutor-specific attributes.
+    # They will need to be refactored to accept parameters or have
+    # CommandExecutor initialized with these dependencies.
     # ========================================================================
-
-    # NOTE: These methods will be called from BashToolExecutor.execute()
-    # until we move preprocessing logic to CommandExecutor.execute()
-    # They need access to: scratch_dir, git_bash_exe, logger
-    # For now, they'll be called as: command_executor.method(command, scratch_dir, git_bash_exe)
 
 
 # ============================================================================
 # BASHTOOLEXECUTOR - ORCHESTRATION LAYER
 # ============================================================================
+
+    # ==================== PREPROCESSING METHODS (migrated) ====================
+
+    def _expand_braces(self, command: str) -> str:
+        """
+        Expand brace patterns: {1..10}, {a..z}, {a,b,c}
+        
+        Supports:
+        - Numeric ranges: {1..10}, {01..100}
+        - Alpha ranges: {a..z}, {A..Z}
+        - Lists: {file1,file2,file3}
+        - Nested: {a,b{1,2}}
+        
+        Returns command with braces expanded
+        """
+        import re
+        
+        def expand_single_brace(match):
+            """Expand a single brace expression"""
+            content = match.group(1)
+            
+            # Check for range pattern (numeric or alpha)
+            range_match = re.match(r'^(\d+)\.\.(\d+)$', content)
+            if range_match:
+                # Numeric range
+                start = int(range_match.group(1))
+                end = int(range_match.group(2))
+                padding = len(range_match.group(1)) if range_match.group(1).startswith('0') else 0
+                
+                if start <= end:
+                    items = [str(i).zfill(padding) if padding else str(i) for i in range(start, end + 1)]
+                else:
+                    items = [str(i).zfill(padding) if padding else str(i) for i in range(start, end - 1, -1)]
+                
+                return ' '.join(items)
+            
+            # Alpha range
+            alpha_match = re.match(r'^([a-zA-Z])\.\.([a-zA-Z])$', content)
+            if alpha_match:
+                start_char = alpha_match.group(1)
+                end_char = alpha_match.group(2)
+                
+                if start_char <= end_char:
+                    items = [chr(c) for c in range(ord(start_char), ord(end_char) + 1)]
+                else:
+                    items = [chr(c) for c in range(ord(start_char), ord(end_char) - 1, -1)]
+                
+                return ' '.join(items)
+            
+            # Comma-separated list
+            if ',' in content:
+                items = [item.strip() for item in content.split(',')]
+                return ' '.join(items)
+            
+            # No expansion needed
+            return match.group(0)
+        
+        # Expand braces - may need multiple passes for nested
+        max_iterations = 10
+        for _ in range(max_iterations):
+            # Pattern: {content} but NOT ${var...}
+            # Match innermost braces first (non-greedy)
+            # FIX #7: Use negative lookbehind to exclude ${var...} parameter expansion
+            pattern = r'(?<!\$)\{([^{}]+)\}'
+            new_command = re.sub(pattern, expand_single_brace, command)
+            
+            if new_command == command:
+                # No more expansions
+                break
+            command = new_command
+        
+        return command
+    
+    def _process_heredocs(self, command: str) -> Tuple[str, List[Path]]:
+        """
+        Process here documents.
+        
+        Supports:
+        - <<DELIMITER     (standard heredoc)
+        - <<-DELIMITER    (ignore leading tabs)
+        - <<"DELIMITER"   (quoted delimiter - no expansion)
+        - <<'DELIMITER'   (quoted delimiter - no expansion)
+        - Multiple heredocs in same command
+        
+        Creates temp file with heredoc content, replaces in command.
+        
+        Returns:
+            (modified_command, list_of_temp_files)
+        """
+        
+        temp_files = []
+        
+        if '<<' not in command:
+            return command, temp_files
+        
+        # Pattern to find heredoc operators
+        # Matches: <<WORD, <<-WORD, <<"WORD", <<'WORD'
+        heredoc_pattern = r'<<(-?)\s*([\'"]?)(\w+)\2'
+        
+        # Find all heredocs
+        matches = list(re.finditer(heredoc_pattern, command))
+        if not matches:
+            return command, temp_files
+        
+        # Process heredocs from END to START
+        # This way, earlier positions don't shift when we replace later ones
+        result_command = command
+        
+        for match in reversed(matches):
+            strip_tabs = match.group(1) == '-'
+            quote_char = match.group(2)  # Captures ' or " if delimiter was quoted
+            delimiter = match.group(3)
+            heredoc_start = match.end()
+
+            # Find content after heredoc operator
+            remaining = result_command[heredoc_start:]
+
+            # Split into lines
+            lines = remaining.split('\n')
+
+            # Find delimiter closing line
+            content_lines = []
+            delimiter_found = False
+            delimiter_line_index = -1
+
+            # Start from line 1 (line 0 is usually empty after <<EOF)
+            for i in range(1, len(lines)):
+                if lines[i].rstrip() == delimiter:
+                    delimiter_found = True
+                    delimiter_line_index = i
+                    break
+                content_lines.append(lines[i])
+
+            if not delimiter_found:
+                self.logger.warning(f"Heredoc delimiter '{delimiter}' not found")
+                # Use all remaining lines as content
+                content_lines = lines[1:] if len(lines) > 1 else []
+                delimiter_line_index = len(lines) - 1
+
+            # Build content
+            content = '\n'.join(content_lines)
+
+            # Strip leading tabs if <<- was used
+            if strip_tabs:
+                content = '\n'.join(line.lstrip('\t') for line in content_lines)
+
+            # ================================================================
+            # ARTIGIANO: Heredoc Variable Expansion
+            # ================================================================
+            # CRITICAL: In bash, heredocs expand variables and commands UNLESS
+            # the delimiter is quoted (<<"EOF" or <<'EOF')
+            #
+            # <<EOF          -> Expand $VAR, $(cmd), `cmd`, $((expr))
+            # <<"EOF"        -> NO expansion (literal)
+            # <<'EOF'        -> NO expansion (literal)
+            #
+            # BEHAVIOR:
+            # - Unquoted delimiter -> Use bash.exe to expand content
+            # - Quoted delimiter -> Write content literally
+            # - No bash.exe -> Write literally + warning
+            #
+            # This ensures heredoc-generated configs/scripts have correct values.
+
+            should_expand = (quote_char == '')  # Empty = unquoted delimiter
+
+            if should_expand:
+                # Attempt variable expansion via bash.exe
+                if self.git_bash_exe:
+                    try:
+                        # Use bash to expand the content
+                        # We pass content via echo to let bash do expansion
+                        # Use printf for better control over newlines and special chars
+
+                        # Escape content for bash heredoc (preserve literal backslashes)
+                        # We'll use bash itself to expand, via a heredoc to bash
+                        expansion_script = f'''cat <<'EXPAND_DELIMITER'
+{content}
+EXPAND_DELIMITER'''
+
+                        # But wait - we WANT expansion, so use UNquoted delimiter
+                        expansion_script = f'''cat <<EXPAND_DELIMITER
+{content}
+EXPAND_DELIMITER'''
+
+                        # Execute via bash.exe through ExecutionEngine
+                        bash_path = self.git_bash_exe
+                        result = self.command_executor.executor.execute_bash(
+                            bash_path,
+                            expansion_script,
+                            timeout=5,
+                            cwd=str(self.scratch_dir),
+                            env=self._setup_environment(),
+                            errors='replace',
+                            encoding='utf-8'
+                        )
+
+                        # TESTMODE EXECUTOR: simula output realistico per step successivo
+                        if self.TESTMODE:
+                            result = subprocess.CompletedProcess(
+                                args=result.args,
+                                returncode=0,
+                                stdout=content,  # AS IF: usa contenuto originale come "espanso"
+                                stderr=""
+                            )
+
+                        if result.returncode == 0:
+                            # Use expanded content
+                            content = result.stdout
+                            self.logger.debug(f"Heredoc expanded via bash.exe (delimiter: {delimiter})")
+                        else:
+                            # Expansion failed - use literal
+                            self.logger.warning(f"Heredoc expansion failed (exit {result.returncode}), using literal content")
+                            self.logger.debug(f"Bash stderr: {result.stderr}")
+
+                    except Exception as e:
+                        # Expansion error - use literal
+                        self.logger.warning(f"Heredoc expansion error: {e}, using literal content")
+
+                else:
+                    # No bash.exe for expansion - CRITICAL
+                    self.logger.warning(f"Heredoc with unquoted delimiter '{delimiter}' should expand variables")
+                    self.logger.warning("bash.exe not available - writing LITERAL content (may be incorrect)")
+                    # Continue with literal content
+
+            # Create temp file
+            temp_file = self.scratch_dir / f'heredoc_{threading.get_ident()}_{len(temp_files)}.tmp'
+
+            try:
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                
+                temp_files.append(temp_file)
+                
+                # Unix path for temp file
+                unix_temp = f"/tmp/{temp_file.name}"
+                
+                # Calculate what to replace:
+                # From << to end of delimiter line (inclusive)
+                heredoc_end = heredoc_start + len('\n'.join(lines[:delimiter_line_index + 1]))
+                
+                # Replace heredoc with < temp_file
+                replacement = f"< {unix_temp}"
+                
+                # Do replacement (working backwards, so positions are stable)
+                result_command = result_command[:match.start()] + replacement + result_command[heredoc_end:]
+            
+            except Exception as e:
+                self.logger.error(f"Failed to create heredoc temp file: {e}")
+                continue
+        
+        return result_command, temp_files
+    
+    def _process_substitution(self, command: str) -> Tuple[str, List[Path]]:
+        """
+        Process substitution: <(command), >(command)
+        
+        Executes command, saves output to temp file, replaces pattern with temp path.
+        
+        Returns:
+            (modified_command, list_of_temp_files)
+        """
+        import re
+        
+        temp_files = []
+        
+        # Pattern: <(command) or >(command)
+        # Find all occurrences
+        input_pattern = r'<\(([^)]+)\)'
+        output_pattern = r'>\(([^)]+)\)'
+        
+        cwd = self.scratch_dir
+        env = self._setup_environment()
+        
+        def replace_input_substitution(match):
+            """Replace <(cmd) with temp file containing cmd output"""
+            cmd = match.group(1)
+
+            # Translate and execute command
+            try:
+                # NOTE: Paths already translated by BashToolExecutor.execute()
+                # No need to translate again here
+
+                # Translate command
+                translated, _, _ = self.command_translator.translate(cmd)
+
+                # Execute via ExecutionEngine
+                result = self.command_executor.executor.execute_cmd(
+                    translated,
+                    timeout=30,
+                    cwd=str(cwd),
+                    env=env,
+                    errors='replace'
+                )
+
+                # TESTMODE EXECUTOR: simula output realistico per step successivo
+                if self.TESTMODE:
+                    result = subprocess.CompletedProcess(
+                        args=result.args,
+                        returncode=0,
+                        stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
+                        stderr=""
+                    )
+
+                # Create temp file with output
+                temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
+
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    f.write(result.stdout)
+                
+                temp_files.append(temp_file)
+                
+                # Return Unix path for substitution
+                unix_temp = f"/tmp/{temp_file.name}"
+                return unix_temp
+            
+            except Exception as e:
+                self.logger.error(f"Process substitution failed for <({cmd}): {e}")
+                # Return original if failed
+                return match.group(0)
+        
+        def replace_output_substitution(match):
+            """
+            Replace >(cmd) with temp file that will receive output.
+            
+            FULL IMPLEMENTATION: 
+            1. Create temp file
+            2. Store command to execute AFTER main command
+            3. Return temp file path for main command
+            """
+            cmd = match.group(1)
+            
+            # Create temp file for output
+            temp_file = cwd / f'procsub_output_{threading.get_ident()}_{len(temp_files)}.tmp'
+            temp_files.append(temp_file)
+            
+            # Store the command and temp file for post-processing
+            # This will be executed AFTER the main command completes
+            # Format: (temp_file_path, command_to_execute)
+            if not hasattr(temp_files, 'post_commands'):
+                temp_files.post_commands = []
+            
+            temp_files.post_commands.append((temp_file, cmd))
+            
+            # Return Unix path for substitution in main command
+            unix_temp = f"/tmp/{temp_file.name}"
+            return unix_temp
+        
+        # Replace all input substitutions
+        matches = list(re.finditer(input_pattern, command))
+        command = re.sub(input_pattern, replace_input_substitution, command)
+
+        # Replace all output substitutions
+        command = re.sub(output_pattern, replace_output_substitution, command)
+
+        return command, temp_files
+    
+    def _process_command_substitution_recursive(self, command: str) -> str:
+        """
+        Process command substitution $(...) with RECURSIVE translation.
+
+        ARTISAN IMPLEMENTATION:
+        - Parses nested $(...)
+        - Recursively translates Unix commands inside substitution
+        - Preserves PowerShell $(...) syntax for output
+        - Handles multiple substitutions in single command
+
+        Examples:
+            $(grep pattern file.txt)
+            -> $(Select-String -Pattern "pattern" -Path "file.txt")
+
+            $(cat file | wc -l)
+            -> $(Get-Content file | Measure-Object -Line)
+
+            Nested: $(echo $(cat file))
+            -> $(Write-Host $(Get-Content file))
+
+        Returns:
+            Command with all $(..  .) recursively translated
+        """
+        if '$(' not in command:
+            return command
+        
+        def find_substitutions(text: str) -> List[Tuple[int, int, str]]:
+            """
+            Find all $(...) patterns with correct nesting.
+            
+            Returns:
+                List of (start_pos, end_pos, content) tuples
+            """
+            substitutions = []
+            i = 0
+            
+            while i < len(text):
+                if i < len(text) - 1 and text[i:i+2] == '$(':
+                    # FIX #6: Check if it's arithmetic $(( instead of command substitution $(
+                    if i < len(text) - 2 and text[i+2] == '(':
+                        # This is $((arithmetic)), NOT command substitution
+                        # Skip it - already handled by _expand_variables()
+                        i += 3
+                        continue
+
+                    # Found start of command substitution $(...)
+                    start = i
+                    i += 2
+                    depth = 1
+                    
+                    # Find matching closing paren
+                    while i < len(text) and depth > 0:
+                        if text[i] == '(':
+                            depth += 1
+                        elif text[i] == ')':
+                            depth -= 1
+                        i += 1
+                    
+                    if depth == 0:
+                        # Found complete substitution
+                        end = i
+                        content = text[start+2:end-1]
+                        substitutions.append((start, end, content))
+                    else:
+                        # Unmatched parens - log warning
+                        self.logger.warning(f"Unmatched $( at position {start}")
+                else:
+                    i += 1
+            
+            return substitutions
+        
+        # Find all top-level substitutions (not nested)
+        substitutions = find_substitutions(command)
+
+        if not substitutions:
+            return command
+
+        for start, end, content in substitutions:
+            print(f"  - Position {start}-{end}: '{content}'")
+        
+        # Process substitutions from END to START (avoid index shifting)
+        substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
+        
+        for start, end, content in substitutions_reversed:
+            # Translate the content
+            try:
+                # RECURSIVE: content might have nested $(...)
+                translated_content = self._translate_substitution_content(content)
+
+                # Replace in command (preserve $(...) wrapper for PowerShell)
+                replacement = f"$({translated_content})"
+                command = command[:start] + replacement + command[end:]
+                
+            except Exception as e:
+                self.logger.error(f"Command substitution translation failed: {e}")
+                # Keep original on error
+                continue
+        
+        return command
+    
+    def _translate_substitution_content(self, content: str) -> str:
+        """
+        Translate Unix command content inside $(...) - ARTIGIANO STRATEGY.
+
+        CRITICAL: Commands inside $(...) must be EXECUTED to capture output.
+        Cannot just "pass to bash.exe" - must run and get result.
+
+        ARTIGIANO STRATEGY:
+        1. Detect if command is COMPLEX (would fail in PowerShell emulation)
+        2. Complex -> execute with bash.exe, capture output, return as string
+        3. Simple -> translate to PowerShell, execute in $(...) context
+
+        COMPLEXITY TRIGGERS:
+        - Pipeline with critical commands (find, xargs, awk, sed)
+        - Command chains (&&, ||)
+        - Process substitution <(...)
+        - Complex redirections
+
+        Args:
+            content: Unix command string (e.g., "grep pattern file.txt")
+
+        Returns:
+            Translated command or bash.exe invocation
+        """
+        # Handle empty
+        if not content or not content.strip():
+            return content
+
+        # STEP 1: Recursively handle nested $(...)
+        if '$(' in content:
+            content = self._process_command_substitution_recursive(content)
+
+        # ================================================================
+        # ARTIGIANO: Detect if command inside $(...) is COMPLEX
+        # ================================================================
+
+        def is_complex_substitution(cmd: str) -> bool:
+            """Detect if command needs bash.exe for reliable execution"""
+            # Pipeline with critical commands
+            if '|' in cmd:
+                critical_in_pipeline = ['find', 'xargs', 'awk', 'sed', 'grep -', 'cut', 'tr']
+                for critical in critical_in_pipeline:
+                    if critical in cmd:
+                        return True
+
+            # Command chains
+            if any(op in cmd for op in ['&&', '||', ';']):
+                return True
+
+            # Process substitution (shouldn't be here but check anyway)
+            if '<(' in cmd or '>(' in cmd:
+                return True
+
+            # Complex find -exec
+            if '-exec' in cmd and 'find' in cmd:
+                return True
+
+            return False
+
+        if is_complex_substitution(content):
+            # COMPLEX command inside $(...) -> execute with bash.exe
+            if self.git_bash_exe:
+                self.logger.debug(f"Complex command in $(...) -> using bash.exe: {content[:50]}")
+                # Need to execute bash.exe, capture output, and insert as string
+                # This is tricky - we're in preprocessing, haven't executed yet
+                # Return a PowerShell invocation that runs bash.exe
+                bash_escaped = content.replace('"', '`"').replace('$', '`$')
+                # Convert to bash.exe invocation that captures output
+                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
+            else:
+                self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
+                # Fall through to PowerShell translation (may fail)
+
+        # ================================================================
+        # STEP 2: Translate commands
+        # ================================================================
+        # NOTE: Paths already translated by BashToolExecutor.execute()
+        # Command substitution $(...) is PART of the original command,
+        # so paths inside it were already translated.
+
+        # Use command_translator which handles:
+        # - Pipe chains
+        # - Redirections
+        # - Command concatenation (&&, ||, ;)
+        # - All individual commands
+        # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
+        # Inside $(), there's no "strategy selection" - must translate immediately
+        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
+
+        # STEP 4: Clean up for PowerShell context
+        # Command translator might wrap in cmd /c - remove that for $(...) context
+        if translated.startswith('cmd /c '):
+            translated = translated[7:]
+        elif translated.startswith('cmd.exe /c '):
+            translated = translated[11:]
+
+        # PowerShell $(...) expects bare commands, not cmd wrappers
+        return translated
+    
+    def _expand_variables(self, command: str) -> str:
+        """
+        Expand variable patterns:
+        - ${var:-default}, ${var:=value}
+        - Tilde expansion: ~/path
+        - Arithmetic: $((expr))
+        - Array operations: ${arr[@]}
+        """
+        import re
+
+        # NOTE: claude_home_unix is passed via __init__, no PathTranslator needed
+        claude_home = self.claude_home_unix
+
+        # 1. Tilde expansion: ~/path -> /home/claude/path
+        if command.startswith('~/'):
+            command = claude_home + '/' + command[2:]
+
+        # Also expand tilde in arguments: cmd ~/path
+        command = re.sub(r'\s~/', f' {claude_home}/', command)
+        
+        # 2. Arithmetic expansion: $((expr))
+        arith_pattern = r'\$\(\(([^)]+)\)\)'
+        
+        def expand_arithmetic(match):
+            expr = match.group(1)
+            try:
+                # Evaluate arithmetic expression
+                # Simple eval - may need more robust parsing
+                result = eval(expr, {"__builtins__": {}}, {})
+                return str(result)
+            except Exception as e:
+                self.logger.warning(f"Arithmetic expansion failed for $(('{expr}')): {e}")
+                return match.group(0)
+        
+        command = re.sub(arith_pattern, expand_arithmetic, command)
+        
+        # 3. Variable default: ${var:-default}
+        default_pattern = r'\$\{(\w+):-([^}]+)\}'
+        
+        def expand_default(match):
+            var_name = match.group(1)
+            default_value = match.group(2)
+            value = os.environ.get(var_name)
+            return value if value else default_value
+        
+        command = re.sub(default_pattern, expand_default, command)
+        
+        # 4. Variable assign: ${var:=value}
+        assign_pattern = r'\$\{(\w+):=([^}]+)\}'
+        
+        def expand_assign(match):
+            var_name = match.group(1)
+            default_value = match.group(2)
+            value = os.environ.get(var_name)
+            return value if value else default_value
+        
+        command = re.sub(assign_pattern, expand_assign, command)
+        
+        # 5. Array expansion: ${arr[@]} -> just remove braces for now
+        # Full array support would require state tracking
+        array_pattern = r'\$\{(\w+)\[@\]\}'
+        command = re.sub(array_pattern, r'$\1', command)
+
+        # ================================================================
+        # FIX #7: Advanced Parameter Expansion
+        # ================================================================
+        # ${var#pattern}  - remove shortest prefix
+        # ${var##pattern} - remove longest prefix
+        # ${var%pattern}  - remove shortest suffix
+        # ${var%%pattern} - remove longest suffix
+        # ${var/pattern/string}  - replace first
+        # ${var//pattern/string} - replace all
+        # ${var^^} - uppercase all
+        # ${var,,} - lowercase all
+        # ${var^}  - uppercase first
+        # ${#var}  - string length
+
+        # 5a. String length: ${#var}
+        length_pattern = r'\$\{#(\w+)\}'
+
+        def expand_length(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            return str(len(value))
+
+        command = re.sub(length_pattern, expand_length, command)
+
+        # 5b. Remove prefix: ${var#pattern} and ${var##pattern}
+        # Pattern: ${var#pattern} or ${var##pattern}
+        prefix_pattern = r'\$\{(\w+)(#{1,2})([^}]+)\}'
+
+        def expand_remove_prefix(match):
+            var_name = match.group(1)
+            op = match.group(2)  # # or ##
+            pattern = match.group(3)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern)
+
+            # Convert bash glob to regex and match from start
+            regex_pattern = '^' + regex_pattern.rstrip('\\Z')
+
+            if op == '#':  # Remove shortest prefix (non-greedy)
+                # Make pattern non-greedy by adding '?' after '*'
+                regex_pattern_ng = regex_pattern.replace('*', '*?')
+                match_obj = re.match(regex_pattern_ng, value)
+                if match_obj:
+                    return value[len(match_obj.group(0)):]
+            else:  # ## Remove longest prefix (greedy - default)
+                # fnmatch patterns are already greedy by default
+                match_obj = re.match(regex_pattern, value)
+                if match_obj:
+                    return value[len(match_obj.group(0)):]
+
+            return value
+
+        command = re.sub(prefix_pattern, expand_remove_prefix, command)
+
+        # 5c. Remove suffix: ${var%pattern} and ${var%%pattern}
+        suffix_pattern = r'\$\{(\w+)(%{1,2})([^}]+)\}'
+
+        def expand_remove_suffix(match):
+            var_name = match.group(1)
+            op = match.group(2)  # % or %%
+            pattern = match.group(3)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex and match from end
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern)
+            regex_pattern = regex_pattern.rstrip('\\Z') + '$'
+
+            if op == '%':  # Remove shortest suffix (non-greedy)
+                # Iterate from right to left to find rightmost (shortest) match
+                for i in range(len(value), -1, -1):
+                    match_obj = re.search(regex_pattern, value[i:])
+                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
+                        # Found shortest suffix at position i
+                        return value[:i]
+            else:  # %% Remove longest suffix (greedy)
+                # Iterate from left to right to find leftmost (longest) match
+                for i in range(len(value) + 1):
+                    match_obj = re.search(regex_pattern, value[i:])
+                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
+                        # Found longest suffix at position i
+                        return value[:i]
+
+            return value
+
+        command = re.sub(suffix_pattern, expand_remove_suffix, command)
+
+        # 5d. String substitution: ${var/pattern/string} and ${var//pattern/string}
+        subst_pattern = r'\$\{(\w+)(/{1,2})([^/}]+)/([^}]*)\}'
+
+        def expand_substitution(match):
+            var_name = match.group(1)
+            op = match.group(2)  # / or //
+            pattern = match.group(3)
+            replacement = match.group(4)
+            value = os.environ.get(var_name, '')
+
+            if not value:
+                return ''
+
+            # Convert bash glob to regex
+            import fnmatch
+            regex_pattern = fnmatch.translate(pattern).rstrip('\\Z')
+
+            if op == '/':  # Replace first
+                return re.sub(regex_pattern, replacement, value, count=1)
+            else:  # // Replace all
+                return re.sub(regex_pattern, replacement, value)
+
+        command = re.sub(subst_pattern, expand_substitution, command)
+
+        # 5e. Case conversion: ${var^^}, ${var,,}, ${var^}
+        case_pattern = r'\$\{(\w+)(\^{1,2}|,{1,2})\}'
+
+        def expand_case(match):
+            var_name = match.group(1)
+            op = match.group(2)
+            value = os.environ.get(var_name, '')
+
+            if op == '^^':  # Uppercase all
+                return value.upper()
+            elif op == ',,':  # Lowercase all
+                return value.lower()
+            elif op == '^':  # Uppercase first
+                return value[0].upper() + value[1:] if value else ''
+            elif op == ',':  # Lowercase first
+                return value[0].lower() + value[1:] if value else ''
+
+            return value
+
+        command = re.sub(case_pattern, expand_case, command)
+
+        # ================================================================
+        # ARTIGIANO: Simple Variable Expansion
+        # ================================================================
+        # CRITICAL: Must expand basic $VAR and ${VAR} forms!
+        # Previous code only handled ${VAR:-default}, missing simple expansion.
+        #
+        # This BROKE commands like:
+        #   cd $HOME        -> cd $HOME (literal! Wrong!)
+        #   echo $PATH      -> echo $PATH (literal!)
+        #   cp file $USER/  -> cp file $USER/ (fails!)
+        #
+        # 6. Simple ${VAR} expansion
+        simple_brace_pattern = r'\$\{(\w+)\}'
+
+        def expand_simple_brace(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${{{var_name}}} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_brace_pattern, expand_simple_brace, command)
+
+        # 7. Simple $VAR expansion (without braces)
+        # Must be AFTER ${VAR} to avoid double-expansion
+        # Match $VAR but NOT $((, ${, $@, $*, $#, $?, $$, $!, $0-9
+        simple_var_pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
+
+        def expand_simple_var(match):
+            var_name = match.group(1)
+            value = os.environ.get(var_name, '')
+            if not value:
+                self.logger.debug(f"Variable ${var_name} not found in environment, expanding to empty string")
+            return value
+
+        command = re.sub(simple_var_pattern, expand_simple_var, command)
+
+        return command
+    
+    def _preprocess_test_commands(self, command: str) -> str:
+        """
+        Convert test command syntax: [ expr ] -> test expr
+        
+        Handles:
+        - [ -f file ] -> test -f file
+        - [[ expr ]] -> test expr (basic conversion)
+        """
+        import re
+        
+        # Pattern: [ expr ]
+        test_pattern = r'\[\s+([^\]]+)\s+\]'
+        
+        def convert_test(match):
+            expr = match.group(1)
+            return f'test {expr}'
+        
+        command = re.sub(test_pattern, convert_test, command)
+        
+        # Pattern: [[ expr ]]
+        double_test_pattern = r'\[\[\s+([^\]]+)\s+\]\]'
+        
+        def convert_double_test(match):
+            expr = match.group(1)
+            return f'test {expr}'
+        
+        command = re.sub(double_test_pattern, convert_double_test, command)
+        
+        return command
+    
+    def _expand_aliases(self, command: str) -> str:
+        """
+        Expand common bash aliases to their full commands.
+        
+        Common aliases:
+        - ll -> ls -la
+        - la -> ls -A
+        - l -> ls -CF
+        """
+        aliases = {
+            'll ': 'ls -la ',
+            'll\n': 'ls -la\n',
+            'll$': 'ls -la',
+            'la ': 'ls -A ',
+            'la\n': 'ls -A\n',
+            'la$': 'ls -A',
+            'l ': 'ls -CF ',
+            'l\n': 'ls -CF\n',
+            'l$': 'ls -CF',
+        }
+        
+        # Check if command starts with alias
+        for alias, expansion in aliases.items():
+            if command.startswith(alias.rstrip('$ \n')):
+                command = command.replace(alias.rstrip('$ \n'), expansion.rstrip('$ \n'), 1)
+                break
+        
+        return command
+    
+    def _process_subshell(self, command: str) -> str:
+        """
+        Process subshell execution: (command)
+
+        Subshell in bash creates new environment.
+        In our case, just execute command normally.
+
+        IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
+        """
+        import re
+
+        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command) and NOT $((arithmetic))
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        #                          (?<!<) = "not preceded by <"
+        #                          (?<!>) = "not preceded by >"
+        #                          (?<!\() = "not preceded by (" (to avoid matching 2nd paren in $((expr)))
+        # FIX #6: Added (?<!\() to prevent matching the 2nd paren in $((5 + 5))
+        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)(?<!\()\(([^)]+)\)'
+
+        def remove_subshell(match):
+            # Just return inner command
+            # Full subshell would need environment isolation
+            return match.group(1)
+
+        command = re.sub(subshell_pattern, remove_subshell, command)
+
+        return command
+    
+    def _process_command_grouping(self, command: str) -> str:
+        """
+        Process command grouping: { cmd1; cmd2; }
+        
+        Group commands to run in current shell.
+        Convert to simple command sequence.
+        """
+        import re
+        
+        # Pattern: { cmd1; cmd2; } but NOT ${var...}
+        # Use negative lookbehind: (?<!\$) = "not preceded by $"
+        # FIX #7: Prevent matching ${var#pattern}, ${var%pattern}, ${var/pattern/repl}, etc.
+        grouping_pattern = r'(?<!\$)\{\s*([^}]+)\s*\}'
+        
+        def expand_grouping(match):
+            # Return inner commands
+            return match.group(1)
+        
+        command = re.sub(grouping_pattern, expand_grouping, command)
+        
+        return command
+    
+    def _process_xargs(self, command: str) -> str:
+        """
+        Process xargs patterns: cmd | xargs other_cmd
+        
+        Converts to PowerShell ForEach-Object or cmd.exe for loop.
+        """
+        import re
+        
+        if 'xargs' not in command:
+            return command
+        
+        # Pattern: ... | xargs cmd
+        xargs_pattern = r'(.+?)\|\s*xargs\s+(.+)'
+        
+        match = re.match(xargs_pattern, command)
+        if not match:
+            return command
+        
+        input_cmd = match.group(1).strip()
+        xargs_cmd = match.group(2).strip()
+        
+        # Convert to PowerShell ForEach-Object
+        # input_cmd | ForEach-Object { xargs_cmd $_ }
+        ps_command = f"{input_cmd} | ForEach-Object {{ {xargs_cmd} $_ }}"
+        
+        return ps_command
+    
+    def _process_find_exec(self, command: str) -> str:
+        """
+        Process find ... -exec patterns
+        
+        Converts to PowerShell Get-ChildItem with ForEach-Object.
+        """
+        import re
+        
+        if 'find' not in command or '-exec' not in command:
+            return command
+        
+        # Pattern: find path -exec cmd {} \;
+        exec_pattern = r'find\s+([^\s]+)\s+.*?-exec\s+(.+?)\s*\{\}\s*\\;'
+        
+        match = re.search(exec_pattern, command)
+        if not match:
+            return command
+        
+        path = match.group(1)
+        exec_cmd = match.group(2).strip()
+        
+        # Convert to PowerShell
+        # Get-ChildItem path -Recurse | ForEach-Object { exec_cmd $_.FullName }
+        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {exec_cmd} $_.FullName }}"
+        
+        return ps_command
+    
+    def _process_escape_sequences(self, command: str) -> str:
+        """
+        Process escape sequences in strings: \n, \t, \r, etc.
+        
+        Converts to proper escaped format for target shell.
+        """
+        # Already handled by echo translator in most cases
+        # For PowerShell, escape sequences work with backtick
+        
+        # If using PowerShell, convert \ to `
+        # This is simplified - real implementation needs context awareness
+        
+        return command
+    
+    def _cleanup_temp_files(self, temp_files: List[Path]):
+        """Cleanup temporary files created during execution"""
+        for temp_file in temp_files:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
+    
 
 class BashToolExecutor(ToolExecutor):
     """
@@ -6410,1258 +7675,6 @@ class BashToolExecutor(ToolExecutor):
             "Install Python or provide python_executable parameter explicitly."
         )
     
-    def _expand_braces(self, command: str) -> str:
-        """
-        Expand brace patterns: {1..10}, {a..z}, {a,b,c}
-        
-        Supports:
-        - Numeric ranges: {1..10}, {01..100}
-        - Alpha ranges: {a..z}, {A..Z}
-        - Lists: {file1,file2,file3}
-        - Nested: {a,b{1,2}}
-        
-        Returns command with braces expanded
-        """
-        import re
-        
-        def expand_single_brace(match):
-            """Expand a single brace expression"""
-            content = match.group(1)
-            
-            # Check for range pattern (numeric or alpha)
-            range_match = re.match(r'^(\d+)\.\.(\d+)$', content)
-            if range_match:
-                # Numeric range
-                start = int(range_match.group(1))
-                end = int(range_match.group(2))
-                padding = len(range_match.group(1)) if range_match.group(1).startswith('0') else 0
-                
-                if start <= end:
-                    items = [str(i).zfill(padding) if padding else str(i) for i in range(start, end + 1)]
-                else:
-                    items = [str(i).zfill(padding) if padding else str(i) for i in range(start, end - 1, -1)]
-                
-                return ' '.join(items)
-            
-            # Alpha range
-            alpha_match = re.match(r'^([a-zA-Z])\.\.([a-zA-Z])$', content)
-            if alpha_match:
-                start_char = alpha_match.group(1)
-                end_char = alpha_match.group(2)
-                
-                if start_char <= end_char:
-                    items = [chr(c) for c in range(ord(start_char), ord(end_char) + 1)]
-                else:
-                    items = [chr(c) for c in range(ord(start_char), ord(end_char) - 1, -1)]
-                
-                return ' '.join(items)
-            
-            # Comma-separated list
-            if ',' in content:
-                items = [item.strip() for item in content.split(',')]
-                return ' '.join(items)
-            
-            # No expansion needed
-            return match.group(0)
-        
-        # Expand braces - may need multiple passes for nested
-        max_iterations = 10
-        for _ in range(max_iterations):
-            # Pattern: {content} but NOT ${var...}
-            # Match innermost braces first (non-greedy)
-            # FIX #7: Use negative lookbehind to exclude ${var...} parameter expansion
-            pattern = r'(?<!\$)\{([^{}]+)\}'
-            new_command = re.sub(pattern, expand_single_brace, command)
-            
-            if new_command == command:
-                # No more expansions
-                break
-            command = new_command
-        
-        return command
-    
-    def _process_heredocs(self, command: str) -> Tuple[str, List[Path]]:
-        """
-        Process here documents.
-        
-        Supports:
-        - <<DELIMITER     (standard heredoc)
-        - <<-DELIMITER    (ignore leading tabs)
-        - <<"DELIMITER"   (quoted delimiter - no expansion)
-        - <<'DELIMITER'   (quoted delimiter - no expansion)
-        - Multiple heredocs in same command
-        
-        Creates temp file with heredoc content, replaces in command.
-        
-        Returns:
-            (modified_command, list_of_temp_files)
-        """
-        
-        temp_files = []
-        
-        if '<<' not in command:
-            return command, temp_files
-        
-        # Pattern to find heredoc operators
-        # Matches: <<WORD, <<-WORD, <<"WORD", <<'WORD'
-        heredoc_pattern = r'<<(-?)\s*([\'"]?)(\w+)\2'
-        
-        # Find all heredocs
-        matches = list(re.finditer(heredoc_pattern, command))
-        if not matches:
-            return command, temp_files
-        
-        # Process heredocs from END to START
-        # This way, earlier positions don't shift when we replace later ones
-        result_command = command
-        
-        for match in reversed(matches):
-            strip_tabs = match.group(1) == '-'
-            quote_char = match.group(2)  # Captures ' or " if delimiter was quoted
-            delimiter = match.group(3)
-            heredoc_start = match.end()
-
-            # Find content after heredoc operator
-            remaining = result_command[heredoc_start:]
-
-            # Split into lines
-            lines = remaining.split('\n')
-
-            # Find delimiter closing line
-            content_lines = []
-            delimiter_found = False
-            delimiter_line_index = -1
-
-            # Start from line 1 (line 0 is usually empty after <<EOF)
-            for i in range(1, len(lines)):
-                if lines[i].rstrip() == delimiter:
-                    delimiter_found = True
-                    delimiter_line_index = i
-                    break
-                content_lines.append(lines[i])
-
-            if not delimiter_found:
-                self.logger.warning(f"Heredoc delimiter '{delimiter}' not found")
-                # Use all remaining lines as content
-                content_lines = lines[1:] if len(lines) > 1 else []
-                delimiter_line_index = len(lines) - 1
-
-            # Build content
-            content = '\n'.join(content_lines)
-
-            # Strip leading tabs if <<- was used
-            if strip_tabs:
-                content = '\n'.join(line.lstrip('\t') for line in content_lines)
-
-            # ================================================================
-            # ARTIGIANO: Heredoc Variable Expansion
-            # ================================================================
-            # CRITICAL: In bash, heredocs expand variables and commands UNLESS
-            # the delimiter is quoted (<<"EOF" or <<'EOF')
-            #
-            # <<EOF          → Expand $VAR, $(cmd), `cmd`, $((expr))
-            # <<"EOF"        → NO expansion (literal)
-            # <<'EOF'        → NO expansion (literal)
-            #
-            # BEHAVIOR:
-            # - Unquoted delimiter → Use bash.exe to expand content
-            # - Quoted delimiter → Write content literally
-            # - No bash.exe → Write literally + warning
-            #
-            # This ensures heredoc-generated configs/scripts have correct values.
-
-            should_expand = (quote_char == '')  # Empty = unquoted delimiter
-
-            if should_expand:
-                # Attempt variable expansion via bash.exe
-                if self.git_bash_exe:
-                    try:
-                        # Use bash to expand the content
-                        # We pass content via echo to let bash do expansion
-                        # Use printf for better control over newlines and special chars
-
-                        # Escape content for bash heredoc (preserve literal backslashes)
-                        # We'll use bash itself to expand, via a heredoc to bash
-                        expansion_script = f'''cat <<'EXPAND_DELIMITER'
-{content}
-EXPAND_DELIMITER'''
-
-                        # But wait - we WANT expansion, so use UNquoted delimiter
-                        expansion_script = f'''cat <<EXPAND_DELIMITER
-{content}
-EXPAND_DELIMITER'''
-
-                        # Execute via bash.exe through ExecutionEngine
-                        bash_path = self.git_bash_exe
-                        result = self.command_executor.executor.execute_bash(
-                            bash_path,
-                            expansion_script,
-                            timeout=5,
-                            cwd=str(self.scratch_dir),
-                            env=self._setup_environment(),
-                            errors='replace',
-                            encoding='utf-8'
-                        )
-
-                        # TESTMODE EXECUTOR: simula output realistico per step successivo
-                        if self.TESTMODE:
-                            result = subprocess.CompletedProcess(
-                                args=result.args,
-                                returncode=0,
-                                stdout=content,  # AS IF: usa contenuto originale come "espanso"
-                                stderr=""
-                            )
-
-                        if result.returncode == 0:
-                            # Use expanded content
-                            content = result.stdout
-                            self.logger.debug(f"Heredoc expanded via bash.exe (delimiter: {delimiter})")
-                        else:
-                            # Expansion failed - use literal
-                            self.logger.warning(f"Heredoc expansion failed (exit {result.returncode}), using literal content")
-                            self.logger.debug(f"Bash stderr: {result.stderr}")
-
-                    except Exception as e:
-                        # Expansion error - use literal
-                        self.logger.warning(f"Heredoc expansion error: {e}, using literal content")
-
-                else:
-                    # No bash.exe for expansion - CRITICAL
-                    self.logger.warning(f"Heredoc with unquoted delimiter '{delimiter}' should expand variables")
-                    self.logger.warning("bash.exe not available - writing LITERAL content (may be incorrect)")
-                    # Continue with literal content
-
-            # Create temp file
-            temp_file = self.scratch_dir / f'heredoc_{threading.get_ident()}_{len(temp_files)}.tmp'
-
-            try:
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                
-                temp_files.append(temp_file)
-                
-                # Unix path for temp file
-                unix_temp = f"/tmp/{temp_file.name}"
-                
-                # Calculate what to replace:
-                # From << to end of delimiter line (inclusive)
-                heredoc_end = heredoc_start + len('\n'.join(lines[:delimiter_line_index + 1]))
-                
-                # Replace heredoc with < temp_file
-                replacement = f"< {unix_temp}"
-                
-                # Do replacement (working backwards, so positions are stable)
-                result_command = result_command[:match.start()] + replacement + result_command[heredoc_end:]
-            
-            except Exception as e:
-                self.logger.error(f"Failed to create heredoc temp file: {e}")
-                continue
-        
-        return result_command, temp_files
-    
-    def _process_substitution(self, command: str) -> Tuple[str, List[Path]]:
-        """
-        Process substitution: <(command), >(command)
-        
-        Executes command, saves output to temp file, replaces pattern with temp path.
-        
-        Returns:
-            (modified_command, list_of_temp_files)
-        """
-        import re
-        
-        temp_files = []
-        
-        # Pattern: <(command) or >(command)
-        # Find all occurrences
-        input_pattern = r'<\(([^)]+)\)'
-        output_pattern = r'>\(([^)]+)\)'
-        
-        cwd = self.scratch_dir
-        env = self._setup_environment()
-        
-        def replace_input_substitution(match):
-            """Replace <(cmd) with temp file containing cmd output"""
-            cmd = match.group(1)
-
-            # Translate and execute command
-            try:
-                # NOTE: Paths already translated by BashToolExecutor.execute()
-                # No need to translate again here
-
-                # Translate command
-                translated, _, _ = self.command_translator.translate(cmd)
-
-                # Execute via ExecutionEngine
-                result = self.command_executor.executor.execute_cmd(
-                    translated,
-                    timeout=30,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace'
-                )
-
-                # TESTMODE EXECUTOR: simula output realistico per step successivo
-                if self.TESTMODE:
-                    result = subprocess.CompletedProcess(
-                        args=result.args,
-                        returncode=0,
-                        stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
-                        stderr=""
-                    )
-
-                # Create temp file with output
-                temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
-
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    f.write(result.stdout)
-                
-                temp_files.append(temp_file)
-                
-                # Return Unix path for substitution
-                unix_temp = f"/tmp/{temp_file.name}"
-                return unix_temp
-            
-            except Exception as e:
-                self.logger.error(f"Process substitution failed for <({cmd}): {e}")
-                # Return original if failed
-                return match.group(0)
-        
-        def replace_output_substitution(match):
-            """
-            Replace >(cmd) with temp file that will receive output.
-            
-            FULL IMPLEMENTATION: 
-            1. Create temp file
-            2. Store command to execute AFTER main command
-            3. Return temp file path for main command
-            """
-            cmd = match.group(1)
-            
-            # Create temp file for output
-            temp_file = cwd / f'procsub_output_{threading.get_ident()}_{len(temp_files)}.tmp'
-            temp_files.append(temp_file)
-            
-            # Store the command and temp file for post-processing
-            # This will be executed AFTER the main command completes
-            # Format: (temp_file_path, command_to_execute)
-            if not hasattr(temp_files, 'post_commands'):
-                temp_files.post_commands = []
-            
-            temp_files.post_commands.append((temp_file, cmd))
-            
-            # Return Unix path for substitution in main command
-            unix_temp = f"/tmp/{temp_file.name}"
-            return unix_temp
-        
-        # Replace all input substitutions
-        matches = list(re.finditer(input_pattern, command))
-        command = re.sub(input_pattern, replace_input_substitution, command)
-
-        # Replace all output substitutions
-        command = re.sub(output_pattern, replace_output_substitution, command)
-
-        return command, temp_files
-    
-    def _process_command_substitution_recursive(self, command: str) -> str:
-        """
-        Process command substitution $(...) with RECURSIVE translation.
-
-        ARTISAN IMPLEMENTATION:
-        - Parses nested $(...)
-        - Recursively translates Unix commands inside substitution
-        - Preserves PowerShell $(...) syntax for output
-        - Handles multiple substitutions in single command
-
-        Examples:
-            $(grep pattern file.txt)
-            → $(Select-String -Pattern "pattern" -Path "file.txt")
-
-            $(cat file | wc -l)
-            → $(Get-Content file | Measure-Object -Line)
-
-            Nested: $(echo $(cat file))
-            → $(Write-Host $(Get-Content file))
-
-        Returns:
-            Command with all $(..  .) recursively translated
-        """
-        if '$(' not in command:
-            return command
-        
-        def find_substitutions(text: str) -> List[Tuple[int, int, str]]:
-            """
-            Find all $(...) patterns with correct nesting.
-            
-            Returns:
-                List of (start_pos, end_pos, content) tuples
-            """
-            substitutions = []
-            i = 0
-            
-            while i < len(text):
-                if i < len(text) - 1 and text[i:i+2] == '$(':
-                    # FIX #6: Check if it's arithmetic $(( instead of command substitution $(
-                    if i < len(text) - 2 and text[i+2] == '(':
-                        # This is $((arithmetic)), NOT command substitution
-                        # Skip it - already handled by _expand_variables()
-                        i += 3
-                        continue
-
-                    # Found start of command substitution $(...)
-                    start = i
-                    i += 2
-                    depth = 1
-                    
-                    # Find matching closing paren
-                    while i < len(text) and depth > 0:
-                        if text[i] == '(':
-                            depth += 1
-                        elif text[i] == ')':
-                            depth -= 1
-                        i += 1
-                    
-                    if depth == 0:
-                        # Found complete substitution
-                        end = i
-                        content = text[start+2:end-1]
-                        substitutions.append((start, end, content))
-                    else:
-                        # Unmatched parens - log warning
-                        self.logger.warning(f"Unmatched $( at position {start}")
-                else:
-                    i += 1
-            
-            return substitutions
-        
-        # Find all top-level substitutions (not nested)
-        substitutions = find_substitutions(command)
-
-        if not substitutions:
-            return command
-
-        for start, end, content in substitutions:
-            print(f"  - Position {start}-{end}: '{content}'")
-        
-        # Process substitutions from END to START (avoid index shifting)
-        substitutions_reversed = sorted(substitutions, key=lambda x: x[0], reverse=True)
-        
-        for start, end, content in substitutions_reversed:
-            # Translate the content
-            try:
-                # RECURSIVE: content might have nested $(...)
-                translated_content = self._translate_substitution_content(content)
-
-                # Replace in command (preserve $(...) wrapper for PowerShell)
-                replacement = f"$({translated_content})"
-                command = command[:start] + replacement + command[end:]
-                
-            except Exception as e:
-                self.logger.error(f"Command substitution translation failed: {e}")
-                # Keep original on error
-                continue
-        
-        return command
-    
-    def _translate_substitution_content(self, content: str) -> str:
-        """
-        Translate Unix command content inside $(...) - ARTIGIANO STRATEGY.
-
-        CRITICAL: Commands inside $(...) must be EXECUTED to capture output.
-        Cannot just "pass to bash.exe" - must run and get result.
-
-        ARTIGIANO STRATEGY:
-        1. Detect if command is COMPLEX (would fail in PowerShell emulation)
-        2. Complex → execute with bash.exe, capture output, return as string
-        3. Simple → translate to PowerShell, execute in $(...) context
-
-        COMPLEXITY TRIGGERS:
-        - Pipeline with critical commands (find, xargs, awk, sed)
-        - Command chains (&&, ||)
-        - Process substitution <(...)
-        - Complex redirections
-
-        Args:
-            content: Unix command string (e.g., "grep pattern file.txt")
-
-        Returns:
-            Translated command or bash.exe invocation
-        """
-        # Handle empty
-        if not content or not content.strip():
-            return content
-
-        # STEP 1: Recursively handle nested $(...)
-        if '$(' in content:
-            content = self._process_command_substitution_recursive(content)
-
-        # ================================================================
-        # ARTIGIANO: Detect if command inside $(...) is COMPLEX
-        # ================================================================
-
-        def is_complex_substitution(cmd: str) -> bool:
-            """Detect if command needs bash.exe for reliable execution"""
-            # Pipeline with critical commands
-            if '|' in cmd:
-                critical_in_pipeline = ['find', 'xargs', 'awk', 'sed', 'grep -', 'cut', 'tr']
-                for critical in critical_in_pipeline:
-                    if critical in cmd:
-                        return True
-
-            # Command chains
-            if any(op in cmd for op in ['&&', '||', ';']):
-                return True
-
-            # Process substitution (shouldn't be here but check anyway)
-            if '<(' in cmd or '>(' in cmd:
-                return True
-
-            # Complex find -exec
-            if '-exec' in cmd and 'find' in cmd:
-                return True
-
-            return False
-
-        if is_complex_substitution(content):
-            # COMPLEX command inside $(...) → execute with bash.exe
-            if self.git_bash_exe:
-                self.logger.debug(f"Complex command in $(...) → using bash.exe: {content[:50]}")
-                # Need to execute bash.exe, capture output, and insert as string
-                # This is tricky - we're in preprocessing, haven't executed yet
-                # Return a PowerShell invocation that runs bash.exe
-                bash_escaped = content.replace('"', '`"').replace('$', '`$')
-                # Convert to bash.exe invocation that captures output
-                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
-            else:
-                self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
-                # Fall through to PowerShell translation (may fail)
-
-        # ================================================================
-        # STEP 2: Translate commands
-        # ================================================================
-        # NOTE: Paths already translated by BashToolExecutor.execute()
-        # Command substitution $(...) is PART of the original command,
-        # so paths inside it were already translated.
-
-        # Use command_translator which handles:
-        # - Pipe chains
-        # - Redirections
-        # - Command concatenation (&&, ||, ;)
-        # - All individual commands
-        # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
-        # Inside $(), there's no "strategy selection" - must translate immediately
-        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
-
-        # STEP 4: Clean up for PowerShell context
-        # Command translator might wrap in cmd /c - remove that for $(...) context
-        if translated.startswith('cmd /c '):
-            translated = translated[7:]
-        elif translated.startswith('cmd.exe /c '):
-            translated = translated[11:]
-
-        # PowerShell $(...) expects bare commands, not cmd wrappers
-        return translated
-    
-    def _expand_variables(self, command: str) -> str:
-        """
-        Expand variable patterns:
-        - ${var:-default}, ${var:=value}
-        - Tilde expansion: ~/path
-        - Arithmetic: $((expr))
-        - Array operations: ${arr[@]}
-        """
-        import re
-
-        # NOTE: claude_home_unix is passed via __init__, no PathTranslator needed
-        claude_home = self.claude_home_unix
-
-        # 1. Tilde expansion: ~/path → /home/claude/path
-        if command.startswith('~/'):
-            command = claude_home + '/' + command[2:]
-
-        # Also expand tilde in arguments: cmd ~/path
-        command = re.sub(r'\s~/', f' {claude_home}/', command)
-        
-        # 2. Arithmetic expansion: $((expr))
-        arith_pattern = r'\$\(\(([^)]+)\)\)'
-        
-        def expand_arithmetic(match):
-            expr = match.group(1)
-            try:
-                # Evaluate arithmetic expression
-                # Simple eval - may need more robust parsing
-                result = eval(expr, {"__builtins__": {}}, {})
-                return str(result)
-            except Exception as e:
-                self.logger.warning(f"Arithmetic expansion failed for $(('{expr}')): {e}")
-                return match.group(0)
-        
-        command = re.sub(arith_pattern, expand_arithmetic, command)
-        
-        # 3. Variable default: ${var:-default}
-        default_pattern = r'\$\{(\w+):-([^}]+)\}'
-        
-        def expand_default(match):
-            var_name = match.group(1)
-            default_value = match.group(2)
-            value = os.environ.get(var_name)
-            return value if value else default_value
-        
-        command = re.sub(default_pattern, expand_default, command)
-        
-        # 4. Variable assign: ${var:=value}
-        assign_pattern = r'\$\{(\w+):=([^}]+)\}'
-        
-        def expand_assign(match):
-            var_name = match.group(1)
-            default_value = match.group(2)
-            value = os.environ.get(var_name)
-            return value if value else default_value
-        
-        command = re.sub(assign_pattern, expand_assign, command)
-        
-        # 5. Array expansion: ${arr[@]} → just remove braces for now
-        # Full array support would require state tracking
-        array_pattern = r'\$\{(\w+)\[@\]\}'
-        command = re.sub(array_pattern, r'$\1', command)
-
-        # ================================================================
-        # FIX #7: Advanced Parameter Expansion
-        # ================================================================
-        # ${var#pattern}  - remove shortest prefix
-        # ${var##pattern} - remove longest prefix
-        # ${var%pattern}  - remove shortest suffix
-        # ${var%%pattern} - remove longest suffix
-        # ${var/pattern/string}  - replace first
-        # ${var//pattern/string} - replace all
-        # ${var^^} - uppercase all
-        # ${var,,} - lowercase all
-        # ${var^}  - uppercase first
-        # ${#var}  - string length
-
-        # 5a. String length: ${#var}
-        length_pattern = r'\$\{#(\w+)\}'
-
-        def expand_length(match):
-            var_name = match.group(1)
-            value = os.environ.get(var_name, '')
-            return str(len(value))
-
-        command = re.sub(length_pattern, expand_length, command)
-
-        # 5b. Remove prefix: ${var#pattern} and ${var##pattern}
-        # Pattern: ${var#pattern} or ${var##pattern}
-        prefix_pattern = r'\$\{(\w+)(#{1,2})([^}]+)\}'
-
-        def expand_remove_prefix(match):
-            var_name = match.group(1)
-            op = match.group(2)  # # or ##
-            pattern = match.group(3)
-            value = os.environ.get(var_name, '')
-
-            if not value:
-                return ''
-
-            # Convert bash glob to regex
-            import fnmatch
-            regex_pattern = fnmatch.translate(pattern)
-
-            # Convert bash glob to regex and match from start
-            regex_pattern = '^' + regex_pattern.rstrip('\\Z')
-
-            if op == '#':  # Remove shortest prefix (non-greedy)
-                # Make pattern non-greedy by adding '?' after '*'
-                regex_pattern_ng = regex_pattern.replace('*', '*?')
-                match_obj = re.match(regex_pattern_ng, value)
-                if match_obj:
-                    return value[len(match_obj.group(0)):]
-            else:  # ## Remove longest prefix (greedy - default)
-                # fnmatch patterns are already greedy by default
-                match_obj = re.match(regex_pattern, value)
-                if match_obj:
-                    return value[len(match_obj.group(0)):]
-
-            return value
-
-        command = re.sub(prefix_pattern, expand_remove_prefix, command)
-
-        # 5c. Remove suffix: ${var%pattern} and ${var%%pattern}
-        suffix_pattern = r'\$\{(\w+)(%{1,2})([^}]+)\}'
-
-        def expand_remove_suffix(match):
-            var_name = match.group(1)
-            op = match.group(2)  # % or %%
-            pattern = match.group(3)
-            value = os.environ.get(var_name, '')
-
-            if not value:
-                return ''
-
-            # Convert bash glob to regex and match from end
-            import fnmatch
-            regex_pattern = fnmatch.translate(pattern)
-            regex_pattern = regex_pattern.rstrip('\\Z') + '$'
-
-            if op == '%':  # Remove shortest suffix (non-greedy)
-                # Iterate from right to left to find rightmost (shortest) match
-                for i in range(len(value), -1, -1):
-                    match_obj = re.search(regex_pattern, value[i:])
-                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
-                        # Found shortest suffix at position i
-                        return value[:i]
-            else:  # %% Remove longest suffix (greedy)
-                # Iterate from left to right to find leftmost (longest) match
-                for i in range(len(value) + 1):
-                    match_obj = re.search(regex_pattern, value[i:])
-                    if match_obj and match_obj.start() == 0:  # Must match from start of substring
-                        # Found longest suffix at position i
-                        return value[:i]
-
-            return value
-
-        command = re.sub(suffix_pattern, expand_remove_suffix, command)
-
-        # 5d. String substitution: ${var/pattern/string} and ${var//pattern/string}
-        subst_pattern = r'\$\{(\w+)(/{1,2})([^/}]+)/([^}]*)\}'
-
-        def expand_substitution(match):
-            var_name = match.group(1)
-            op = match.group(2)  # / or //
-            pattern = match.group(3)
-            replacement = match.group(4)
-            value = os.environ.get(var_name, '')
-
-            if not value:
-                return ''
-
-            # Convert bash glob to regex
-            import fnmatch
-            regex_pattern = fnmatch.translate(pattern).rstrip('\\Z')
-
-            if op == '/':  # Replace first
-                return re.sub(regex_pattern, replacement, value, count=1)
-            else:  # // Replace all
-                return re.sub(regex_pattern, replacement, value)
-
-        command = re.sub(subst_pattern, expand_substitution, command)
-
-        # 5e. Case conversion: ${var^^}, ${var,,}, ${var^}
-        case_pattern = r'\$\{(\w+)(\^{1,2}|,{1,2})\}'
-
-        def expand_case(match):
-            var_name = match.group(1)
-            op = match.group(2)
-            value = os.environ.get(var_name, '')
-
-            if op == '^^':  # Uppercase all
-                return value.upper()
-            elif op == ',,':  # Lowercase all
-                return value.lower()
-            elif op == '^':  # Uppercase first
-                return value[0].upper() + value[1:] if value else ''
-            elif op == ',':  # Lowercase first
-                return value[0].lower() + value[1:] if value else ''
-
-            return value
-
-        command = re.sub(case_pattern, expand_case, command)
-
-        # ================================================================
-        # ARTIGIANO: Simple Variable Expansion
-        # ================================================================
-        # CRITICAL: Must expand basic $VAR and ${VAR} forms!
-        # Previous code only handled ${VAR:-default}, missing simple expansion.
-        #
-        # This BROKE commands like:
-        #   cd $HOME        → cd $HOME (literal! Wrong!)
-        #   echo $PATH      → echo $PATH (literal!)
-        #   cp file $USER/  → cp file $USER/ (fails!)
-        #
-        # 6. Simple ${VAR} expansion
-        simple_brace_pattern = r'\$\{(\w+)\}'
-
-        def expand_simple_brace(match):
-            var_name = match.group(1)
-            value = os.environ.get(var_name, '')
-            if not value:
-                self.logger.debug(f"Variable ${{{var_name}}} not found in environment, expanding to empty string")
-            return value
-
-        command = re.sub(simple_brace_pattern, expand_simple_brace, command)
-
-        # 7. Simple $VAR expansion (without braces)
-        # Must be AFTER ${VAR} to avoid double-expansion
-        # Match $VAR but NOT $((, ${, $@, $*, $#, $?, $$, $!, $0-9
-        simple_var_pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
-
-        def expand_simple_var(match):
-            var_name = match.group(1)
-            value = os.environ.get(var_name, '')
-            if not value:
-                self.logger.debug(f"Variable ${var_name} not found in environment, expanding to empty string")
-            return value
-
-        command = re.sub(simple_var_pattern, expand_simple_var, command)
-
-        return command
-    
-    def _preprocess_test_commands(self, command: str) -> str:
-        """
-        Convert test command syntax: [ expr ] → test expr
-        
-        Handles:
-        - [ -f file ] → test -f file
-        - [[ expr ]] → test expr (basic conversion)
-        """
-        import re
-        
-        # Pattern: [ expr ]
-        test_pattern = r'\[\s+([^\]]+)\s+\]'
-        
-        def convert_test(match):
-            expr = match.group(1)
-            return f'test {expr}'
-        
-        command = re.sub(test_pattern, convert_test, command)
-        
-        # Pattern: [[ expr ]]
-        double_test_pattern = r'\[\[\s+([^\]]+)\s+\]\]'
-        
-        def convert_double_test(match):
-            expr = match.group(1)
-            return f'test {expr}'
-        
-        command = re.sub(double_test_pattern, convert_double_test, command)
-        
-        return command
-    
-    def _expand_aliases(self, command: str) -> str:
-        """
-        Expand common bash aliases to their full commands.
-        
-        Common aliases:
-        - ll → ls -la
-        - la → ls -A
-        - l → ls -CF
-        """
-        aliases = {
-            'll ': 'ls -la ',
-            'll\n': 'ls -la\n',
-            'll$': 'ls -la',
-            'la ': 'ls -A ',
-            'la\n': 'ls -A\n',
-            'la$': 'ls -A',
-            'l ': 'ls -CF ',
-            'l\n': 'ls -CF\n',
-            'l$': 'ls -CF',
-        }
-        
-        # Check if command starts with alias
-        for alias, expansion in aliases.items():
-            if command.startswith(alias.rstrip('$ \n')):
-                command = command.replace(alias.rstrip('$ \n'), expansion.rstrip('$ \n'), 1)
-                break
-        
-        return command
-    
-    def _process_subshell(self, command: str) -> str:
-        """
-        Process subshell execution: (command)
-
-        Subshell in bash creates new environment.
-        In our case, just execute command normally.
-
-        IMPORTANT: Do NOT match $(...) - that's command substitution, not subshell!
-        """
-        import re
-
-        # Pattern: (command) but NOT $(command) and NOT <(command) and NOT >(command) and NOT $((arithmetic))
-        # Use negative lookbehind: (?<!\$) = "not preceded by $"
-        #                          (?<!<) = "not preceded by <"
-        #                          (?<!>) = "not preceded by >"
-        #                          (?<!\() = "not preceded by (" (to avoid matching 2nd paren in $((expr)))
-        # FIX #6: Added (?<!\() to prevent matching the 2nd paren in $((5 + 5))
-        subshell_pattern = r'(?<!\$)(?<!<)(?<!>)(?<!\()\(([^)]+)\)'
-
-        def remove_subshell(match):
-            # Just return inner command
-            # Full subshell would need environment isolation
-            return match.group(1)
-
-        command = re.sub(subshell_pattern, remove_subshell, command)
-
-        return command
-    
-    def _process_command_grouping(self, command: str) -> str:
-        """
-        Process command grouping: { cmd1; cmd2; }
-        
-        Group commands to run in current shell.
-        Convert to simple command sequence.
-        """
-        import re
-        
-        # Pattern: { cmd1; cmd2; } but NOT ${var...}
-        # Use negative lookbehind: (?<!\$) = "not preceded by $"
-        # FIX #7: Prevent matching ${var#pattern}, ${var%pattern}, ${var/pattern/repl}, etc.
-        grouping_pattern = r'(?<!\$)\{\s*([^}]+)\s*\}'
-        
-        def expand_grouping(match):
-            # Return inner commands
-            return match.group(1)
-        
-        command = re.sub(grouping_pattern, expand_grouping, command)
-        
-        return command
-    
-    def _process_xargs(self, command: str) -> str:
-        """
-        Process xargs patterns: cmd | xargs other_cmd
-        
-        Converts to PowerShell ForEach-Object or cmd.exe for loop.
-        """
-        import re
-        
-        if 'xargs' not in command:
-            return command
-        
-        # Pattern: ... | xargs cmd
-        xargs_pattern = r'(.+?)\|\s*xargs\s+(.+)'
-        
-        match = re.match(xargs_pattern, command)
-        if not match:
-            return command
-        
-        input_cmd = match.group(1).strip()
-        xargs_cmd = match.group(2).strip()
-        
-        # Convert to PowerShell ForEach-Object
-        # input_cmd | ForEach-Object { xargs_cmd $_ }
-        ps_command = f"{input_cmd} | ForEach-Object {{ {xargs_cmd} $_ }}"
-        
-        return ps_command
-    
-    def _process_find_exec(self, command: str) -> str:
-        """
-        Process find ... -exec patterns
-        
-        Converts to PowerShell Get-ChildItem with ForEach-Object.
-        """
-        import re
-        
-        if 'find' not in command or '-exec' not in command:
-            return command
-        
-        # Pattern: find path -exec cmd {} \;
-        exec_pattern = r'find\s+([^\s]+)\s+.*?-exec\s+(.+?)\s*\{\}\s*\\;'
-        
-        match = re.search(exec_pattern, command)
-        if not match:
-            return command
-        
-        path = match.group(1)
-        exec_cmd = match.group(2).strip()
-        
-        # Convert to PowerShell
-        # Get-ChildItem path -Recurse | ForEach-Object { exec_cmd $_.FullName }
-        ps_command = f"Get-ChildItem {path} -Recurse | ForEach-Object {{ {exec_cmd} $_.FullName }}"
-        
-        return ps_command
-    
-    def _process_escape_sequences(self, command: str) -> str:
-        """
-        Process escape sequences in strings: \n, \t, \r, etc.
-        
-        Converts to proper escaped format for target shell.
-        """
-        # Already handled by echo translator in most cases
-        # For PowerShell, escape sequences work with backtick
-        
-        # If using PowerShell, convert \ to `
-        # This is simplified - real implementation needs context awareness
-        
-        return command
-    
-    def _has_control_structures(self, command: str) -> bool:
-        """Check if command contains bash control structures"""
-        keywords = ['for ', 'while ', 'if ', 'case ', 'function ', 'until ']
-        return any(kw in command for kw in keywords)
-    
-    def _convert_control_structures_to_script(self, command: str) -> Tuple[str, Optional[Path]]:
-        """
-        Convert bash control structures to PowerShell script.
-        
-        For complex structures (for, while, if), create temp PowerShell script.
-        
-        Returns:
-            (modified_command, temp_script_file)
-        """
-        if not self._has_control_structures(command):
-            return command, None
-        
-        # Create PowerShell script with bash-like logic
-        cwd = self.scratch_dir
-        script_file = cwd / f'bash_script_{threading.get_ident()}.ps1'
-        
-        try:
-            # Convert bash script to PowerShell
-            ps_script = self._bash_to_powershell(command)
-            
-            with open(script_file, 'w', encoding='utf-8') as f:
-                f.write(ps_script)
-            
-            # Return command to execute script
-            new_command = f'powershell -ExecutionPolicy Bypass -File "{script_file}"'
-            
-            return new_command, script_file
-        
-        except Exception as e:
-            self.logger.error(f"Failed to convert control structures: {e}")
-            return command, None
-    
-    def _bash_to_powershell(self, bash_script: str) -> str:
-        """
-        Convert bash control structures to PowerShell.
-        
-        Handles:
-        - for loops
-        - while loops
-        - if statements
-        - test conditions conversion
-        - variable references
-        """
-        import re
-        
-        # For loop: for i in {1..10}; do echo $i; done
-        for_pattern = r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.+?);\s*done'
-        
-        def convert_for(match):
-            var = match.group(1)
-            range_expr = match.group(2).strip()
-            body = match.group(3).strip()
-            
-            # Convert bash $var to PowerShell $var (already compatible)
-            # Convert echo to Write-Host
-            body = body.replace('echo ', 'Write-Host ')
-            
-            # Parse range
-            if '..' in range_expr:
-                # Range like 1..10
-                ps = f'foreach (${var} in {range_expr}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            else:
-                # List like "a b c"
-                items = range_expr.split()
-                items_str = ','.join([f'"{item}"' for item in items])
-                ps = f'foreach (${var} in {items_str}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            
-            return ps
-        
-        # Check for for loop
-        if 'for ' in bash_script and ' in ' in bash_script and '; do ' in bash_script:
-            bash_script = re.sub(for_pattern, convert_for, bash_script, flags=re.DOTALL)
-        
-        # While loop: while condition; do ...; done
-        while_pattern = r'while\s+(.+?);\s*do\s+(.+?);\s*done'
-        
-        def convert_while(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'while ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'while ' in bash_script:
-            bash_script = re.sub(while_pattern, convert_while, bash_script, flags=re.DOTALL)
-        
-        # If statement: if condition; then ...; fi
-        if_pattern = r'if\s+(.+?);\s*then\s+(.+?);\s*fi'
-        
-        def convert_if(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'if ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'if ' in bash_script and ' then ' in bash_script:
-            bash_script = re.sub(if_pattern, convert_if, bash_script, flags=re.DOTALL)
-        
-        # Convert common bash commands to PowerShell equivalents
-        conversions = {
-            'echo ': 'Write-Host ',
-            'cat ': 'Get-Content ',
-            'ls ': 'Get-ChildItem ',
-            'rm ': 'Remove-Item ',
-            'cp ': 'Copy-Item ',
-            'mv ': 'Move-Item ',
-            'mkdir ': 'New-Item -ItemType Directory -Path ',
-        }
-        
-        for bash_cmd, ps_cmd in conversions.items():
-            bash_script = bash_script.replace(bash_cmd, ps_cmd)
-        
-        return bash_script
-    
-    def _convert_test_to_powershell(self, test_expr: str) -> str:
-        """
-        Convert bash test conditions to PowerShell.
-        
-        Examples:
-        [ -f file ] → Test-Path file
-        [ "$a" = "$b" ] → $a -eq $b
-        """
-        # Remove [ ] brackets
-        test_expr = test_expr.strip()
-        if test_expr.startswith('[') and test_expr.endswith(']'):
-            test_expr = test_expr[1:-1].strip()
-        
-        # File tests
-        if '-f ' in test_expr:
-            # Extract filename
-            file = test_expr.split('-f ')[1].strip().strip('"')
-            return f'Test-Path "{file}"'
-        elif '-d ' in test_expr:
-            # Directory test
-            dir = test_expr.split('-d ')[1].strip().strip('"')
-            return f'Test-Path "{dir}" -PathType Container'
-        elif '-e ' in test_expr:
-            # Exists test
-            path = test_expr.split('-e ')[1].strip().strip('"')
-            return f'Test-Path "{path}"'
-        
-        # String comparisons
-        elif ' = ' in test_expr or ' == ' in test_expr:
-            parts = re.split(r'\s*=\s*', test_expr)
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -eq {parts[1].strip()}'
-        elif ' != ' in test_expr:
-            parts = test_expr.split(' != ')
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -ne {parts[1].strip()}'
-        
-        # Fallback: return as-is
-        return test_expr
-    
-    def _cleanup_temp_files(self, temp_files: List[Path]):
-        """Cleanup temporary files created during execution"""
-        for temp_file in temp_files:
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
-            except Exception as e:
-                self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
-    
-    def _needs_powershell(self, command: str) -> bool:
-        """
-        Detect if command needs PowerShell instead of cmd.exe.
-
-        PowerShell required for:
-        - Command substitution: $(...)
-        - Backticks: `...`
-        - Process substitution: <(...)
-        - Complex variable expansion
-        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
-
-        Returns:
-            True if PowerShell required, False if cmd.exe sufficient
-        """
-        # PowerShell cmdlets
-        powershell_cmdlets = [
-            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
-            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
-            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
-            '$input', '$_'  # PowerShell variables
-        ]
-
-        for cmdlet in powershell_cmdlets:
-            if cmdlet in command:
-                return True
-
-        # Command substitution patterns
-        if '$(' in command:
-            return True
-
-        # Backtick command substitution
-        if '`' in command:
-            # Check it's not just in a string
-            # Simple heuristic: backticks outside of quotes
-            in_quotes = False
-            quote_char = None
-            for i, char in enumerate(command):
-                if char in ('"', "'") and (i == 0 or command[i-1] != '\\'):
-                    if not in_quotes:
-                        in_quotes = True
-                        quote_char = char
-                    elif char == quote_char:
-                        in_quotes = False
-                        quote_char = None
-                elif char == '`' and not in_quotes:
-                    return True
-
-        # Process substitution
-        if '<(' in command or '>(' in command:
-            return True
-
-        return False
-    
-    def _adapt_for_powershell(self, command: str) -> str:
-        """
-        Adapt Unix command for PowerShell execution.
-        
-        Translations:
-        - Backticks `cmd` → $(...) PowerShell syntax
-        - Preserve pipes, redirects, logical operators
-        - Path translations already done by PathTranslator
-        
-        Args:
-            command: Unix command with Windows paths already translated
-            
-        Returns:
-            Command adapted for PowerShell
-        """
-        adapted = command
-        
-        # Convert backticks to PowerShell command substitution
-        # Pattern: `command` → $(command)
-        # Handle escaped backticks (don't convert)
-        import re
-        
-        # Find all backtick pairs (not escaped)
-        # This is a simple implementation - may need refinement for complex cases
-        backtick_pattern = r'(?<!\\)`([^`]+)`'
-        adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
-        
-        # PowerShell uses different redirection for null
-        # /dev/null → $null
-        adapted = adapted.replace('/dev/null', '$null')
-        
-        # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
-        
-        return adapted
-    
     def _setup_virtual_env(self, virtual_env: Optional[str]) -> Optional[Path]:
         """Setup virtual environment - BLOCKING at initialization is acceptable.
         
@@ -7715,9 +7728,9 @@ EXPAND_DELIMITER'''
         Execute bash command - SIMPLIFIED ORCHESTRATOR
 
         RESPONSIBILITIES:
-        1. Translate Unix paths → Windows paths
+        1. Translate Unix paths -> Windows paths
         2. Delegate to CommandTranslator.execute_command() (preprocessing + translation + execution)
-        3. Translate Windows paths → Unix paths in results
+        3. Translate Windows paths -> Unix paths in results
         4. Return formatted result
         """
         command = tool_input.get('command', '')
@@ -7734,7 +7747,7 @@ EXPAND_DELIMITER'''
         temp_files = []
 
         try:
-            # STEP 1: Translate Unix paths → Windows paths
+            # STEP 1: Translate Unix paths -> Windows paths
             if self.path_translator:
                 command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
             else:

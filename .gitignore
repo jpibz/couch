@@ -36,3 +36,11 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+# Backup files from refactoring
+*.backup
+*.backup2
+*.backup_migration
+*.failed
+do_migration.py
+refactor_bash_tool_executor.py
+refactor_direct.py
