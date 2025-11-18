@@ -6603,6 +6603,15 @@ EXPAND_DELIMITER'''
                             encoding='utf-8'
                         )
 
+                        # TESTMODE EXECUTOR: simula output realistico per step successivo
+                        if self.TESTMODE:
+                            result = subprocess.CompletedProcess(
+                                args=result.args,
+                                returncode=0,
+                                stdout=content,  # AS IF: usa contenuto originale come "espanso"
+                                stderr=""
+                            )
+
                         if result.returncode == 0:
                             # Use expanded content
                             content = result.stdout
@@ -6691,10 +6700,19 @@ EXPAND_DELIMITER'''
                     env=env,
                     errors='replace'
                 )
-                
+
+                # TESTMODE EXECUTOR: simula output realistico per step successivo
+                if self.TESTMODE:
+                    result = subprocess.CompletedProcess(
+                        args=result.args,
+                        returncode=0,
+                        stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
+                        stderr=""
+                    )
+
                 # Create temp file with output
                 temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
-                
+
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(result.stdout)
                 

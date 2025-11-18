@@ -2,6 +2,20 @@
 
 ## ARCHITETTURA TARGET (dove dobbiamo arrivare)
 
+### CONCETTO CHIAVE: DUE LIVELLI DI GESTIONE
+
+**LIVELLO MACRO** (Pipeline completa):
+- Gestisce l'INTERA pipeline come unità
+- Decide strategia globale (eseguire tutta, suddividere, usare bash.exe)
+
+**LIVELLO MICRO** (Comandi atomici):
+- Gestisce SINGOLI COMANDI dentro la pipeline
+- Scelta strategica per ogni comando atomico
+
+---
+
+### ARCHITETTURA DETTAGLIATA
+
 ```
 1. BashToolExecutor.execute()
    ├─ Path translation: Unix → Windows (or skip in test)
@@ -9,28 +23,129 @@
    └─ Calls command_executor.execute()
 
 2. CommandExecutor.execute()
-   ├─ 🔍 PipelineStrategy.analyze_pipeline()
-   │   └─ [TEST-PIPELINE-ANALYSIS] PipelineAnalysis(...)
    │
-   ├─ 🎯 PipelineStrategy.decide_execution_strategy()
-   │   └─ Returns: ExecutionStrategy(type='BASH_REQUIRED', ...)
+   ├─ 🔍 LIVELLO MACRO: PipelineStrategy
+   │   │
+   │   ├─ analyze_pipeline(command)
+   │   │   └─ Returns: PipelineAnalysis(
+   │   │         has_pipeline=True,
+   │   │         command_count=3,
+   │   │         complexity_level='HIGH',
+   │   │         command_names=['find', 'grep', 'wc']
+   │   │       )
+   │   │
+   │   └─ decide_execution_strategy(analysis, command)
+   │       └─ Returns: ExecutionStrategy(
+   │             strategy_type='BASH_REQUIRED',  # o BASH_PREFERRED, SINGLE, POWERSHELL, FAIL
+   │             reason='Pipeline with find + xargs requires bash.exe',
+   │             can_split=False,
+   │             fallback_strategy='EMULATION'
+   │           )
    │
-   └─ Based on pipeline strategy:
-      └── Pipeline execution (attraverso sequenza/multistep)
-          ├── PipelineTranslator (traduzione operatori pipeline unix>windows)
-          └──ExecuteUnixSingleCommand (esecuzione comando singolo con scelta strategica)
-             ├── SimpleTranslator      │
-             ├── EmulativeTranslator   │ [I TRANSLATOR USANO EXECUTION ENGINE]
-             ├── BinaryTranslator      │
-             └── Passthrough           │
+   └─ Based on strategy → Execute pipeline
+      │
+      ├─ Strategy: BASH_REQUIRED/PREFERRED
+      │   └─ Passthrough → bash.exe -c "entire pipeline"
+      │
+      └─ Strategy: SINGLE/POWERSHELL
+          │
+          ├─ PipelineTranslator
+          │   └─ Traduce OPERATORI pipeline Unix → Windows
+          │       (|, &&, ||, ;, >, <, 2>, ecc.)
+          │
+          └─ ExecuteUnixSingleCommand (LIVELLO MICRO)
+              │
+              ├─ PRIORITY 1: Bash Passthrough (for BASH_EXE_PREFERRED commands)
+              │   └─ [find, awk, sed, grep, xargs, cut, tr, tee] → bash.exe
+              │
+              ├─ PRIORITY 2: Native Binary (best performance)
+              │   └─ [grep.exe, awk.exe, diff.exe, tar.exe] → native Windows bins
+              │
+              ├─ PRIORITY 3: Execution Map (complex emulation)
+              │   ├─ SimpleTranslator (1:1 translation)
+              │   │   └─ [pwd, cd, mkdir, rm, mv, cp, touch]
+              │   │
+              │   └─ EmulativeTranslator (complex PowerShell scripts)
+              │       └─ [find, awk, sed, diff, sort, uniq, join]
+              │
+              └─ PRIORITY 4: Intelligent Fallback
+                  └─ Try: Translator → Native Bin → bash.exe → Error
                                        │
-                                       └─ ExecutionEngine.execute_cmd/powershell/bash()
-                                       └─ [TEST MODE] Would execute (CMD/PowerShell/Bash): ...
-                                       └─ Returns mock CompletedProcess
+                                       └─ ExecutionEngine (UNICO PUNTO subprocess)
+                                           ├─ execute_cmd(command)
+                                           ├─ execute_powershell(command)
+                                           └─ execute_bash(bash_path, command)
+                                               │
+                                               └─ [TEST MODE]
+                                                   └─ Returns mock CompletedProcess(
+                                                         returncode=0,
+                                                         stdout="[TEST MODE OUTPUT] ...",
+                                                         stderr=""
+                                                       )
 
 3. Output formatted and returned
    └─ "Exit code: 0\n[TEST MODE OUTPUT] cmd: ..."
 ```
+
+---
+
+### LOGICA STRATEGICA (NON è cascata fallback universale!)
+
+**PipelineStrategy** = "CACHE di STRATEGIE PRECONFEZIONATE"
+
+Le strategie **NON sono mutuamente esclusive**:
+- Possono lavorare INSIEME (pipeline mista: alcuni comandi nativi, altri emulati)
+- Una può essere FALLBACK dell'altra
+- Scelta basata su PATTERN MATCHING (non algoritmo generico)
+
+**Esempi di decisioni strategiche:**
+
+| Pipeline | Strategy | Motivo |
+|----------|----------|--------|
+| `find . -name "*.py"` | BASH_PREFERRED | find ha edge cases, meglio bash.exe |
+| `ls -la \| grep foo` | POWERSHELL | Semplice, emulabile con Get-ChildItem \| Select-String |
+| `find . \| xargs grep` | BASH_REQUIRED | xargs + pipeline = bash.exe obbligatorio |
+| `cat file.txt \| wc -l` | POWERSHELL | Get-Content \| Measure-Object (nativo) |
+| `awk '{print $1}' \| sort` | MIXED | awk → bash.exe, sort → native bin |
+
+**Fattori di decisione:**
+1. **Complessità**: pipeline complessa vs singolo comando
+2. **Comandi coinvolti**: BASH_EXE_PREFERRED vs traducibili
+3. **Disponibilità risorse**: bash.exe disponibile? Native bins?
+4. **Performance**: native bin > translator > bash.exe
+5. **Compatibilità**: alcuni comandi DEVONO usare bash.exe
+
+---
+
+### SEPARAZIONE RESPONSABILITÀ
+
+**PipelineStrategy** (MACRO - strategia globale):
+- Analizza struttura completa pipeline
+- Decide strategia di esecuzione globale
+- Pattern matching su scenari noti
+- Gestisce split pipeline se necessario
+
+**ExecuteUnixSingleCommand** (MICRO - comando atomico):
+- Incapsula le 4 strategie atomiche:
+  1. SimpleTranslator (1:1)
+  2. EmulativeTranslator (complesso)
+  3. Native Binary (grep.exe, awk.exe, ecc.)
+  4. Passthrough bash.exe
+- Priorità e fallback incrociati PER SINGOLO COMANDO
+- Scelta intelligente basata su comando specifico
+
+**PipelineTranslator** (operatori):
+- Traduce SOLO operatori pipeline Unix → Windows
+- `|` → `|`
+- `&&` → `;`
+- `||` → PowerShell logic
+- `>`, `<`, `2>` → redirection Windows
+
+**CommandExecutor** (orchestratore):
+- Usa PipelineStrategy (decide COSA fare)
+- Usa ExecuteUnixSingleCommand (esegue comandi atomici)
+- Usa PipelineTranslator (traduce operatori)
+- Coordina esecuzione finale
 
 ---
 
