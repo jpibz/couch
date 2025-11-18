@@ -239,12 +239,13 @@ class ExecutionEngine:
             'total': 0
         }
 
-    def execute_cmd(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_cmd(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via cmd.exe
 
         Args:
             command: Command string to execute
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -256,10 +257,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-CMD] {command}")
             print(f"[TEST MODE] Would execute (CMD): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] cmd: {command}"
+
             return subprocess.CompletedProcess(
                 args=['cmd', '/c', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] cmd: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -271,12 +276,13 @@ class ExecutionEngine:
             **kwargs
         )
 
-    def execute_powershell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_powershell(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via PowerShell
 
         Args:
             command: PowerShell command string
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -288,10 +294,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-PowerShell] {command}")
             print(f"[TEST MODE] Would execute (PowerShell): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] powershell: {command}"
+
             return subprocess.CompletedProcess(
                 args=['powershell', '-Command', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] powershell: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -303,13 +313,14 @@ class ExecutionEngine:
             **kwargs
         )
 
-    def execute_bash(self, bash_path: str, command: str, **kwargs) -> subprocess.CompletedProcess:
+    def execute_bash(self, bash_path: str, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via Git Bash
 
         Args:
             bash_path: Path to bash.exe
             command: Bash command string
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -321,10 +332,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-Git Bash] {command}")
             print(f"[TEST MODE] Would execute (Git Bash): {command}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] bash: {command}"
+
             return subprocess.CompletedProcess(
                 args=[bash_path, '-c', command],
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] bash: {command}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -6584,21 +6599,13 @@ EXPAND_DELIMITER'''
                         result = self.command_executor.executor.execute_bash(
                             bash_path,
                             expansion_script,
+                            test_mode_stdout=content,  # AS IF: content expanded (in TESTMODE)
                             timeout=5,
                             cwd=str(self.scratch_dir),
                             env=self._setup_environment(),
                             errors='replace',
                             encoding='utf-8'
                         )
-
-                        # TESTMODE EXECUTOR: simula output realistico per step successivo
-                        if self.TESTMODE:
-                            result = subprocess.CompletedProcess(
-                                args=result.args,
-                                returncode=0,
-                                stdout=content,  # AS IF: usa contenuto originale come "espanso"
-                                stderr=""
-                            )
 
                         if result.returncode == 0:
                             # Use expanded content
@@ -6683,20 +6690,12 @@ EXPAND_DELIMITER'''
                 # Execute via ExecutionEngine
                 result = self.command_executor.executor.execute_cmd(
                     translated,
+                    test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
                     timeout=30,
                     cwd=str(cwd),
                     env=env,
                     errors='replace'
                 )
-
-                # TESTMODE EXECUTOR: simula output realistico per step successivo
-                if self.TESTMODE:
-                    result = subprocess.CompletedProcess(
-                        args=result.args,
-                        returncode=0,
-                        stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
-                        stderr=""
-                    )
 
                 # Create temp file with output
                 temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
