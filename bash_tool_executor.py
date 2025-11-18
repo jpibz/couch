@@ -1290,7 +1290,7 @@ class CommandExecutor:
         self.test_mode = test_mode
 
         # ExecutionEngine - UNICO PUNTO per subprocess
-        self.executor = ExecutionEngine(test_mode=test_mode, logger=self.logger)
+        self.engine = ExecutionEngine(test_mode=test_mode, logger=self.logger)
 
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
@@ -1389,7 +1389,7 @@ class CommandExecutor:
             # STEP 3: Execute via ExecutionEngine
             if 'powershell' in final_cmd.lower() and '-File' in final_cmd:
                 # PowerShell script command (from control structures)
-                result = self.executor.execute_powershell(
+                result = self.engine.execute_powershell(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -1399,7 +1399,7 @@ class CommandExecutor:
                     shell=True
                 )
             elif use_powershell:
-                result = self.executor.execute_powershell(
+                result = self.engine.execute_powershell(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -1408,7 +1408,7 @@ class CommandExecutor:
                     encoding='utf-8'
                 )
             else:
-                result = self.executor.execute_cmd(
+                result = self.engine.execute_cmd(
                     final_cmd,
                     timeout=timeout,
                     cwd=str(cwd),
@@ -6596,7 +6596,7 @@ EXPAND_DELIMITER'''
 
                         # Execute via bash.exe through ExecutionEngine
                         bash_path = self.git_bash_exe
-                        result = self.command_executor.executor.execute_bash(
+                        result = self.command_executor.engine.execute_bash(
                             bash_path,
                             expansion_script,
                             test_mode_stdout=content,  # AS IF: content expanded (in TESTMODE)
@@ -6688,7 +6688,7 @@ EXPAND_DELIMITER'''
                 translated, _, _ = self.command_translator.translate(cmd)
 
                 # Execute via ExecutionEngine
-                result = self.command_executor.executor.execute_cmd(
+                result = self.command_executor.engine.execute_cmd(
                     translated,
                     test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
                     timeout=30,
