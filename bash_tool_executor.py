@@ -5861,6 +5861,23 @@ class CommandExecutor:
         
         return f'powershell -Command "{ps_script}"', True
 
+    # ========================================================================
+    # PREPROCESSING METHODS - Moved from BashToolExecutor
+    # ========================================================================
+    # These methods handle complex bash patterns that need preprocessing
+    # BEFORE translation. They require access to:
+    # - command_translator (for recursive translation)
+    # - executor (for execution in preprocessing phase)
+    # - scratch_dir, git_bash_exe (passed via BashToolExecutor callbacks - temporary)
+    #
+    # TODO ITERATION 2: Accept these dependencies via __init__ or method params
+    # ========================================================================
+
+    # NOTE: These methods will be called from BashToolExecutor.execute()
+    # until we move preprocessing logic to CommandExecutor.execute()
+    # They need access to: scratch_dir, git_bash_exe, logger
+    # For now, they'll be called as: command_executor.method(command, scratch_dir, git_bash_exe)
+
 
 # ============================================================================
 # BASHTOOLEXECUTOR - ORCHESTRATION LAYER
