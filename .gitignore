@@ -44,3 +44,4 @@ Thumbs.db
 do_migration.py
 refactor_bash_tool_executor.py
 refactor_direct.py
+migrate_setup.py
