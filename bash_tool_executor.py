@@ -5962,11 +5962,6 @@ class BashToolExecutor(ToolExecutor):
         # Initialize components
         self.path_translator = PathTranslator()
         self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
-        self.command_translator = CommandTranslator(self.path_translator)
-        
-        # Initialize CommandExecutor (execution strategy layer)
-        # Will be fully initialized after Git Bash detection
-        self.command_executor = None
 
         # Create tool-specific scratch directory
         self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
@@ -5980,6 +5975,24 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
             else:
                 self.logger.warning("Git Bash not found - falling back to command translation")
+
+        # Get claude home directory (needed for preprocessing)
+        self.claude_home_unix = self.path_translator.get_claude_home_unix()
+
+        # Initialize CommandTranslator with preprocessing dependencies
+        # Note: command_executor will be set later (circular dependency)
+        self.command_translator = CommandTranslator(
+            path_translator=self.path_translator,
+            git_bash_exe=self.git_bash_exe,
+            scratch_dir=self.scratch_dir,
+            logger=self.logger,
+            command_executor=None,  # Will be set after CommandExecutor initialization
+            claude_home_unix=self.claude_home_unix
+        )
+
+        # Initialize CommandExecutor (execution strategy layer)
+        # Will be fully initialized after Git Bash detection
+        self.command_executor = None
         
         # Python executable - CRITICAL DEPENDENCY
         try:
@@ -6011,12 +6024,6 @@ class BashToolExecutor(ToolExecutor):
         self.virtual_env = self._setup_virtual_env(virtual_env)
 
         # Initialize CommandExecutor with all dependencies now available
-        # Get claude home directory (needed for tilde expansion in _expand_variables)
-        # NOTE: Only BashToolExecutor has _expand_variables, but pass to CommandExecutor
-        #       in case it needs config info in future
-        self.claude_home_unix = self.path_translator.get_claude_home_unix()
-
-        # Initialize CommandExecutor
         self.command_executor = CommandExecutor(
             command_translator=self.command_translator,
             git_bash_exe=self.git_bash_exe,
@@ -6024,6 +6031,9 @@ class BashToolExecutor(ToolExecutor):
             logger=self.logger,
             test_mode=self.TESTMODE
         )
+
+        # Set command_executor in command_translator (circular dependency resolved)
+        self.command_translator.command_executor = self.command_executor
         
         self.logger.info(
             f"BashToolExecutor initialized: Python={self.python_executable}, "
@@ -7385,109 +7395,59 @@ EXPAND_DELIMITER'''
             raise RuntimeError(f"Virtual environment setup failed: {e}")
     
     def execute(self, tool_input: dict) -> str:
-        """Execute bash command with FULL pattern emulation"""
+        """
+        Execute bash command - SIMPLIFIED ORCHESTRATOR
+
+        RESPONSIBILITIES:
+        1. Translate Unix paths → Windows paths
+        2. Delegate to CommandTranslator.execute_command() (preprocessing + translation + execution)
+        3. Translate Windows paths → Unix paths in results
+        4. Return formatted result
+        """
         command = tool_input.get('command', '')
         description = tool_input.get('description', '')
 
-
         if not command:
             return "Error: command parameter is required"
-        
+
         # Determine timeout
         timeout = self.python_timeout if 'python' in command.lower() else self.default_timeout
-        
+
         self.logger.info(f"Executing: {command[:100]}")
-        
-        # Temp files tracking for cleanup
+
         temp_files = []
-        
+
         try:
-            # PRE-PROCESSING PHASE - Handle complex patterns BEFORE translation
-
-
-            # STEP 0.0: Expand aliases (ll, la, etc.)
-            command = self._expand_aliases(command)
-            
-            # STEP 0.1: Process subshell and command grouping
-            command = self._process_subshell(command)
-            command = self._process_command_grouping(command)
-            
-            # STEP 0.2: Control structures (for, while, if, case)
-            if self._has_control_structures(command):
-                command, script_file = self._convert_control_structures_to_script(command)
-                if script_file:
-                    temp_files.append(script_file)
-                    # Script execution will use PowerShell directly
-                    use_powershell = True
-            
-            # STEP 0.3: Test commands [ ] and [[ ]]
-            command = self._preprocess_test_commands(command)
-            
-            # STEP 0.4: Brace expansion {1..10}, {a,b,c}
-            command = self._expand_braces(command)
-            
-            # STEP 0.5: Here documents <<EOF
-            command, heredoc_files = self._process_heredocs(command)
-            temp_files.extend(heredoc_files)
-            
-            # STEP 0.6: Process substitution <(cmd) >(cmd)
-            command, procsub_files = self._process_substitution(command)
-            temp_files.extend(procsub_files)
-            
-            # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
-            command = self._expand_variables(command)
-
-            # STEP 0.8: xargs patterns
-            command = self._process_xargs(command)
-
-            # STEP 0.9: find ... -exec patterns
-            command = self._process_find_exec(command)
-            
-            # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
-            command = self._process_command_substitution_recursive(command)
-            
-            # STEP 1: Detect if PowerShell needed (if not already set by control structures)
-            if 'use_powershell' not in locals():
-                use_powershell = self._needs_powershell(command)
-            
-            if use_powershell:
-                self.logger.debug("Using PowerShell for advanced patterns")
-            
-            # STEP 2: Translate Unix paths → Windows paths
+            # STEP 1: Translate Unix paths → Windows paths
             if self.path_translator:
-                # PRODUCTION MODE: Translate paths
                 command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
             else:
-                # TEST MODE: Skip path translation (not needed for testing command logic)
+                # TEST MODE: Skip path translation
                 command_with_win_paths = command
                 self.logger.debug("TEST MODE: Skipping path translation")
 
-            # STEP 3: Security validation (before execution)
-            # NOTE: Validation done on command_with_win_paths (before translation)
-            # to catch malicious patterns early
+            # STEP 2: Security validation
             if self.sandbox_validator:
                 is_safe, reason = self.sandbox_validator.validate_command(command_with_win_paths)
                 if not is_safe:
                     return f"Error: Security - {reason}"
             else:
-                # TEST MODE: Skip validation
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
-            # STEP 4: Execute via CommandExecutor
-            # CommandExecutor handles: translation + strategy + execution
+            # STEP 3: Execute via CommandTranslator (preprocessing + translation + execution)
             cwd = self.scratch_dir
             env = self._setup_environment()
 
-            result, translated_cmd, method = self.command_executor.execute(
+            result, translated_cmd, method, temp_files = self.command_translator.execute_command(
                 command=command_with_win_paths,
                 timeout=timeout,
                 cwd=cwd,
                 env=env
             )
 
-            # STEP 5: Format result
+            # STEP 4: Format result (with path reverse translation)
             return self._format_result(result, command, translated_cmd, method)
-        
+
         except subprocess.TimeoutExpired:
             return f"Error: Command timed out after {timeout} seconds"
         except Exception as e:
