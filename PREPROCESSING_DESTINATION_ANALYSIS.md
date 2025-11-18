@@ -44,22 +44,24 @@ BashPreprocessor
 - Convertire control structures bash → PowerShell
 - Gestire command/process substitution
 
-**Posizione nel flusso**:
+**Posizione nel flusso** (CORRETTA):
 
 ```
 BashToolExecutor.execute(raw_command)
   ↓
-  🆕 BashPreprocessor.preprocess(raw_command)
+CommandExecutor.execute(raw_command)  ← BashToolExecutor vede SOLO CommandExecutor
+  ↓ (INTERNO a CommandExecutor)
+  self.preprocessor.preprocess(raw_command)  ← 🆕 BashPreprocessor (uso interno)
      - Variable expansion
      - Heredocs & substitution
      - Control structures conversion
   ↓
-CommandExecutor.execute(preprocessed_command)
+  PipelineStrategy.analyze_pipeline(preprocessed_command)
   ↓
-PipelineStrategy.analyze_pipeline()
-  ↓
-ExecuteUnixSingleCommand
+  ExecuteUnixSingleCommand
 ```
+
+**IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON è un layer separato tra BashToolExecutor e CommandExecutor!
 
 ---
 
@@ -169,22 +171,20 @@ ExecuteUnixSingleCommand
 
 ---
 
-## ARCHITETTURA FINALE AGGIORNATA
+## ARCHITETTURA FINALE AGGIORNATA (CORRETTA)
 
 ```
-🆕 BashPreprocessor (42 metodi)
+BashToolExecutor (thin coordinator MCP)
  │
- ├─ Preprocessing (14)
- ├─ Variable Expansion (20)
- └─ Control Structures (8)
-
-BashToolExecutor (thin coordinator)
- │
- ├─ BashPreprocessor (delega preprocessing)
- │
- └─ CommandExecutor (delega execution)
+ └─ CommandExecutor (thin orchestration) ← BashToolExecutor vede SOLO questo
+     │
+     ├─ 🆕 BashPreprocessor (42 metodi) ← INTERNO a CommandExecutor
+     │   ├─ Preprocessing (14)
+     │   ├─ Variable Expansion (20)
+     │   └─ Control Structures (8)
      │
      ├─ PipelineStrategy (analisi pipeline)
+     │
      ├─ ExecuteUnixSingleCommand (esecuzione)
      │
      └─ Translators (3 classi)
@@ -193,32 +193,41 @@ BashToolExecutor (thin coordinator)
          └─ PipelineTranslator
 ```
 
+**CHIAVE**: BashPreprocessor è una dipendenza INTERNA di CommandExecutor, non un layer separato.
+
 ---
 
-## FLUSSO ESECUZIONE AGGIORNATO
+## FLUSSO ESECUZIONE AGGIORNATO (CORRETTO)
 
 ```
 1. BashToolExecutor.execute(raw_command)
    │
    ├─ Receive command from MCP tool
-   └─ Setup environment
+   ├─ Setup environment
+   └─ Call CommandExecutor.execute(raw_command)
 
-2. 🆕 BashPreprocessor.preprocess(raw_command)
+2. CommandExecutor.execute(raw_command)  ← BashToolExecutor vede SOLO questo
    │
-   ├─ Variable expansion (${var}, $(()), etc.)
-   ├─ Heredocs processing (<<EOF)
-   ├─ Command/process substitution ($(cmd), <(), >())
-   ├─ Control structures conversion (if/for/while → PS)
-   ├─ Brace expansion ({a,b,c}, {1..10})
-   └─ Return preprocessed_command
-
-3. CommandExecutor.execute(preprocessed_command)
+   ├─ Step 2a: Preprocessing (INTERNO)
+   │   └─ self.preprocessor.preprocess(raw_command) ← 🆕 BashPreprocessor
+   │       ├─ Variable expansion (${var}, $(()), etc.)
+   │       ├─ Heredocs processing (<<EOF)
+   │       ├─ Command/process substitution ($(cmd), <(), >())
+   │       ├─ Control structures conversion (if/for/while → PS)
+   │       └─ Brace expansion ({a,b,c}, {1..10})
+   │       → Return preprocessed_command
    │
-   ├─ PipelineStrategy.analyze_pipeline()
-   └─ ExecuteUnixSingleCommand or bash.exe
+   ├─ Step 2b: Pipeline Analysis
+   │   └─ PipelineStrategy.analyze_pipeline(preprocessed_command)
+   │
+   └─ Step 2c: Execution
+       └─ ExecuteUnixSingleCommand or bash.exe
 
-4. Result formatting & return
+3. Return result to BashToolExecutor
+   └─ Result formatting & return to MCP
 ```
+
+**IMPORTANTE**: BashPreprocessor.preprocess() è chiamato INTERNAMENTE da CommandExecutor, non da BashToolExecutor!
 
 ---
 
@@ -334,36 +343,71 @@ class BashPreprocessor:
     def convert_double_test(self, test_expr): ...
 ```
 
-### Integrazione in BashToolExecutor
+### Integrazione in CommandExecutor (CORRETTA)
 
 ```python
-class BashToolExecutor:
-    def __init__(self):
-        # Preprocessing
+class CommandExecutor:
+    def __init__(self, ...):
+        # Preprocessing (INTERNO a CommandExecutor)
         self.preprocessor = BashPreprocessor(logger=self.logger)
 
-        # Execution
-        self.executor = CommandExecutor(...)
+        # Pipeline strategy
+        self.pipeline_strategy = PipelineStrategy(...)
+
+        # Single command executor
+        self.single_executor = ExecuteUnixSingleCommand(...)
 
     def execute(self, command, timeout=None, cwd=None, env=None):
         """Execute bash command with preprocessing."""
 
-        # Step 1: Preprocess bash syntax
+        # Step 1: Preprocess bash syntax (INTERNO)
         preprocessed_command = self.preprocessor.preprocess(command, env)
 
-        # Step 2: Execute preprocessed command
+        # Step 2: Analyze pipeline
+        analysis = self.pipeline_strategy.analyze_pipeline(preprocessed_command)
+        strategy = self.pipeline_strategy.decide_execution_strategy(analysis)
+
+        # Step 3: Execute secondo strategia
+        if strategy.strategy_type in ['BASH_REQUIRED', 'BASH_PREFERRED']:
+            result = self._execute_with_gitbash(preprocessed_command, ...)
+        elif strategy.strategy_type == 'HYBRID':
+            result = self._execute_hybrid_pipeline(preprocessed_command, ...)
+        else:
+            result = self.single_executor.execute_single(preprocessed_command, ...)
+
+        # Step 4: Cleanup
+        self.preprocessor._cleanup_temp_files()
+
+        return result
+```
+
+### BashToolExecutor rimane thin
+
+```python
+class BashToolExecutor:
+    def __init__(self):
+        # Solo CommandExecutor come dipendenza
+        self.executor = CommandExecutor(...)
+
+    def execute(self, command, timeout=None, cwd=None, env=None):
+        """Execute bash command - delega a CommandExecutor."""
+
+        # Setup environment
+        env = self._setup_environment(env)
+
+        # Delega TUTTO a CommandExecutor
+        # (CommandExecutor fa preprocessing internamente)
         result = self.executor.execute(
-            preprocessed_command,
+            command,
             timeout=timeout,
             cwd=cwd,
             env=env
         )
 
-        # Step 3: Cleanup
-        self.preprocessor._cleanup_temp_files()
-
-        return result
+        return self._format_result(result)
 ```
+
+**IMPORTANTE**: BashToolExecutor NON vede BashPreprocessor. Vede solo CommandExecutor, che usa BashPreprocessor internamente.
 
 ---
 

@@ -70,14 +70,16 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Questi metodi gestiscono preprocessing bash syntax (heredocs, substitution, command grouping)
-- BashPreprocessor sarà usata da BashToolExecutor PRIMA di passare a CommandExecutor
-- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (preprocessing) → CommandExecutor (execution)
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor internamente) → PipelineStrategy/ExecuteUnixSingleCommand
+- Separazione responsabilità: BashToolExecutor (coordinator) → CommandExecutor (orchestration + preprocessing interno) → Execution
 
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` nell'architettura finale
 2. Migrare i 14 metodi da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor usa `self.preprocessor = BashPreprocessor()` per delegare
-4. Eliminare da BashToolExecutor e CommandTranslator
+3. **CommandExecutor** usa `self.preprocessor = BashPreprocessor()` internamente (NON BashToolExecutor!)
+4. CommandExecutor chiama `self.preprocessor.preprocess()` all'inizio di `execute()`
+5. Eliminare i 14 metodi da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
 
@@ -115,8 +117,8 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Variable expansion è preprocessing bash fondamentale (${var}, $((expr)), ${var:-default}, brace expansion, etc.)
-- Deve avvenire PRIMA dell'esecuzione nel BashPreprocessor
-- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (variable expansion) → CommandExecutor (execution)
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor.preprocess() internamente) → PipelineStrategy/ExecuteUnixSingleCommand
 
 **Pattern bash gestiti**:
 - Simple: `$var`, `${var}`
@@ -131,7 +133,7 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` con questi 20 metodi
 2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor delega expansion a BashPreprocessor
+3. **CommandExecutor** usa BashPreprocessor internamente (NON BashToolExecutor!)
 4. Eliminare da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
@@ -159,7 +161,9 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Control structures bash (if, for, while, test) devono essere convertiti PRIMA dell'esecuzione
 - Conversione if/for/while → PowerShell è preprocessing bash syntax
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
 - Strettamente correlato a variable expansion (variabili nei loop devono essere espanse)
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor.preprocess() internamente) → Execution
 
 **Control structures gestiti**:
 - `if [ condition ]; then ... fi` → PowerShell if
@@ -172,7 +176,7 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` con questi 8 metodi
 2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor delega control structures conversion a BashPreprocessor
+3. **CommandExecutor** usa BashPreprocessor internamente (NON BashToolExecutor!)
 4. Eliminare da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
