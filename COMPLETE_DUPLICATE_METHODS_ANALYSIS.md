@@ -28,11 +28,14 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 
 ### Breakdown Duplicazioni
 
-| Categoria | Metodi | Pattern Duplicazione | Destinazione Finale |
-|-----------|--------|---------------------|---------------------|
-| **Preprocessing** | 14 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
-| **Variable Expansion** | 20 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
-| **Control Structures** | 8 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
+**⚠️ AGGIORNATO: 2025-11-18 - Dopo analisi codice e flusso esecuzione**
+
+| Categoria | Metodi Reali | Pattern Duplicazione | Destinazione Finale (CORRETTA) |
+|-----------|--------------|---------------------|--------------------------------|
+| **Preprocessing** | 11 | BashToolExecutor ↔ CommandTranslator | **CommandExecutor** (preprocessing generico) |
+| **Variable Expansion** | 20 | BashToolExecutor ↔ CommandTranslator | **CommandExecutor** (preprocessing generico) |
+| **Control Structures** | 3 (+ 5 closures) | BashToolExecutor ↔ CommandTranslator | **ExecuteUnixSingleCommand/ScriptTranslator** |
+| **PowerShell Strategy** | 3 | BashToolExecutor ↔ CommandTranslator | **ExecuteUnixSingleCommand** (2) + EmulativeTranslator (1) |
 | **Translation Simple** | 21 | CommandTranslator ↔ SimpleTranslator | SimpleTranslator |
 | **Translation Emulative** | 27 | CommandTranslator ↔ EmulativeTranslator | EmulativeTranslator |
 | **Translation Pipeline** | 22 | CommandTranslator ↔ PipelineTranslator | PipelineTranslator |
@@ -40,7 +43,12 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 | **Helper AWK/JQ** | 4 | Multi-class (3 classi) | EmulativeTranslator |
 | **Execution** | 1 | BashToolExecutor ↔ CommandExecutor | Entrambe (ruoli diversi) |
 | **Core** | 1 | Tutte le 6 classi | Tutte (__init__) |
-| **TOTALE** | **122** | | |
+| **TOTALE** | **122** (di cui 5 closures, 37 veri) | | |
+
+**Note:**
+- I metodi `convert_if`, `convert_for`, `convert_while`, `convert_test`, `convert_double_test` sono **CLOSURE functions** dentro `_bash_to_powershell`, NON metodi standalone
+- Totale metodi VERI: 122 - 5 closures = **117 metodi**
+- Prime 4 categorie (42 metodi listati): 42 - 5 closures = **37 metodi veri**
 
 ---
 
@@ -70,14 +78,16 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Questi metodi gestiscono preprocessing bash syntax (heredocs, substitution, command grouping)
-- BashPreprocessor sarà usata da BashToolExecutor PRIMA di passare a CommandExecutor
-- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (preprocessing) → CommandExecutor (execution)
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor internamente) → PipelineStrategy/ExecuteUnixSingleCommand
+- Separazione responsabilità: BashToolExecutor (coordinator) → CommandExecutor (orchestration + preprocessing interno) → Execution
 
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` nell'architettura finale
 2. Migrare i 14 metodi da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor usa `self.preprocessor = BashPreprocessor()` per delegare
-4. Eliminare da BashToolExecutor e CommandTranslator
+3. **CommandExecutor** usa `self.preprocessor = BashPreprocessor()` internamente (NON BashToolExecutor!)
+4. CommandExecutor chiama `self.preprocessor.preprocess()` all'inizio di `execute()`
+5. Eliminare i 14 metodi da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
 
@@ -115,8 +125,8 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Variable expansion è preprocessing bash fondamentale (${var}, $((expr)), ${var:-default}, brace expansion, etc.)
-- Deve avvenire PRIMA dell'esecuzione nel BashPreprocessor
-- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (variable expansion) → CommandExecutor (execution)
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor.preprocess() internamente) → PipelineStrategy/ExecuteUnixSingleCommand
 
 **Pattern bash gestiti**:
 - Simple: `$var`, `${var}`
@@ -131,7 +141,7 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` con questi 20 metodi
 2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor delega expansion a BashPreprocessor
+3. **CommandExecutor** usa BashPreprocessor internamente (NON BashToolExecutor!)
 4. Eliminare da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
@@ -159,7 +169,9 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 - ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
 - Control structures bash (if, for, while, test) devono essere convertiti PRIMA dell'esecuzione
 - Conversione if/for/while → PowerShell è preprocessing bash syntax
+- **IMPORTANTE**: BashPreprocessor è usata INTERNAMENTE da CommandExecutor, NON da BashToolExecutor
 - Strettamente correlato a variable expansion (variabili nei loop devono essere espanse)
+- Flusso: BashToolExecutor → CommandExecutor (usa BashPreprocessor.preprocess() internamente) → Execution
 
 **Control structures gestiti**:
 - `if [ condition ]; then ... fi` → PowerShell if
@@ -172,7 +184,7 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 **Azione**:
 1. Creare nuova classe `BashPreprocessor` con questi 8 metodi
 2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
-3. BashToolExecutor delega control structures conversion a BashPreprocessor
+3. **CommandExecutor** usa BashPreprocessor internamente (NON BashToolExecutor!)
 4. Eliminare da BashToolExecutor e CommandTranslator
 
 **Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
@@ -694,7 +706,92 @@ is_complex_exec, is_critical_awk, is_critical_sed, single_executor
 
 ---
 
+## APPENDIX B: FINAL CORRECTED DISTRIBUTION (37 METHODS)
+
+**⚠️ DECISIONE FINALE - Basata su lettura codice effettivo**
+**Data:** 2025-11-18
+
+Dopo analisi approfondita del flusso di esecuzione nel codice, la distribuzione corretta dei primi 42 metodi (di cui 37 reali) è:
+
+### CommandExecutor: 28 metodi - PREPROCESSING GENERICO
+
+**A. Heredocs e Process Substitution (5):**
+- `_process_heredocs`, `_process_substitution`, `_process_command_substitution_recursive`
+- `_translate_substitution_content`, `find_substitutions`
+
+**B. Subshell e Command Grouping (2):**
+- `_process_subshell`, `_process_command_grouping`
+
+**C. Preprocessing Patterns (4):**
+- `_process_xargs`, `_process_find_exec`, `_process_escape_sequences`
+- `_preprocess_test_commands`
+
+**D. Variable Expansion (20):**
+- `_expand_variables` (orchestrator), `_expand_aliases`, `_expand_braces`
+- `expand_simple_var`, `expand_default`, `expand_assign`, `expand_length`
+- `expand_remove_prefix`, `expand_remove_suffix`, `expand_case`
+- `expand_substitution`, `expand_arithmetic`
+- `expand_simple_brace`, `expand_single_brace`, `expand_grouping`
+- `is_complex_substitution`, `remove_subshell`
+- `replace_input_substitution`, `replace_output_substitution`
+
+**E. Cleanup (1):**
+- `_cleanup_temp_files`
+
+**Totale: 28 metodi**
+
+---
+
+### ExecuteUnixSingleCommand: 8 metodi - SCRIPT TRANSLATION
+
+**NUOVO COMPONENTE: ScriptTranslator**
+
+**A. Control Structures Detection & Conversion (4):**
+- `_has_control_structures` - Detecta if/for/while/case
+- `_convert_control_structures_to_script` - Crea file .ps1
+- `_bash_to_powershell` - Core conversion bash→PowerShell
+- `_convert_test_to_powershell` - Converte test conditions
+
+**B. PowerShell Strategy Decision (2):**
+- `_needs_powershell` - Detecta se serve PowerShell vs cmd.exe
+- `_adapt_for_powershell` - Adatta comando per PowerShell
+
+**Note:** I metodi `convert_if`, `convert_for`, `convert_while`, `convert_test`, `convert_double_test` sono **CLOSURE functions** dentro `_bash_to_powershell`, NON metodi standalone.
+
+**Totale: 8 metodi**
+*(Di cui 1 metodo `_adapt_for_powershell` potrebbe essere spostato in EmulativeTranslator)*
+
+---
+
+### EmulativeTranslator: 0-1 metodo
+
+- `_adapt_for_powershell` (opzionale, se non in ExecuteUnixSingleCommand)
+
+---
+
+### MOTIVAZIONE CHIAVE
+
+**Perché bash→PowerShell va in ExecuteUnixSingleCommand, NON in CommandExecutor?**
+
+1. **`_bash_to_powershell` è TRADUZIONE, non preprocessing:**
+   - Preprocessing: `$var` → valore (testuale)
+   - Traduzione: `if...; then...; fi` → `If (...) { ... }` (semantica)
+
+2. **Parallelo con altri Translators:**
+   - SimpleTranslator: `pwd` → `Get-Location`
+   - EmulativeTranslator: `sed` → PowerShell emulation
+   - PipelineTranslator: `|` → pipeline operators
+   - **ScriptTranslator**: `if/for/while` → PowerShell script
+
+3. **ExecuteUnixSingleCommand gestisce strategie di ESECUZIONE:**
+   - Non solo comandi "atomici" ma "unità di esecuzione" (comando o script)
+
+**Vedi:** `FINAL_37_METHODS_DISTRIBUTION.md` per analisi completa
+
+---
+
 *Document created: 2025-11-18*
+*Last updated: 2025-11-18 (after code flow analysis)*
 *Analysis based on: bash_tool_executor.py, unix_translator.py*
-*Total duplicate methods identified: 122*
+*Total duplicate methods identified: 122 (117 real methods, 5 closures)*
 *Recommendation: Eliminate CommandTranslator entirely, distribute methods to specialized classes*
