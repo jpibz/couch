@@ -932,6 +932,289 @@ class ExecuteUnixSingleCommand:
         self.logger.warning(f"Unknown command: {cmd_name} - passing through")
         return command, False
 
+    # ==================== CONTROL STRUCTURE METHODS (migrated) ====================
+
+    def _has_control_structures(self, command: str) -> bool:
+        """Check if command contains bash control structures"""
+        keywords = ['for ', 'while ', 'if ', 'case ', 'function ', 'until ']
+        return any(kw in command for kw in keywords)
+    
+    def _convert_control_structures_to_script(self, command: str) -> Tuple[str, Optional[Path]]:
+        """
+        Convert bash control structures to PowerShell script.
+        
+        For complex structures (for, while, if), create temp PowerShell script.
+        
+        Returns:
+            (modified_command, temp_script_file)
+        """
+        if not self._has_control_structures(command):
+            return command, None
+        
+        # Create PowerShell script with bash-like logic
+        cwd = self.scratch_dir
+        script_file = cwd / f'bash_script_{threading.get_ident()}.ps1'
+        
+        try:
+            # Convert bash script to PowerShell
+            ps_script = self._bash_to_powershell(command)
+            
+            with open(script_file, 'w', encoding='utf-8') as f:
+                f.write(ps_script)
+            
+            # Return command to execute script
+            new_command = f'powershell -ExecutionPolicy Bypass -File "{script_file}"'
+            
+            return new_command, script_file
+        
+        except Exception as e:
+            self.logger.error(f"Failed to convert control structures: {e}")
+            return command, None
+    
+    def _bash_to_powershell(self, bash_script: str) -> str:
+        """
+        Convert bash control structures to PowerShell.
+        
+        Handles:
+        - for loops
+        - while loops
+        - if statements
+        - test conditions conversion
+        - variable references
+        """
+        import re
+        
+        # For loop: for i in {1..10}; do echo $i; done
+        for_pattern = r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.+?);\s*done'
+        
+        def convert_for(match):
+            var = match.group(1)
+            range_expr = match.group(2).strip()
+            body = match.group(3).strip()
+            
+            # Convert bash $var to PowerShell $var (already compatible)
+            # Convert echo to Write-Host
+            body = body.replace('echo ', 'Write-Host ')
+            
+            # Parse range
+            if '..' in range_expr:
+                # Range like 1..10
+                ps = f'foreach (${var} in {range_expr}) {{\n'
+                ps += f'    {body}\n'
+                ps += '}\n'
+            else:
+                # List like "a b c"
+                items = range_expr.split()
+                items_str = ','.join([f'"{item}"' for item in items])
+                ps = f'foreach (${var} in {items_str}) {{\n'
+                ps += f'    {body}\n'
+                ps += '}\n'
+            
+            return ps
+        
+        # Check for for loop
+        if 'for ' in bash_script and ' in ' in bash_script and '; do ' in bash_script:
+            bash_script = re.sub(for_pattern, convert_for, bash_script, flags=re.DOTALL)
+        
+        # While loop: while condition; do ...; done
+        while_pattern = r'while\s+(.+?);\s*do\s+(.+?);\s*done'
+        
+        def convert_while(match):
+            condition = match.group(1).strip()
+            body = match.group(2).strip()
+            
+            # Convert test conditions to PowerShell
+            condition = self._convert_test_to_powershell(condition)
+            
+            # Convert body commands
+            body = body.replace('echo ', 'Write-Host ')
+            
+            ps = f'while ({condition}) {{\n'
+            ps += f'    {body}\n'
+            ps += '}\n'
+            
+            return ps
+        
+        if 'while ' in bash_script:
+            bash_script = re.sub(while_pattern, convert_while, bash_script, flags=re.DOTALL)
+        
+        # If statement: if condition; then ...; fi
+        if_pattern = r'if\s+(.+?);\s*then\s+(.+?);\s*fi'
+        
+        def convert_if(match):
+            condition = match.group(1).strip()
+            body = match.group(2).strip()
+            
+            # Convert test conditions to PowerShell
+            condition = self._convert_test_to_powershell(condition)
+            
+            # Convert body commands
+            body = body.replace('echo ', 'Write-Host ')
+            
+            ps = f'if ({condition}) {{\n'
+            ps += f'    {body}\n'
+            ps += '}\n'
+            
+            return ps
+        
+        if 'if ' in bash_script and ' then ' in bash_script:
+            bash_script = re.sub(if_pattern, convert_if, bash_script, flags=re.DOTALL)
+        
+        # Convert common bash commands to PowerShell equivalents
+        conversions = {
+            'echo ': 'Write-Host ',
+            'cat ': 'Get-Content ',
+            'ls ': 'Get-ChildItem ',
+            'rm ': 'Remove-Item ',
+            'cp ': 'Copy-Item ',
+            'mv ': 'Move-Item ',
+            'mkdir ': 'New-Item -ItemType Directory -Path ',
+        }
+        
+        for bash_cmd, ps_cmd in conversions.items():
+            bash_script = bash_script.replace(bash_cmd, ps_cmd)
+        
+        return bash_script
+    
+    def _convert_test_to_powershell(self, test_expr: str) -> str:
+        """
+        Convert bash test conditions to PowerShell.
+        
+        Examples:
+        [ -f file ] -> Test-Path file
+        [ "$a" = "$b" ] -> $a -eq $b
+        """
+        # Remove [ ] brackets
+        test_expr = test_expr.strip()
+        if test_expr.startswith('[') and test_expr.endswith(']'):
+            test_expr = test_expr[1:-1].strip()
+        
+        # File tests
+        if '-f ' in test_expr:
+            # Extract filename
+            file = test_expr.split('-f ')[1].strip().strip('"')
+            return f'Test-Path "{file}"'
+        elif '-d ' in test_expr:
+            # Directory test
+            dir = test_expr.split('-d ')[1].strip().strip('"')
+            return f'Test-Path "{dir}" -PathType Container'
+        elif '-e ' in test_expr:
+            # Exists test
+            path = test_expr.split('-e ')[1].strip().strip('"')
+            return f'Test-Path "{path}"'
+        
+        # String comparisons
+        elif ' = ' in test_expr or ' == ' in test_expr:
+            parts = re.split(r'\s*=\s*', test_expr)
+            if len(parts) == 2:
+                return f'{parts[0].strip()} -eq {parts[1].strip()}'
+        elif ' != ' in test_expr:
+            parts = test_expr.split(' != ')
+            if len(parts) == 2:
+                return f'{parts[0].strip()} -ne {parts[1].strip()}'
+        
+        # Fallback: return as-is
+        return test_expr
+    
+    def _cleanup_temp_files(self, temp_files: List[Path]):
+        """Cleanup temporary files created during execution"""
+        for temp_file in temp_files:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
+    
+    def _needs_powershell(self, command: str) -> bool:
+        """
+        Detect if command needs PowerShell instead of cmd.exe.
+
+        PowerShell required for:
+        - Command substitution: $(...)
+        - Backticks: `...`
+        - Process substitution: <(...)
+        - Complex variable expansion
+        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
+
+        Returns:
+            True if PowerShell required, False if cmd.exe sufficient
+        """
+        # PowerShell cmdlets
+        powershell_cmdlets = [
+            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
+            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
+            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
+            '$input', '$_'  # PowerShell variables
+        ]
+
+        for cmdlet in powershell_cmdlets:
+            if cmdlet in command:
+                return True
+
+        # Command substitution patterns
+        if '$(' in command:
+            return True
+
+        # Backtick command substitution
+        if '`' in command:
+            # Check it's not just in a string
+            # Simple heuristic: backticks outside of quotes
+            in_quotes = False
+            quote_char = None
+            for i, char in enumerate(command):
+                if char in ('"', "'") and (i == 0 or command[i-1] != '\\'):
+                    if not in_quotes:
+                        in_quotes = True
+                        quote_char = char
+                    elif char == quote_char:
+                        in_quotes = False
+                        quote_char = None
+                elif char == '`' and not in_quotes:
+                    return True
+
+        # Process substitution
+        if '<(' in command or '>(' in command:
+            return True
+
+        return False
+    
+    def _adapt_for_powershell(self, command: str) -> str:
+        """
+        Adapt Unix command for PowerShell execution.
+        
+        Translations:
+        - Backticks `cmd` -> $(...) PowerShell syntax
+        - Preserve pipes, redirects, logical operators
+        - Path translations already done by PathTranslator
+        
+        Args:
+            command: Unix command with Windows paths already translated
+            
+        Returns:
+            Command adapted for PowerShell
+        """
+        adapted = command
+        
+        # Convert backticks to PowerShell command substitution
+        # Pattern: `command` -> $(command)
+        # Handle escaped backticks (don't convert)
+        import re
+        
+        # Find all backtick pairs (not escaped)
+        # This is a simple implementation - may need refinement for complex cases
+        backtick_pattern = r'(?<!\\)`([^`]+)`'
+        adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
+        
+        # PowerShell uses different redirection for null
+        # /dev/null -> $null
+        adapted = adapted.replace('/dev/null', '$null')
+        
+        # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
+        
+        return adapted
+    
+
 
 class CommandExecutor:
     """
@@ -6178,235 +6461,8 @@ class CommandExecutor:
 # BASHTOOLEXECUTOR - ORCHESTRATION LAYER
 # ============================================================================
 
-class BashToolExecutor(ToolExecutor):
-    """
-    Bash command executor integrated with COUCH architecture.
-    
-    Receives params dict from ExecutorDefinition - NO separate config class.
-    
-    ============================================================================
-    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
-    ============================================================================
-    
-    This executor uses native Unix binaries on Windows for 100% compatibility.
-    Install these once, system-wide:
-    
-    1. GIT FOR WINDOWS (covers 90% of tools)
-       Download: https://git-scm.com/download/win
-       Install options:
-       - "Use Git and optional Unix tools from Command Prompt" ✓
-       - "Use Windows' default console window" ✓
-       - Credential manager: "None" ✓
-       
-       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
-       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
-       
-       Verify:
-         diff --version
-         awk --version
-    
-    2. JQ (JSON processor)
-       Download: https://github.com/jqlang/jq/releases/latest
-       Binary: jq-windows-amd64.exe (rename to jq.exe)
-       Install: Copy to C:\Windows\System32 (already in PATH)
-       
-       Verify:
-         jq --version
-    
-    RESULT:
-    All commands callable directly from CMD/PowerShell.
-    Translator uses native binaries (100% GNU compatible) with PowerShell 
-    fallback for edge cases where binary missing.
-    
-    ============================================================================
-    """
-    
-    def __init__(self, working_dir: str, enabled: bool = False,
-                 python_executable: Optional[str] = None,
-                 virtual_env: Optional[str] = None,
-                 default_timeout: int = 30,
-                 python_timeout: int = 60,
-                 use_git_bash: bool = False,
-                 **kwargs):
-        """
-        Initialize BashToolExecutor
-        
-        Args:
-            working_dir: Tool working directory (from ConfigurationManager)
-            enabled: Tool enabled state
-            python_executable: Python path (OPTIONAL - auto-detected if missing)
-            virtual_env: Virtual env path (OPTIONAL - defaults to BASH_TOOL_ENV)
-            default_timeout: Default command timeout
-            python_timeout: Python script timeout
-            use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
-            
-        Raises:
-            RuntimeError: If Python not found and python_executable not provided
-        """
-        super().__init__('bash_tool', enabled)
+    # ==================== PREPROCESSING METHODS (migrated) ====================
 
-        # TESTMODE flag for testing purposes
-        TESTMODE = True  # Set to True for testing
-        self.TESTMODE = TESTMODE
-
-        self.working_dir = Path(working_dir)
-        self.default_timeout = default_timeout
-        self.python_timeout = python_timeout
-        self.use_git_bash = use_git_bash
-
-        # Initialize components
-        self.path_translator = PathTranslator()
-        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
-
-        # Create tool-specific scratch directory
-        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
-        self.scratch_dir.mkdir(parents=True, exist_ok=True)
-
-        # Git Bash detection (if enabled)
-        self.git_bash_exe = None
-        if use_git_bash:
-            self.git_bash_exe = self._detect_git_bash()
-            if self.git_bash_exe:
-                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
-            else:
-                self.logger.warning("Git Bash not found - falling back to command translation")
-
-        # Get claude home directory (needed for preprocessing)
-        self.claude_home_unix = self.path_translator.get_claude_home_unix()
-
-        # Initialize CommandTranslator with preprocessing dependencies
-        # Note: command_executor will be set later (circular dependency)
-        self.command_translator = CommandTranslator(
-            path_translator=self.path_translator,
-            git_bash_exe=self.git_bash_exe,
-            scratch_dir=self.scratch_dir,
-            logger=self.logger,
-            command_executor=None,  # Will be set after CommandExecutor initialization
-            claude_home_unix=self.claude_home_unix
-        )
-
-        # Initialize CommandExecutor (execution strategy layer)
-        # Will be fully initialized after Git Bash detection
-        self.command_executor = None
-        
-        # Python executable - CRITICAL DEPENDENCY
-        try:
-            if python_executable:
-                # Validate provided executable
-                result = subprocess.run(
-                    [python_executable, '--version'],
-                    capture_output=True,
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
-
-                self.python_executable = python_executable
-                self.logger.info(f"Using provided Python: {python_executable}")
-            else:
-                # Auto-detect (may raise RuntimeError)
-                self.python_executable = self._detect_system_python()
-
-        except RuntimeError as e:
-            # Python detection failed - tool disabled
-            self.python_executable = None
-            self.virtual_env = None
-            self.logger.error(f"BashToolExecutor initialization failed: {e}")
-            raise
-
-        # Virtual environment - only if Python available
-        self.virtual_env = self._setup_virtual_env(virtual_env)
-
-        # Initialize CommandExecutor with all dependencies now available
-        self.command_executor = CommandExecutor(
-            command_translator=self.command_translator,
-            git_bash_exe=self.git_bash_exe,
-            claude_home_unix=self.claude_home_unix,
-            logger=self.logger,
-            test_mode=self.TESTMODE
-        )
-
-        # Set command_executor in command_translator (circular dependency resolved)
-        self.command_translator.command_executor = self.command_executor
-        
-        self.logger.info(
-            f"BashToolExecutor initialized: Python={self.python_executable}, "
-            f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
-        )
-    
-    def _detect_git_bash(self) -> Optional[str]:
-        """
-        Detect Git Bash executable.
-        
-        Standard locations:
-        - C:\Program Files\Git\bin\bash.exe
-        - C:\Program Files (x86)\Git\bin\bash.exe
-        """
-        candidates = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ]
-        
-        for path in candidates:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                return path
-        
-        # Try PATH
-        try:
-            result = subprocess.run(
-                ['where', 'bash.exe'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                bash_path = result.stdout.strip().split('\n')[0]
-                if 'Git' in bash_path:
-                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
-                    return bash_path
-        except:
-            pass
-        
-        return None
-    
-    def _detect_system_python(self) -> str:
-        """
-        Detect system Python - FAIL FAST if missing.
-        
-        Bash tool without Python is INCOMPLETE and should be disabled.
-        """
-        candidates = ['python', 'python.exe']
-        
-        for cmd in candidates:
-            try:
-                result = subprocess.run(
-                    [cmd, '--version'], 
-                    capture_output=True, 
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode == 0:
-                    version = result.stdout.strip()
-                    self.logger.info(f"Detected Python: {cmd} ({version})")
-                    return cmd
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                continue
-        
-        # Python NOT FOUND - tool is incomplete
-        self.logger.critical("CRITICAL: Python not found in system PATH")
-        self.logger.critical("Bash tool requires Python for full functionality")
-        
-        # Disable tool immediately
-        self.enabled = False
-        
-        raise RuntimeError(
-            "Python executable not found in system PATH. "
-            "Bash tool is incomplete without Python and has been disabled. "
-            "Install Python or provide python_executable parameter explicitly."
-        )
-    
     def _expand_braces(self, command: str) -> str:
         """
         Expand brace patterns: {1..10}, {a..z}, {a,b,c}
@@ -7379,188 +7435,6 @@ EXPAND_DELIMITER'''
         
         return command
     
-    def _has_control_structures(self, command: str) -> bool:
-        """Check if command contains bash control structures"""
-        keywords = ['for ', 'while ', 'if ', 'case ', 'function ', 'until ']
-        return any(kw in command for kw in keywords)
-    
-    def _convert_control_structures_to_script(self, command: str) -> Tuple[str, Optional[Path]]:
-        """
-        Convert bash control structures to PowerShell script.
-        
-        For complex structures (for, while, if), create temp PowerShell script.
-        
-        Returns:
-            (modified_command, temp_script_file)
-        """
-        if not self._has_control_structures(command):
-            return command, None
-        
-        # Create PowerShell script with bash-like logic
-        cwd = self.scratch_dir
-        script_file = cwd / f'bash_script_{threading.get_ident()}.ps1'
-        
-        try:
-            # Convert bash script to PowerShell
-            ps_script = self._bash_to_powershell(command)
-            
-            with open(script_file, 'w', encoding='utf-8') as f:
-                f.write(ps_script)
-            
-            # Return command to execute script
-            new_command = f'powershell -ExecutionPolicy Bypass -File "{script_file}"'
-            
-            return new_command, script_file
-        
-        except Exception as e:
-            self.logger.error(f"Failed to convert control structures: {e}")
-            return command, None
-    
-    def _bash_to_powershell(self, bash_script: str) -> str:
-        """
-        Convert bash control structures to PowerShell.
-        
-        Handles:
-        - for loops
-        - while loops
-        - if statements
-        - test conditions conversion
-        - variable references
-        """
-        import re
-        
-        # For loop: for i in {1..10}; do echo $i; done
-        for_pattern = r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.+?);\s*done'
-        
-        def convert_for(match):
-            var = match.group(1)
-            range_expr = match.group(2).strip()
-            body = match.group(3).strip()
-            
-            # Convert bash $var to PowerShell $var (already compatible)
-            # Convert echo to Write-Host
-            body = body.replace('echo ', 'Write-Host ')
-            
-            # Parse range
-            if '..' in range_expr:
-                # Range like 1..10
-                ps = f'foreach (${var} in {range_expr}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            else:
-                # List like "a b c"
-                items = range_expr.split()
-                items_str = ','.join([f'"{item}"' for item in items])
-                ps = f'foreach (${var} in {items_str}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            
-            return ps
-        
-        # Check for for loop
-        if 'for ' in bash_script and ' in ' in bash_script and '; do ' in bash_script:
-            bash_script = re.sub(for_pattern, convert_for, bash_script, flags=re.DOTALL)
-        
-        # While loop: while condition; do ...; done
-        while_pattern = r'while\s+(.+?);\s*do\s+(.+?);\s*done'
-        
-        def convert_while(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'while ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'while ' in bash_script:
-            bash_script = re.sub(while_pattern, convert_while, bash_script, flags=re.DOTALL)
-        
-        # If statement: if condition; then ...; fi
-        if_pattern = r'if\s+(.+?);\s*then\s+(.+?);\s*fi'
-        
-        def convert_if(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'if ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'if ' in bash_script and ' then ' in bash_script:
-            bash_script = re.sub(if_pattern, convert_if, bash_script, flags=re.DOTALL)
-        
-        # Convert common bash commands to PowerShell equivalents
-        conversions = {
-            'echo ': 'Write-Host ',
-            'cat ': 'Get-Content ',
-            'ls ': 'Get-ChildItem ',
-            'rm ': 'Remove-Item ',
-            'cp ': 'Copy-Item ',
-            'mv ': 'Move-Item ',
-            'mkdir ': 'New-Item -ItemType Directory -Path ',
-        }
-        
-        for bash_cmd, ps_cmd in conversions.items():
-            bash_script = bash_script.replace(bash_cmd, ps_cmd)
-        
-        return bash_script
-    
-    def _convert_test_to_powershell(self, test_expr: str) -> str:
-        """
-        Convert bash test conditions to PowerShell.
-        
-        Examples:
-        [ -f file ] -> Test-Path file
-        [ "$a" = "$b" ] -> $a -eq $b
-        """
-        # Remove [ ] brackets
-        test_expr = test_expr.strip()
-        if test_expr.startswith('[') and test_expr.endswith(']'):
-            test_expr = test_expr[1:-1].strip()
-        
-        # File tests
-        if '-f ' in test_expr:
-            # Extract filename
-            file = test_expr.split('-f ')[1].strip().strip('"')
-            return f'Test-Path "{file}"'
-        elif '-d ' in test_expr:
-            # Directory test
-            dir = test_expr.split('-d ')[1].strip().strip('"')
-            return f'Test-Path "{dir}" -PathType Container'
-        elif '-e ' in test_expr:
-            # Exists test
-            path = test_expr.split('-e ')[1].strip().strip('"')
-            return f'Test-Path "{path}"'
-        
-        # String comparisons
-        elif ' = ' in test_expr or ' == ' in test_expr:
-            parts = re.split(r'\s*=\s*', test_expr)
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -eq {parts[1].strip()}'
-        elif ' != ' in test_expr:
-            parts = test_expr.split(' != ')
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -ne {parts[1].strip()}'
-        
-        # Fallback: return as-is
-        return test_expr
-    
     def _cleanup_temp_files(self, temp_files: List[Path]):
         """Cleanup temporary files created during execution"""
         for temp_file in temp_files:
@@ -7571,93 +7445,235 @@ EXPAND_DELIMITER'''
             except Exception as e:
                 self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
     
-    def _needs_powershell(self, command: str) -> bool:
-        """
-        Detect if command needs PowerShell instead of cmd.exe.
 
-        PowerShell required for:
-        - Command substitution: $(...)
-        - Backticks: `...`
-        - Process substitution: <(...)
-        - Complex variable expansion
-        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
-
-        Returns:
-            True if PowerShell required, False if cmd.exe sufficient
-        """
-        # PowerShell cmdlets
-        powershell_cmdlets = [
-            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
-            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
-            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
-            '$input', '$_'  # PowerShell variables
-        ]
-
-        for cmdlet in powershell_cmdlets:
-            if cmdlet in command:
-                return True
-
-        # Command substitution patterns
-        if '$(' in command:
-            return True
-
-        # Backtick command substitution
-        if '`' in command:
-            # Check it's not just in a string
-            # Simple heuristic: backticks outside of quotes
-            in_quotes = False
-            quote_char = None
-            for i, char in enumerate(command):
-                if char in ('"', "'") and (i == 0 or command[i-1] != '\\'):
-                    if not in_quotes:
-                        in_quotes = True
-                        quote_char = char
-                    elif char == quote_char:
-                        in_quotes = False
-                        quote_char = None
-                elif char == '`' and not in_quotes:
-                    return True
-
-        # Process substitution
-        if '<(' in command or '>(' in command:
-            return True
-
-        return False
+class BashToolExecutor(ToolExecutor):
+    """
+    Bash command executor integrated with COUCH architecture.
     
-    def _adapt_for_powershell(self, command: str) -> str:
+    Receives params dict from ExecutorDefinition - NO separate config class.
+    
+    ============================================================================
+    EXTERNAL UNIX BINARIES - INSTALLATION GUIDE
+    ============================================================================
+    
+    This executor uses native Unix binaries on Windows for 100% compatibility.
+    Install these once, system-wide:
+    
+    1. GIT FOR WINDOWS (covers 90% of tools)
+       Download: https://git-scm.com/download/win
+       Install options:
+       - "Use Git and optional Unix tools from Command Prompt" ✓
+       - "Use Windows' default console window" ✓
+       - Credential manager: "None" ✓
+       
+       Provides: diff, awk (gawk), sed, grep, tar, bash, and 100+ Unix tools
+       PATH: C:\\Program Files\\Git\\usr\\bin (automatic)
+       
+       Verify:
+         diff --version
+         awk --version
+    
+    2. JQ (JSON processor)
+       Download: https://github.com/jqlang/jq/releases/latest
+       Binary: jq-windows-amd64.exe (rename to jq.exe)
+       Install: Copy to C:\Windows\System32 (already in PATH)
+       
+       Verify:
+         jq --version
+    
+    RESULT:
+    All commands callable directly from CMD/PowerShell.
+    Translator uses native binaries (100% GNU compatible) with PowerShell 
+    fallback for edge cases where binary missing.
+    
+    ============================================================================
+    """
+    
+    def __init__(self, working_dir: str, enabled: bool = False,
+                 python_executable: Optional[str] = None,
+                 virtual_env: Optional[str] = None,
+                 default_timeout: int = 30,
+                 python_timeout: int = 60,
+                 use_git_bash: bool = False,
+                 **kwargs):
         """
-        Adapt Unix command for PowerShell execution.
-        
-        Translations:
-        - Backticks `cmd` -> $(...) PowerShell syntax
-        - Preserve pipes, redirects, logical operators
-        - Path translations already done by PathTranslator
+        Initialize BashToolExecutor
         
         Args:
-            command: Unix command with Windows paths already translated
+            working_dir: Tool working directory (from ConfigurationManager)
+            enabled: Tool enabled state
+            python_executable: Python path (OPTIONAL - auto-detected if missing)
+            virtual_env: Virtual env path (OPTIONAL - defaults to BASH_TOOL_ENV)
+            default_timeout: Default command timeout
+            python_timeout: Python script timeout
+            use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
             
-        Returns:
-            Command adapted for PowerShell
+        Raises:
+            RuntimeError: If Python not found and python_executable not provided
         """
-        adapted = command
+        super().__init__('bash_tool', enabled)
+
+        # TESTMODE flag for testing purposes
+        TESTMODE = True  # Set to True for testing
+        self.TESTMODE = TESTMODE
+
+        self.working_dir = Path(working_dir)
+        self.default_timeout = default_timeout
+        self.python_timeout = python_timeout
+        self.use_git_bash = use_git_bash
+
+        # Initialize components
+        self.path_translator = PathTranslator()
+        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
+
+        # Create tool-specific scratch directory
+        self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Git Bash detection (if enabled)
+        self.git_bash_exe = None
+        if use_git_bash:
+            self.git_bash_exe = self._detect_git_bash()
+            if self.git_bash_exe:
+                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
+            else:
+                self.logger.warning("Git Bash not found - falling back to command translation")
+
+        # Get claude home directory (needed for preprocessing)
+        self.claude_home_unix = self.path_translator.get_claude_home_unix()
+
+        # Initialize CommandTranslator with preprocessing dependencies
+        # Note: command_executor will be set later (circular dependency)
+        self.command_translator = CommandTranslator(
+            path_translator=self.path_translator,
+            git_bash_exe=self.git_bash_exe,
+            scratch_dir=self.scratch_dir,
+            logger=self.logger,
+            command_executor=None,  # Will be set after CommandExecutor initialization
+            claude_home_unix=self.claude_home_unix
+        )
+
+        # Initialize CommandExecutor (execution strategy layer)
+        # Will be fully initialized after Git Bash detection
+        self.command_executor = None
         
-        # Convert backticks to PowerShell command substitution
-        # Pattern: `command` -> $(command)
-        # Handle escaped backticks (don't convert)
-        import re
+        # Python executable - CRITICAL DEPENDENCY
+        try:
+            if python_executable:
+                # Validate provided executable
+                result = subprocess.run(
+                    [python_executable, '--version'],
+                    capture_output=True,
+                    timeout=2,
+                    text=True
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
+
+                self.python_executable = python_executable
+                self.logger.info(f"Using provided Python: {python_executable}")
+            else:
+                # Auto-detect (may raise RuntimeError)
+                self.python_executable = self._detect_system_python()
+
+        except RuntimeError as e:
+            # Python detection failed - tool disabled
+            self.python_executable = None
+            self.virtual_env = None
+            self.logger.error(f"BashToolExecutor initialization failed: {e}")
+            raise
+
+        # Virtual environment - only if Python available
+        self.virtual_env = self._setup_virtual_env(virtual_env)
+
+        # Initialize CommandExecutor with all dependencies now available
+        self.command_executor = CommandExecutor(
+            command_translator=self.command_translator,
+            git_bash_exe=self.git_bash_exe,
+            claude_home_unix=self.claude_home_unix,
+            logger=self.logger,
+            test_mode=self.TESTMODE
+        )
+
+        # Set command_executor in command_translator (circular dependency resolved)
+        self.command_translator.command_executor = self.command_executor
         
-        # Find all backtick pairs (not escaped)
-        # This is a simple implementation - may need refinement for complex cases
-        backtick_pattern = r'(?<!\\)`([^`]+)`'
-        adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
+        self.logger.info(
+            f"BashToolExecutor initialized: Python={self.python_executable}, "
+            f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
+        )
+    
+    def _detect_git_bash(self) -> Optional[str]:
+        """
+        Detect Git Bash executable.
         
-        # PowerShell uses different redirection for null
-        # /dev/null -> $null
-        adapted = adapted.replace('/dev/null', '$null')
+        Standard locations:
+        - C:\Program Files\Git\bin\bash.exe
+        - C:\Program Files (x86)\Git\bin\bash.exe
+        """
+        candidates = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ]
         
-        # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
+        for path in candidates:
+            if Path(path).exists():
+                self.logger.info(f"Found Git Bash: {path}")
+                return path
         
-        return adapted
+        # Try PATH
+        try:
+            result = subprocess.run(
+                ['where', 'bash.exe'],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                bash_path = result.stdout.strip().split('\n')[0]
+                if 'Git' in bash_path:
+                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                    return bash_path
+        except:
+            pass
+        
+        return None
+    
+    def _detect_system_python(self) -> str:
+        """
+        Detect system Python - FAIL FAST if missing.
+        
+        Bash tool without Python is INCOMPLETE and should be disabled.
+        """
+        candidates = ['python', 'python.exe']
+        
+        for cmd in candidates:
+            try:
+                result = subprocess.run(
+                    [cmd, '--version'], 
+                    capture_output=True, 
+                    timeout=2,
+                    text=True
+                )
+                if result.returncode == 0:
+                    version = result.stdout.strip()
+                    self.logger.info(f"Detected Python: {cmd} ({version})")
+                    return cmd
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                continue
+        
+        # Python NOT FOUND - tool is incomplete
+        self.logger.critical("CRITICAL: Python not found in system PATH")
+        self.logger.critical("Bash tool requires Python for full functionality")
+        
+        # Disable tool immediately
+        self.enabled = False
+        
+        raise RuntimeError(
+            "Python executable not found in system PATH. "
+            "Bash tool is incomplete without Python and has been disabled. "
+            "Install Python or provide python_executable parameter explicitly."
+        )
     
     def _setup_virtual_env(self, virtual_env: Optional[str]) -> Optional[Path]:
         """Setup virtual environment - BLOCKING at initialization is acceptable.
