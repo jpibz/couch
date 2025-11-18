@@ -459,7 +459,7 @@ class PipelineStrategy:
     }
 
     # Pipeline strategies - Pattern matching for command chains
-    # Format: regex pattern → strategy type
+    # Format: regex pattern -> strategy type
     PIPELINE_STRATEGIES = {
         # ===== BASH.EXE REQUIRED (Complex, no alternative) =====
 
@@ -1082,7 +1082,7 @@ class CommandExecutor:
             # They will be moved here in next iteration
             # For now, preprocessing must be done by BashToolExecutor before calling this
 
-            # STEP 1: Translate Unix commands → Windows commands
+            # STEP 1: Translate Unix commands -> Windows commands
             translated_cmd, use_shell, method = self.command_translator.translate(command)
 
             # STEP 2: Strategy selection - decide execution method
@@ -1140,9 +1140,9 @@ class CommandExecutor:
         1. PipelineStrategy analyzes the command (MACRO level)
         2. PipelineStrategy decides execution strategy
         3. Based on strategy:
-           - BASH_REQUIRED/PREFERRED → Git Bash execution
-           - FAIL → Return error message
-           - SINGLE/POWERSHELL → Delegate to ExecuteUnixSingleCommand (MICRO level)
+           - BASH_REQUIRED/PREFERRED -> Git Bash execution
+           - FAIL -> Return error message
+           - SINGLE/POWERSHELL -> Delegate to ExecuteUnixSingleCommand (MICRO level)
 
         BEFORE: ~200 lines of complex conditional logic
         AFTER: ~30 lines of clean delegation
@@ -1349,9 +1349,9 @@ class CommandExecutor:
         Execute find with COMPLETE test support - STRATEGIC DISPATCH.
 
         ARTIGIANO STRATEGY:
-        - Simple find → PowerShell emulation
-        - Complex -exec → bash.exe (perfect emulation)
-        - Complex tests → bash.exe
+        - Simple find -> PowerShell emulation
+        - Complex -exec -> bash.exe (perfect emulation)
+        - Complex tests -> bash.exe
 
         Complexity triggers (bash.exe required):
         - -exec with sh/bash invocation
@@ -1408,9 +1408,9 @@ class CommandExecutor:
             exec_start = cmd.find('-exec')
             exec_portion = cmd[exec_start:]
             if is_complex_exec(exec_portion):
-                # Complex -exec → bash.exe REQUIRED
+                # Complex -exec -> bash.exe REQUIRED
                 if self.git_bash_exe:
-                    self.logger.debug("find with complex -exec → using bash.exe")
+                    self.logger.debug("find with complex -exec -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
                         return bash_cmd, False
@@ -1424,7 +1424,7 @@ class CommandExecutor:
         for flag in unsupported_flags:
             if flag in cmd:
                 if self.git_bash_exe:
-                    self.logger.debug(f"find with {flag} → using bash.exe")
+                    self.logger.debug(f"find with {flag} -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
                         return bash_cmd, False
@@ -2053,8 +2053,8 @@ class CommandExecutor:
         Translate ln - FULL symlink/hardlink support with fallback.
         
         ARTISAN IMPLEMENTATION:
-        - ln target link → Hard link (mklink /H)
-        - ln -s target link → Symlink (mklink or mklink /D)
+        - ln target link -> Hard link (mklink /H)
+        - ln -s target link -> Symlink (mklink or mklink /D)
         - Fallback: PowerShell New-Item -ItemType SymbolicLink
         - Fallback 2: Copy if symlink fails (no admin)
         
@@ -2180,7 +2180,7 @@ class CommandExecutor:
         Parse find -size specification to bytes.
         
         Format: [+-]N[ckMG]
-        Examples: +1M → 1048576, -100k → 102400, 50 → 50
+        Examples: +1M -> 1048576, -100k -> 102400, 50 -> 50
         """
         import re
         
@@ -2220,8 +2220,8 @@ class CommandExecutor:
         - -a FILENUM: also print unpairable lines from file FILENUM
         
         Usage:
-          join file1 file2                  → join on field 1
-          join -t',' -1 2 -2 1 f1.csv f2.csv → custom fields + separator
+          join file1 file2                  -> join on field 1
+          join -t',' -1 2 -2 1 f1.csv f2.csv -> custom fields + separator
         
         Output: join_field other_fields_f1 other_fields_f2
         """
@@ -2588,7 +2588,7 @@ class CommandExecutor:
 
         ARTIGIANO STRATEGY:
         1. Try awk.exe/gawk.exe (Git for Windows) - 100% GNU awk
-        2. If critical features and no awk.exe → bash.exe
+        2. If critical features and no awk.exe -> bash.exe
         3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
@@ -2650,7 +2650,7 @@ class CommandExecutor:
                     break
 
         if program_str and is_critical_awk(program_str):
-            # CRITICAL awk → native awk.exe or bash.exe REQUIRED
+            # CRITICAL awk -> native awk.exe or bash.exe REQUIRED
             # First try will be awk.exe in the fallback chain
             # But if that fails and we have bash.exe, use it
             if not self.git_bash_exe:
@@ -2661,7 +2661,7 @@ class CommandExecutor:
                     result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
                     if result.returncode != 0:
                         # No awk.exe, use bash.exe
-                        self.logger.debug("Critical awk features + no awk.exe → using bash.exe")
+                        self.logger.debug("Critical awk features + no awk.exe -> using bash.exe")
                         bash_cmd = self._execute_with_gitbash(cmd)
                         if bash_cmd:
                             return bash_cmd, False
@@ -2877,10 +2877,10 @@ class CommandExecutor:
         - Human numeric (-h): 1K, 2M, 3G
         
         Unix behavior:
-          sort file → alphabetic
-          sort -n file → numeric
-          sort -k 2 -t: file → sort by 2nd field, separator ':'
-          sort -h file → human numeric (1K < 1M < 1G)
+          sort file -> alphabetic
+          sort -n file -> numeric
+          sort -k 2 -t: file -> sort by 2nd field, separator ':'
+          sort -h file -> human numeric (1K < 1M < 1G)
         """
         numeric = '-n' in parts or '--numeric-sort' in parts
         reverse = '-r' in parts or '--reverse' in parts
@@ -3064,7 +3064,7 @@ class CommandExecutor:
         CRITICAL: Unix uniq removes CONSECUTIVE duplicates ONLY, not all duplicates!
         
         Example:
-          echo -e "a\\nb\\na" | uniq  →  a, b, a  (NOT a, b)
+          echo -e "a\\nb\\na" | uniq  ->  a, b, a  (NOT a, b)
         
         Flags:
         - -c, --count: Prefix lines with occurrence count
@@ -3363,10 +3363,10 @@ class CommandExecutor:
         - .tar.xz: xz compressed (-J flag)
         
         Common operations:
-        tar -czf archive.tar.gz dir/ → create gzip
-        tar -xzf archive.tar.gz → extract gzip
-        tar -tzf archive.tar.gz → list contents
-        tar -xjf archive.tar.bz2 → extract bzip2
+        tar -czf archive.tar.gz dir/ -> create gzip
+        tar -xzf archive.tar.gz -> extract gzip
+        tar -tzf archive.tar.gz -> list contents
+        tar -xjf archive.tar.bz2 -> extract bzip2
         """
         if len(parts) < 2:
             return 'echo Error: tar requires arguments', True
@@ -3615,9 +3615,9 @@ class CommandExecutor:
         - -r: Recursive (directories)
         
         Behavior (Unix compatible):
-        - gzip file.txt → creates file.txt.gz, deletes file.txt
-        - gzip -k file.txt → creates file.txt.gz, keeps file.txt
-        - gzip -c file.txt → stdout, keeps file.txt
+        - gzip file.txt -> creates file.txt.gz, deletes file.txt
+        - gzip -k file.txt -> creates file.txt.gz, keeps file.txt
+        - gzip -c file.txt -> stdout, keeps file.txt
         """
         stdout_mode = '-c' in parts or '--stdout' in parts
         decompress = '-d' in parts or '--decompress' in parts
@@ -3726,9 +3726,9 @@ class CommandExecutor:
         - -a N: Suffix length (default 2)
         
         Unix behavior:
-          split -l 100 file.txt chunk_  →  chunk_aa, chunk_ab, chunk_ac...
-          split -l 100 -d file.txt chunk_  →  chunk_00, chunk_01, chunk_02...
-          split -b 1M file.bin part_  →  part_aa, part_ab... (1MB chunks)
+          split -l 100 file.txt chunk_  ->  chunk_aa, chunk_ab, chunk_ac...
+          split -l 100 -d file.txt chunk_  ->  chunk_00, chunk_01, chunk_02...
+          split -b 1M file.bin part_  ->  part_aa, part_ab... (1MB chunks)
         
         Output: SILENT (no stdout)
         """
@@ -3919,13 +3919,13 @@ class CommandExecutor:
         STRATEGY FOR 100%:
         1. Try jq.exe (Git for Windows, scoop, chocolatey) - 100% complete
         2. Fallback PowerShell for COMMON patterns (90% real-world use):
-           - .field → select field
-           - .[] → array elements  
-           - .field.nested → nested access
-           - .[N] → array index
-           - keys → object keys
-           - length → count
-           - -r flag → raw output (no quotes)
+           - .field -> select field
+           - .[] -> array elements  
+           - .field.nested -> nested access
+           - .[N] -> array index
+           - keys -> object keys
+           - length -> count
+           - -r flag -> raw output (no quotes)
         
         Complex filters require jq.exe.
         
@@ -3937,9 +3937,9 @@ class CommandExecutor:
         - -s, --slurp: Read entire input as array
         
         Examples:
-          jq '.name' → PowerShell fallback OK
-          jq '.items[].id' → PowerShell fallback OK
-          jq 'map(select(.active))' → Requires jq.exe
+          jq '.name' -> PowerShell fallback OK
+          jq '.items[].id' -> PowerShell fallback OK
+          jq 'map(select(.active))' -> Requires jq.exe
         """
         raw_output = '-r' in parts or '--raw-output' in parts
         compact = '-c' in parts or '--compact-output' in parts
@@ -4064,13 +4064,13 @@ class CommandExecutor:
         Convert simple jq pattern to PowerShell.
         
         Examples:
-        - . → $result = $json
-        - .name → $result = $json.name
-        - .items[] → $result = $json.items
-        - .[0] → $result = $json[0]
-        - .user.email → $result = $json.user.email
-        - keys → $result = $json.PSObject.Properties.Name
-        - length → $result = $json.Count or $json.Length
+        - . -> $result = $json
+        - .name -> $result = $json.name
+        - .items[] -> $result = $json.items
+        - .[0] -> $result = $json[0]
+        - .user.email -> $result = $json.user.email
+        - keys -> $result = $json.PSObject.Properties.Name
+        - length -> $result = $json.Count or $json.Length
         """
         if pattern == '.':
             return '$result = $json\n'
@@ -4139,7 +4139,7 @@ class CommandExecutor:
         Translate timeout - Run command with time limit.
         
         ARTISAN IMPLEMENTATION:
-        - timeout 10s command → PowerShell job with Wait-Job -Timeout
+        - timeout 10s command -> PowerShell job with Wait-Job -Timeout
         - --kill-after: fallback kill if SIGTERM fails
         - Exit codes: 124 if timeout, command exit code otherwise
         
@@ -4305,9 +4305,9 @@ class CommandExecutor:
             return False
 
         if is_critical_sed(cmd):
-            # CRITICAL sed → bash.exe REQUIRED
+            # CRITICAL sed -> bash.exe REQUIRED
             if self.git_bash_exe:
-                self.logger.debug("sed with critical features (hold space, labels) → using bash.exe")
+                self.logger.debug("sed with critical features (hold space, labels) -> using bash.exe")
                 bash_cmd = self._execute_with_gitbash(cmd)
                 if bash_cmd:
                     return bash_cmd, False
@@ -4609,15 +4609,15 @@ class CommandExecutor:
         Translate base64 - Base64 encoding/decoding.
         
         ARTISAN IMPLEMENTATION:
-        - Encode: base64 file → [Convert]::ToBase64String
-        - Decode: base64 -d encoded → [Convert]::FromBase64String
+        - Encode: base64 file -> [Convert]::ToBase64String
+        - Decode: base64 -d encoded -> [Convert]::FromBase64String
         - Stdin: base64 (reads from pipe)
         - -w 0: disable line wrapping (default on Windows anyway)
         
         Unix behavior:
-          base64 file.txt → encode to stdout
-          base64 -d encoded.txt → decode to stdout
-          echo "text" | base64 → encode from stdin
+          base64 file.txt -> encode to stdout
+          base64 -d encoded.txt -> decode to stdout
+          echo "text" | base64 -> encode from stdin
         """
         decode_mode = '-d' in parts or '--decode' in parts
         
@@ -4676,9 +4676,9 @@ class CommandExecutor:
         - -f: Force overwrite
         
         Behavior (Unix compatible):
-        - gunzip file.txt.gz → creates file.txt, deletes file.txt.gz
-        - gunzip -k file.txt.gz → creates file.txt, keeps file.txt.gz
-        - gunzip -c file.txt.gz → stdout, keeps file.txt.gz
+        - gunzip file.txt.gz -> creates file.txt, deletes file.txt.gz
+        - gunzip -k file.txt.gz -> creates file.txt, keeps file.txt.gz
+        - gunzip -c file.txt.gz -> stdout, keeps file.txt.gz
         """
         stdout_mode = '-c' in parts or '--stdout' in parts
         keep = '-k' in parts or '--keep' in parts
@@ -5014,9 +5014,9 @@ class CommandExecutor:
         - -s: serial mode (concatenate all lines of each file)
         
         Usage:
-          paste file1 file2        → line1_f1<TAB>line1_f2
-          paste -d',' f1 f2       → line1_f1,line1_f2
-          paste -s file1          → all_lines_joined_with_TAB
+          paste file1 file2        -> line1_f1<TAB>line1_f2
+          paste -d',' f1 f2       -> line1_f1,line1_f2
+          paste -s file1          -> all_lines_joined_with_TAB
         """
         delimiter = "\\t"
         serial = '-s' in parts
@@ -5109,8 +5109,8 @@ class CommandExecutor:
         - -13: show only unique to file2
         
         Usage:
-          comm file1 file2        → 3 columns
-          comm -12 file1 file2    → only common lines
+          comm file1 file2        -> 3 columns
+          comm -12 file1 file2    -> only common lines
         
         Note: Both files must be sorted!
         """
@@ -5243,10 +5243,10 @@ class CommandExecutor:
         - -c N: first N bytes (not commonly used, skip for now)
 
         Usage:
-          head file.txt           → first 10 lines
-          head -n 20 file.txt     → first 20 lines
-          head -5 file.txt        → first 5 lines
-          cat file | head -10     → from pipeline
+          head file.txt           -> first 10 lines
+          head -n 20 file.txt     -> first 20 lines
+          head -5 file.txt        -> first 5 lines
+          cat file | head -10     -> from pipeline
         """
         line_count = 10  # Default
         files = []
@@ -5361,11 +5361,11 @@ class CommandExecutor:
         - -c N: last N bytes (not commonly used, skip for now)
 
         Usage:
-          tail file.txt           → last 10 lines
-          tail -n 20 file.txt     → last 20 lines
-          tail -5 file.txt        → last 5 lines
-          tail -f log.txt         → follow file
-          cat file | tail -10     → from pipeline
+          tail file.txt           -> last 10 lines
+          tail -n 20 file.txt     -> last 20 lines
+          tail -5 file.txt        -> last 5 lines
+          tail -f log.txt         -> follow file
+          cat file | tail -10     -> from pipeline
         """
         line_count = 10  # Default
         follow = False
@@ -5512,11 +5512,11 @@ class CommandExecutor:
         - -b: number non-blank lines (simplified: same as -n for now)
 
         Usage:
-          cat file.txt               → display file
-          cat file1 file2            → concatenate files
-          cat -n file.txt            → with line numbers
-          echo "text" | cat          → from stdin
-          cat < input.txt            → from redirect
+          cat file.txt               -> display file
+          cat file1 file2            -> concatenate files
+          cat -n file.txt            -> with line numbers
+          echo "text" | cat          -> from stdin
+          cat < input.txt            -> from redirect
         """
         number_lines = '-n' in parts or '-b' in parts
         files = []
@@ -5707,11 +5707,11 @@ class CommandExecutor:
         - (no flags): show lines, words, bytes
 
         Usage:
-          wc file.txt               → lines, words, bytes
-          wc -l file.txt            → lines only
-          wc -w file.txt            → words only
-          cat file | wc -l          → count lines from pipeline
-          ls | wc -l                → count items
+          wc file.txt               -> lines, words, bytes
+          wc -l file.txt            -> lines only
+          wc -w file.txt            -> words only
+          cat file | wc -l          -> count lines from pipeline
+          ls | wc -l                -> count items
         """
         count_lines = '-l' in parts
         count_words = '-w' in parts
@@ -5960,10 +5960,10 @@ class CommandExecutor:
         - =, !=: string comparisons
 
         Usage:
-          test -f file.txt          → check if file exists
-          test -d mydir             → check if directory exists
-          test "a" = "b"            → string comparison
-          [ -f file.txt ]           → same (converted by preprocessor)
+          test -f file.txt          -> check if file exists
+          test -d mydir             -> check if directory exists
+          test "a" = "b"            -> string comparison
+          [ -f file.txt ]           -> same (converted by preprocessor)
         """
         if len(parts) < 2:
             # Empty test is false
@@ -6166,15 +6166,12 @@ class CommandExecutor:
     # BEFORE translation. They require access to:
     # - command_translator (for recursive translation)
     # - executor (for execution in preprocessing phase)
-    # - scratch_dir, git_bash_exe (passed via BashToolExecutor callbacks - temporary)
+    # - scratch_dir, git_bash_exe, logger (from BashToolExecutor)
     #
-    # TODO ITERATION 2: Accept these dependencies via __init__ or method params
+    # NOTE: These methods reference BashToolExecutor-specific attributes.
+    # They will need to be refactored to accept parameters or have
+    # CommandExecutor initialized with these dependencies.
     # ========================================================================
-
-    # NOTE: These methods will be called from BashToolExecutor.execute()
-    # until we move preprocessing logic to CommandExecutor.execute()
-    # They need access to: scratch_dir, git_bash_exe, logger
-    # For now, they'll be called as: command_executor.method(command, scratch_dir, git_bash_exe)
 
 
 # ============================================================================
@@ -6559,14 +6556,14 @@ class BashToolExecutor(ToolExecutor):
             # CRITICAL: In bash, heredocs expand variables and commands UNLESS
             # the delimiter is quoted (<<"EOF" or <<'EOF')
             #
-            # <<EOF          → Expand $VAR, $(cmd), `cmd`, $((expr))
-            # <<"EOF"        → NO expansion (literal)
-            # <<'EOF'        → NO expansion (literal)
+            # <<EOF          -> Expand $VAR, $(cmd), `cmd`, $((expr))
+            # <<"EOF"        -> NO expansion (literal)
+            # <<'EOF'        -> NO expansion (literal)
             #
             # BEHAVIOR:
-            # - Unquoted delimiter → Use bash.exe to expand content
-            # - Quoted delimiter → Write content literally
-            # - No bash.exe → Write literally + warning
+            # - Unquoted delimiter -> Use bash.exe to expand content
+            # - Quoted delimiter -> Write content literally
+            # - No bash.exe -> Write literally + warning
             #
             # This ensures heredoc-generated configs/scripts have correct values.
 
@@ -6775,13 +6772,13 @@ EXPAND_DELIMITER'''
 
         Examples:
             $(grep pattern file.txt)
-            → $(Select-String -Pattern "pattern" -Path "file.txt")
+            -> $(Select-String -Pattern "pattern" -Path "file.txt")
 
             $(cat file | wc -l)
-            → $(Get-Content file | Measure-Object -Line)
+            -> $(Get-Content file | Measure-Object -Line)
 
             Nested: $(echo $(cat file))
-            → $(Write-Host $(Get-Content file))
+            -> $(Write-Host $(Get-Content file))
 
         Returns:
             Command with all $(..  .) recursively translated
@@ -6872,8 +6869,8 @@ EXPAND_DELIMITER'''
 
         ARTIGIANO STRATEGY:
         1. Detect if command is COMPLEX (would fail in PowerShell emulation)
-        2. Complex → execute with bash.exe, capture output, return as string
-        3. Simple → translate to PowerShell, execute in $(...) context
+        2. Complex -> execute with bash.exe, capture output, return as string
+        3. Simple -> translate to PowerShell, execute in $(...) context
 
         COMPLEXITY TRIGGERS:
         - Pipeline with critical commands (find, xargs, awk, sed)
@@ -6923,9 +6920,9 @@ EXPAND_DELIMITER'''
             return False
 
         if is_complex_substitution(content):
-            # COMPLEX command inside $(...) → execute with bash.exe
+            # COMPLEX command inside $(...) -> execute with bash.exe
             if self.git_bash_exe:
-                self.logger.debug(f"Complex command in $(...) → using bash.exe: {content[:50]}")
+                self.logger.debug(f"Complex command in $(...) -> using bash.exe: {content[:50]}")
                 # Need to execute bash.exe, capture output, and insert as string
                 # This is tricky - we're in preprocessing, haven't executed yet
                 # Return a PowerShell invocation that runs bash.exe
@@ -6975,7 +6972,7 @@ EXPAND_DELIMITER'''
         # NOTE: claude_home_unix is passed via __init__, no PathTranslator needed
         claude_home = self.claude_home_unix
 
-        # 1. Tilde expansion: ~/path → /home/claude/path
+        # 1. Tilde expansion: ~/path -> /home/claude/path
         if command.startswith('~/'):
             command = claude_home + '/' + command[2:]
 
@@ -7020,7 +7017,7 @@ EXPAND_DELIMITER'''
         
         command = re.sub(assign_pattern, expand_assign, command)
         
-        # 5. Array expansion: ${arr[@]} → just remove braces for now
+        # 5. Array expansion: ${arr[@]} -> just remove braces for now
         # Full array support would require state tracking
         array_pattern = r'\$\{(\w+)\[@\]\}'
         command = re.sub(array_pattern, r'$\1', command)
@@ -7173,9 +7170,9 @@ EXPAND_DELIMITER'''
         # Previous code only handled ${VAR:-default}, missing simple expansion.
         #
         # This BROKE commands like:
-        #   cd $HOME        → cd $HOME (literal! Wrong!)
-        #   echo $PATH      → echo $PATH (literal!)
-        #   cp file $USER/  → cp file $USER/ (fails!)
+        #   cd $HOME        -> cd $HOME (literal! Wrong!)
+        #   echo $PATH      -> echo $PATH (literal!)
+        #   cp file $USER/  -> cp file $USER/ (fails!)
         #
         # 6. Simple ${VAR} expansion
         simple_brace_pattern = r'\$\{(\w+)\}'
@@ -7207,11 +7204,11 @@ EXPAND_DELIMITER'''
     
     def _preprocess_test_commands(self, command: str) -> str:
         """
-        Convert test command syntax: [ expr ] → test expr
+        Convert test command syntax: [ expr ] -> test expr
         
         Handles:
-        - [ -f file ] → test -f file
-        - [[ expr ]] → test expr (basic conversion)
+        - [ -f file ] -> test -f file
+        - [[ expr ]] -> test expr (basic conversion)
         """
         import re
         
@@ -7240,9 +7237,9 @@ EXPAND_DELIMITER'''
         Expand common bash aliases to their full commands.
         
         Common aliases:
-        - ll → ls -la
-        - la → ls -A
-        - l → ls -CF
+        - ll -> ls -la
+        - la -> ls -A
+        - l -> ls -CF
         """
         aliases = {
             'll ': 'ls -la ',
@@ -7529,8 +7526,8 @@ EXPAND_DELIMITER'''
         Convert bash test conditions to PowerShell.
         
         Examples:
-        [ -f file ] → Test-Path file
-        [ "$a" = "$b" ] → $a -eq $b
+        [ -f file ] -> Test-Path file
+        [ "$a" = "$b" ] -> $a -eq $b
         """
         # Remove [ ] brackets
         test_expr = test_expr.strip()
@@ -7632,7 +7629,7 @@ EXPAND_DELIMITER'''
         Adapt Unix command for PowerShell execution.
         
         Translations:
-        - Backticks `cmd` → $(...) PowerShell syntax
+        - Backticks `cmd` -> $(...) PowerShell syntax
         - Preserve pipes, redirects, logical operators
         - Path translations already done by PathTranslator
         
@@ -7645,7 +7642,7 @@ EXPAND_DELIMITER'''
         adapted = command
         
         # Convert backticks to PowerShell command substitution
-        # Pattern: `command` → $(command)
+        # Pattern: `command` -> $(command)
         # Handle escaped backticks (don't convert)
         import re
         
@@ -7655,7 +7652,7 @@ EXPAND_DELIMITER'''
         adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
         
         # PowerShell uses different redirection for null
-        # /dev/null → $null
+        # /dev/null -> $null
         adapted = adapted.replace('/dev/null', '$null')
         
         # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
@@ -7715,9 +7712,9 @@ EXPAND_DELIMITER'''
         Execute bash command - SIMPLIFIED ORCHESTRATOR
 
         RESPONSIBILITIES:
-        1. Translate Unix paths → Windows paths
+        1. Translate Unix paths -> Windows paths
         2. Delegate to CommandTranslator.execute_command() (preprocessing + translation + execution)
-        3. Translate Windows paths → Unix paths in results
+        3. Translate Windows paths -> Unix paths in results
         4. Return formatted result
         """
         command = tool_input.get('command', '')
@@ -7734,7 +7731,7 @@ EXPAND_DELIMITER'''
         temp_files = []
 
         try:
-            # STEP 1: Translate Unix paths → Windows paths
+            # STEP 1: Translate Unix paths -> Windows paths
             if self.path_translator:
                 command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
             else:
