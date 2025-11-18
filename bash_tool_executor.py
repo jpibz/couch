@@ -9,12 +9,12 @@ import json
 import re
 import logging
 import threading
-import tiktoken
+# import tiktoken  # Not needed for testing
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator_REFACTORED import PathTranslator, CommandTranslator
+from unix_translator import PathTranslator, CommandTranslator
 
 
 class SandboxValidator:
@@ -202,6 +202,183 @@ class ToolExecutor(ABC):
     def disable(self):
         """Disable tool"""
         self.enabled = False
+
+
+class ExecutionEngine:
+    """
+    UNICO PUNTO di esecuzione subprocess.
+
+    Concentra TUTTE le chiamate subprocess in un solo posto per:
+    - Test mode: vedere cosa viene eseguito senza eseguire
+    - Logging: tracciare tutte le execution
+    - Metrics: contare tipi di execution
+    - Error handling: gestione errori centralizzata
+
+    ARCHITECTURE:
+    CommandExecutor usa ExecutionEngine, non subprocess direttamente.
+    Questo permette switching test/production in UN punto.
+    """
+
+    def __init__(self, test_mode: bool = False, logger: logging.Logger = None):
+        """
+        Initialize execution engine.
+
+        Args:
+            test_mode: If True, print commands instead of executing
+            logger: Logger instance for execution tracking
+        """
+        self.test_mode = test_mode
+        self.logger = logger or logging.getLogger('ExecutionEngine')
+
+        # Execution statistics
+        self.stats = {
+            'cmd': 0,
+            'powershell': 0,
+            'bash': 0,
+            'native': 0,
+            'total': 0
+        }
+
+    def execute_cmd(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        """
+        Execute command via cmd.exe
+
+        Args:
+            command: Command string to execute
+            **kwargs: Additional subprocess.run arguments
+
+        Returns:
+            CompletedProcess result or mock result in test mode
+        """
+        self.stats['cmd'] += 1
+        self.stats['total'] += 1
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-CMD] {command}")
+            print(f"[TEST MODE] Would execute (CMD): {command}")
+            return subprocess.CompletedProcess(
+                args=['cmd', '/c', command],
+                returncode=0,
+                stdout=f"[TEST MODE OUTPUT] cmd: {command}",
+                stderr=""
+            )
+
+        self.logger.debug(f"Executing CMD: {command}")
+        return subprocess.run(
+            ['cmd', '/c', command],
+            capture_output=True,
+            text=True,
+            **kwargs
+        )
+
+    def execute_powershell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        """
+        Execute command via PowerShell
+
+        Args:
+            command: PowerShell command string
+            **kwargs: Additional subprocess.run arguments
+
+        Returns:
+            CompletedProcess result or mock result in test mode
+        """
+        self.stats['powershell'] += 1
+        self.stats['total'] += 1
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-PowerShell] {command}")
+            print(f"[TEST MODE] Would execute (PowerShell): {command}")
+            return subprocess.CompletedProcess(
+                args=['powershell', '-Command', command],
+                returncode=0,
+                stdout=f"[TEST MODE OUTPUT] powershell: {command}",
+                stderr=""
+            )
+
+        self.logger.debug(f"Executing PowerShell: {command}")
+        return subprocess.run(
+            ['powershell', '-Command', command],
+            capture_output=True,
+            text=True,
+            **kwargs
+        )
+
+    def execute_bash(self, bash_path: str, command: str, **kwargs) -> subprocess.CompletedProcess:
+        """
+        Execute command via Git Bash
+
+        Args:
+            bash_path: Path to bash.exe
+            command: Bash command string
+            **kwargs: Additional subprocess.run arguments
+
+        Returns:
+            CompletedProcess result or mock result in test mode
+        """
+        self.stats['bash'] += 1
+        self.stats['total'] += 1
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-Git Bash] {command}")
+            print(f"[TEST MODE] Would execute (Git Bash): {command}")
+            return subprocess.CompletedProcess(
+                args=[bash_path, '-c', command],
+                returncode=0,
+                stdout=f"[TEST MODE OUTPUT] bash: {command}",
+                stderr=""
+            )
+
+        self.logger.debug(f"Executing Git Bash: {command}")
+        return subprocess.run(
+            [bash_path, '-c', command],
+            capture_output=True,
+            text=True,
+            **kwargs
+        )
+
+    def execute_native(self, bin_path: str, args: List[str], **kwargs) -> subprocess.CompletedProcess:
+        """
+        Execute native binary directly
+
+        Args:
+            bin_path: Path to binary
+            args: Command arguments
+            **kwargs: Additional subprocess.run arguments
+
+        Returns:
+            CompletedProcess result or mock result in test mode
+        """
+        self.stats['native'] += 1
+        self.stats['total'] += 1
+
+        cmd_str = f"{bin_path} {' '.join(args)}"
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-Native] {cmd_str}")
+            print(f"[TEST MODE] Would execute (Native): {cmd_str}")
+            return subprocess.CompletedProcess(
+                args=[bin_path] + args,
+                returncode=0,
+                stdout=f"[TEST MODE OUTPUT] native: {cmd_str}",
+                stderr=""
+            )
+
+        self.logger.debug(f"Executing Native: {cmd_str}")
+        return subprocess.run(
+            [bin_path] + args,
+            capture_output=True,
+            text=True,
+            **kwargs
+        )
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get execution statistics"""
+        return self.stats.copy()
+
+    def reset_stats(self):
+        """Reset execution statistics"""
+        for key in self.stats:
+            self.stats[key] = 0
 
 
 class CommandExecutor:
