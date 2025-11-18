@@ -381,35 +381,71 @@ class ExecutionEngine:
             self.stats[key] = 0
 
 
-class CommandExecutor:
+# ============================================================================
+# STRATEGIC ANALYSIS LAYER - Pipeline & Command Strategy
+# ============================================================================
+
+@dataclass
+class PipelineAnalysis:
     """
-    Command execution strategy orchestrator.
-    
+    Result of pipeline strategic analysis.
+
+    Contains all information needed to decide execution strategy.
+    """
+    has_pipeline: bool = False          # Contains | operator
+    has_chain: bool = False             # Contains &&, ||, or ;
+    has_redirection: bool = False       # Contains >, >>, <
+    has_stderr_redir: bool = False      # Contains 2>, 2>&1, |&
+    has_process_subst: bool = False     # Contains <(...) or >(...)
+    matched_pattern: Optional[str] = None     # Regex pattern matched from PIPELINE_STRATEGIES
+    complexity_level: str = 'LOW'       # HIGH, MEDIUM, LOW
+    command_count: int = 1              # Number of commands in pipeline
+    command_names: List[str] = field(default_factory=list)  # List of command names
+
+
+@dataclass
+class ExecutionStrategy:
+    """
+    Execution strategy decision for a command/pipeline.
+
+    Describes HOW to execute the command and what fallbacks are available.
+    """
+    strategy_type: str  # BASH_REQUIRED, BASH_PREFERRED, HYBRID, NATIVE, POWERSHELL
+    can_split: bool = False             # Can split pipeline into parts
+    split_points: List[int] = field(default_factory=list)  # Where to split
+    reason: str = ""                    # Why this strategy was chosen
+    fallback_strategy: Optional['ExecutionStrategy'] = None  # Fallback if primary fails
+
+
+class PipelineStrategy:
+    """
+    Pipeline strategic analyzer - MACRO level strategy.
+
     RESPONSIBILITIES:
-    - Execute bash commands on Windows
-    - Choose optimal execution strategy per command
-    - Implement complex command emulation
-    - Manage fallback chains
-    - Handle Git Bash passthrough
-    - Detect and use native binaries
-    
+    - Analyze entire pipeline structure
+    - Pattern match against known pipeline scenarios
+    - Decide overall execution strategy
+    - Determine if pipeline should be split
+    - Provide fallback strategies
+
     NOT responsible for:
-    - Syntax translation (CommandTranslator)
-    - Path translation (PathTranslator)
-    - Preprocessing (BashToolExecutor)
+    - Executing commands
+    - Translating syntax
+    - Managing subprocess
+    - Path translation
     """
-    
+
     # ========================================================================
     # STRATEGY CONFIGURATION - Pattern Cache
     # ========================================================================
-    
+
     # Commands that MUST use bash.exe (no good alternative)
     BASH_EXE_REQUIRED = {
         'complex_awk',      # awk with BEGIN/END/functions
         'complex_sed',      # sed multi-expression
         'process_subst',    # <(...) process substitution
     }
-    
+
     # Commands PREFERRED for bash.exe (best compatibility)
     BASH_EXE_PREFERRED = {
         'find', 'awk', 'sed', 'grep',  # Pattern matching
@@ -421,32 +457,9 @@ class CommandExecutor:
         'tr',                           # Character translation (locale-dependent)
         'tee',                          # Output splitting (buffering matters)
     }
-    
-    # Native Windows binaries available (Git for Windows)
-    NATIVE_BINS = {
-        'diff': 'diff.exe',
-        'tar': 'tar.exe',
-        'awk': 'awk.exe',
-        'sed': 'sed.exe',
-        'grep': 'grep.exe',
-        'jq': 'jq.exe',
-    }
-    
-    # Commands with PowerShell emulation
-    POWERSHELL_EMULATION = {
-        'curl', 'wget',                    # Invoke-WebRequest
-        'sha256sum', 'sha1sum', 'md5sum',  # Get-FileHash
-        'base64', 'timeout', 'watch',      # Utilities
-        'hexdump', 'strings',              # Binary inspection
-        'gzip', 'gunzip', 'zip', 'unzip',  # Compression
-        'column',                          # Formatting
-    }
-    
+
     # Pipeline strategies - Pattern matching for command chains
-    # Format: regex pattern → strategy
-    #
-    # CRITICAL: User (Claude) uses EXTREME pipeline acrobatics
-    # Default for pipelines MUST be bash.exe for perfect emulation
+    # Format: regex pattern → strategy type
     PIPELINE_STRATEGIES = {
         # ===== BASH.EXE REQUIRED (Complex, no alternative) =====
 
@@ -529,6 +542,428 @@ class CommandExecutor:
         r'cat\s+\S+\s*\|\s*grep\s+[^|]+$': 'powershell_ok',  # cat file | grep pattern (end)
     }
 
+    def __init__(self, git_bash_available: bool, native_bins: Dict[str, str],
+                 logger: logging.Logger = None, test_mode: bool = False):
+        """
+        Initialize PipelineStrategy.
+
+        Args:
+            git_bash_available: Whether Git Bash is available
+            native_bins: Dict of available native binaries {cmd: path}
+            logger: Logger instance
+            test_mode: If True, log strategic decisions without executing
+        """
+        self.git_bash_available = git_bash_available
+        self.native_bins = native_bins
+        self.logger = logger or logging.getLogger('PipelineStrategy')
+        self.test_mode = test_mode
+
+    def analyze_pipeline(self, command: str) -> PipelineAnalysis:
+        """
+        Analyze pipeline structure and complexity.
+
+        Args:
+            command: Full command string
+
+        Returns:
+            PipelineAnalysis with all structural information
+        """
+        analysis = PipelineAnalysis()
+
+        # Detect structural elements
+        analysis.has_pipeline = '|' in command
+        analysis.has_chain = '&&' in command or '||' in command or ';' in command
+        analysis.has_redirection = '>' in command or '<' in command
+        analysis.has_stderr_redir = '2>' in command or '|&' in command or re.search(r'2>&1', command)
+        analysis.has_process_subst = '<(' in command or '>(' in command
+
+        # Extract command names
+        if analysis.has_pipeline:
+            # Split by pipe and extract first word of each part
+            parts = command.split('|')
+            analysis.command_count = len(parts)
+            for part in parts:
+                cmd_parts = part.strip().split()
+                if cmd_parts:
+                    analysis.command_names.append(cmd_parts[0])
+        else:
+            # Single command or chain
+            cmd_parts = command.split()[0] if command.split() else ""
+            if cmd_parts:
+                analysis.command_names.append(cmd_parts)
+
+        # Pattern matching
+        for pattern, strategy_type in self.PIPELINE_STRATEGIES.items():
+            if re.search(pattern, command):
+                analysis.matched_pattern = pattern
+                break
+
+        # Determine complexity level
+        if analysis.has_process_subst:
+            analysis.complexity_level = 'HIGH'
+        elif analysis.has_pipeline and analysis.command_count > 2:
+            analysis.complexity_level = 'HIGH'
+        elif analysis.has_pipeline or analysis.has_chain:
+            analysis.complexity_level = 'MEDIUM'
+        else:
+            analysis.complexity_level = 'LOW'
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-PIPELINE-ANALYSIS] {analysis}")
+
+        return analysis
+
+    def decide_execution_strategy(self, analysis: PipelineAnalysis, command: str) -> ExecutionStrategy:
+        """
+        Decide optimal execution strategy based on analysis.
+
+        Args:
+            analysis: PipelineAnalysis from analyze_pipeline()
+            command: Original command string
+
+        Returns:
+            ExecutionStrategy with decision and fallbacks
+        """
+        # CRITICAL: Process substitution REQUIRES bash
+        if analysis.has_process_subst:
+            if self.git_bash_available:
+                return ExecutionStrategy(
+                    strategy_type='BASH_REQUIRED',
+                    reason='Process substitution requires bash.exe'
+                )
+            else:
+                # FATAL: Cannot execute without bash
+                return ExecutionStrategy(
+                    strategy_type='FAIL',
+                    reason='Process substitution requires bash.exe (not available)'
+                )
+
+        # CRITICAL: Stderr redirection should use bash
+        if analysis.has_stderr_redir:
+            if self.git_bash_available:
+                return ExecutionStrategy(
+                    strategy_type='BASH_REQUIRED',
+                    reason='Stderr redirection (2>, 2>&1, |&) requires bash.exe'
+                )
+            else:
+                # Can try PowerShell but warn
+                self.logger.warning("Stderr redirection without bash.exe - semantics may differ")
+                return ExecutionStrategy(
+                    strategy_type='POWERSHELL',
+                    reason='Stderr redirection emulation (bash.exe not available)'
+                )
+
+        # CRITICAL: Command chains need bash for correct semantics
+        if analysis.has_chain:
+            if self.git_bash_available:
+                return ExecutionStrategy(
+                    strategy_type='BASH_REQUIRED',
+                    reason='Command chain (&&, ||, ;) requires bash.exe for correct semantics'
+                )
+            else:
+                self.logger.error("Command chain without bash.exe - may behave incorrectly")
+                return ExecutionStrategy(
+                    strategy_type='POWERSHELL',
+                    reason='Command chain emulation (bash.exe not available - may fail)'
+                )
+
+        # Pipeline pattern matching
+        if analysis.matched_pattern:
+            strategy_from_pattern = None
+            for pattern, strategy_name in self.PIPELINE_STRATEGIES.items():
+                if pattern == analysis.matched_pattern:
+                    strategy_from_pattern = strategy_name
+                    break
+
+            if strategy_from_pattern == 'bash_exe_required':
+                if self.git_bash_available:
+                    return ExecutionStrategy(
+                        strategy_type='BASH_REQUIRED',
+                        reason=f'Pipeline pattern requires bash.exe: {analysis.matched_pattern}'
+                    )
+                else:
+                    self.logger.error(f"Pipeline requires bash.exe but not available: {command[:100]}")
+                    return ExecutionStrategy(
+                        strategy_type='POWERSHELL',
+                        reason='Pipeline emulation (bash.exe not available - may produce wrong results)'
+                    )
+
+            elif strategy_from_pattern == 'bash_exe_preferred':
+                if self.git_bash_available:
+                    return ExecutionStrategy(
+                        strategy_type='BASH_PREFERRED',
+                        reason=f'Pipeline pattern prefers bash.exe: {analysis.matched_pattern}',
+                        fallback_strategy=ExecutionStrategy(
+                            strategy_type='POWERSHELL',
+                            reason='PowerShell emulation fallback'
+                        )
+                    )
+                else:
+                    self.logger.debug("bash.exe preferred but not available, using emulation")
+                    return ExecutionStrategy(
+                        strategy_type='POWERSHELL',
+                        reason='Pipeline emulation (bash.exe preferred but not available)'
+                    )
+
+            elif strategy_from_pattern == 'powershell_ok':
+                return ExecutionStrategy(
+                    strategy_type='POWERSHELL',
+                    reason='Pipeline can be emulated in PowerShell'
+                )
+
+        # DEFAULT: Pipeline detected but no pattern matched
+        if analysis.has_pipeline:
+            # Check if contains complex commands
+            contains_complex = any(cmd in self.BASH_EXE_PREFERRED for cmd in analysis.command_names)
+
+            if contains_complex:
+                if self.git_bash_available:
+                    return ExecutionStrategy(
+                        strategy_type='BASH_PREFERRED',
+                        reason='Pipeline with complex commands (safety net)',
+                        fallback_strategy=ExecutionStrategy(
+                            strategy_type='POWERSHELL',
+                            reason='PowerShell emulation fallback'
+                        )
+                    )
+                else:
+                    self.logger.error(f"Complex pipeline without bash.exe: {command[:100]}")
+                    return ExecutionStrategy(
+                        strategy_type='POWERSHELL',
+                        reason='Complex pipeline emulation (bash.exe not available - may fail)'
+                    )
+            else:
+                # Simple pipeline, can try emulation
+                return ExecutionStrategy(
+                    strategy_type='POWERSHELL',
+                    reason='Simple pipeline, PowerShell emulation'
+                )
+
+        # NO PIPELINE: Single command
+        return ExecutionStrategy(
+            strategy_type='SINGLE',
+            reason='Single command (no pipeline or chain)'
+        )
+
+    def can_split_pipeline(self, command: str, analysis: PipelineAnalysis) -> Tuple[bool, List[int]]:
+        """
+        Determine if pipeline can be split into parts for hybrid execution.
+
+        This is for FUTURE optimization - not implemented in first iteration.
+
+        Args:
+            command: Command string
+            analysis: PipelineAnalysis
+
+        Returns:
+            (can_split, split_points)
+        """
+        # TODO: Implement intelligent pipeline splitting
+        # For now, always return False (execute as whole)
+        return False, []
+
+
+class ExecuteUnixSingleCommand:
+    """
+    Single Unix command executor - MICRO level strategy.
+
+    RESPONSIBILITIES:
+    - Execute ONE Unix command with optimal strategy
+    - Choose between: Simple 1:1, Native Binary, Bash Passthrough, Emulation
+    - Manage priority chain with fallbacks
+    - Interface with the 3 Translators (Simple/Pipeline/Emulative)
+
+    NOT responsible for:
+    - Analyzing pipeline structure
+    - Managing subprocess (uses ExecutionEngine)
+    - Path translation
+    - Strategic analysis (uses PipelineStrategy)
+    """
+
+    def __init__(self,
+                 simple_translator,
+                 emulative_translator,
+                 pipeline_translator,
+                 git_bash_exe: Optional[str],
+                 native_bins: Dict[str, str],
+                 execution_map: Dict[str, Callable],
+                 gitbash_converter: Callable,
+                 logger: logging.Logger = None,
+                 test_mode: bool = False):
+        """
+        Initialize ExecuteUnixSingleCommand.
+
+        Args:
+            simple_translator: SimpleTranslator instance
+            emulative_translator: EmulativeTranslator instance
+            pipeline_translator: PipelineTranslator instance
+            git_bash_exe: Path to bash.exe (optional)
+            native_bins: Dict of available native binaries
+            execution_map: Dict of command-specific executors
+            gitbash_converter: Function to convert command to git bash format
+            logger: Logger instance
+            test_mode: If True, log decisions without executing
+        """
+        self.simple = simple_translator
+        self.emulative = emulative_translator
+        self.pipeline = pipeline_translator
+        self.git_bash_exe = git_bash_exe
+        self.native_bins = native_bins
+        self.execution_map = execution_map
+        self.gitbash_converter = gitbash_converter
+        self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
+        self.test_mode = test_mode
+
+        # Commands PREFERRED for bash.exe (from PipelineStrategy)
+        self.BASH_EXE_PREFERRED = PipelineStrategy.BASH_EXE_PREFERRED
+
+    def execute_single(self, cmd_name: str, command: str, parts: List[str]) -> Tuple[str, bool]:
+        """
+        Execute single Unix command with optimal strategy.
+
+        PRIORITY CHAIN:
+        1. Bash Passthrough (BASH_EXE_PREFERRED commands) - perfect compatibility
+        2. Native Binary (grep.exe, awk.exe) - best performance
+        3. Execution Map (complex emulation) - specialized handlers
+        4. Intelligent Fallback - try multiple strategies
+
+        Args:
+            cmd_name: Command name (e.g., 'ls', 'grep')
+            command: Full command string
+            parts: Command parts [cmd, arg1, arg2, ...]
+
+        Returns:
+            Tuple[str, bool]: (executable_command, use_powershell)
+        """
+        if self.test_mode:
+            self.logger.info(f"[TEST-SINGLE-EXEC] {cmd_name}: {command}")
+
+        # ================================================================
+        # PRIORITY 1: Bash Passthrough (for PREFERRED commands)
+        # ================================================================
+        if cmd_name in self.BASH_EXE_PREFERRED and self.git_bash_exe:
+            bash_cmd = self.gitbash_converter(command)
+            if bash_cmd:
+                self.logger.debug(f"Using Git Bash for {cmd_name}")
+                return bash_cmd, False
+
+        # ================================================================
+        # PRIORITY 2: Native Binary (best performance)
+        # ================================================================
+        if cmd_name in self.native_bins:
+            self.logger.debug(f"Using native binary for {cmd_name}")
+            return command, False  # Pass through to binary
+
+        # ================================================================
+        # PRIORITY 3: Execution Map (complex emulation)
+        # ================================================================
+        if cmd_name in self.execution_map:
+            executor = self.execution_map[cmd_name]
+            self.logger.debug(f"Using emulation for {cmd_name}")
+            return executor(command, parts)
+
+        # ================================================================
+        # PRIORITY 4: Intelligent Fallback
+        # ================================================================
+        return self._intelligent_fallback(cmd_name, command, parts)
+
+    def _intelligent_fallback(self, cmd_name: str, command: str, parts: List[str]) -> Tuple[str, bool]:
+        """
+        Intelligent fallback for unknown commands.
+
+        Tries multiple strategies in order.
+        """
+        # Check if PowerShell cmdlet
+        POWERSHELL_CMDLETS = {
+            'Get-Content', 'Set-Content', 'Get-ChildItem', 'Get-Item',
+            'Select-String', 'Select-Object', 'ForEach-Object', 'Where-Object',
+            'Measure-Object', 'Sort-Object', 'Get-Unique', 'Group-Object',
+            'Compare-Object', 'Test-Path', 'New-Item', 'Remove-Item',
+            'Copy-Item', 'Move-Item', 'Rename-Item',
+            'Write-Host', 'Write-Output', 'Read-Host',
+            'powershell', 'pwsh'
+        }
+
+        if cmd_name in POWERSHELL_CMDLETS:
+            self.logger.debug(f"PowerShell cmdlet detected: {cmd_name}")
+            return command, True
+
+        # Try Git Bash as fallback
+        if self.git_bash_exe:
+            bash_cmd = self.gitbash_converter(command)
+            if bash_cmd:
+                self.logger.debug(f"Fallback: Git Bash for {cmd_name}")
+                return bash_cmd, False
+
+        # Try SimpleTranslator for 1:1 mappings
+        simple_method = getattr(self.simple, f'_translate_{cmd_name}', None)
+        if simple_method:
+            try:
+                result = simple_method(command, parts)
+                if result:
+                    self.logger.debug(f"Fallback: SimpleTranslator for {cmd_name}")
+                    return result
+            except Exception as e:
+                self.logger.error(f"SimpleTranslator failed for {cmd_name}: {e}")
+
+        # Try PipelineTranslator
+        pipeline_method = getattr(self.pipeline, f'_translate_{cmd_name}', None)
+        if pipeline_method:
+            try:
+                result = pipeline_method(command, parts)
+                if result:
+                    self.logger.debug(f"Fallback: PipelineTranslator for {cmd_name}")
+                    return result
+            except Exception as e:
+                self.logger.error(f"PipelineTranslator failed for {cmd_name}: {e}")
+
+        # Try EmulativeTranslator
+        emulative_method = getattr(self.emulative, f'_translate_{cmd_name}', None)
+        if emulative_method:
+            try:
+                result = emulative_method(command, parts)
+                if result:
+                    self.logger.debug(f"Fallback: EmulativeTranslator for {cmd_name}")
+                    return result
+            except Exception as e:
+                self.logger.error(f"EmulativeTranslator failed for {cmd_name}: {e}")
+
+        # Last resort - pass through as-is
+        self.logger.warning(f"Unknown command: {cmd_name} - passing through")
+        return command, False
+
+
+class CommandExecutor:
+    """
+    Command execution strategy orchestrator - REFACTORED.
+
+    RESPONSIBILITIES:
+    - Orchestrate command execution with strategic delegation
+    - Coordinate PipelineStrategy and ExecuteUnixSingleCommand
+    - Provide helper methods (git bash conversion, binary detection)
+    - Manage ExecutionEngine for subprocess operations
+
+    DELEGATES TO:
+    - PipelineStrategy: Pipeline analysis and strategic decisions
+    - ExecuteUnixSingleCommand: Single command execution with fallbacks
+    - ExecutionEngine: Subprocess execution
+
+    NOT responsible for:
+    - Syntax translation (CommandTranslator)
+    - Path translation (PathTranslator)
+    - Preprocessing (BashToolExecutor)
+    """
+
+    # Native Windows binaries available (Git for Windows)
+    NATIVE_BINS = {
+        'diff': 'diff.exe',
+        'tar': 'tar.exe',
+        'awk': 'awk.exe',
+        'sed': 'sed.exe',
+        'grep': 'grep.exe',
+        'jq': 'jq.exe',
+    }
+
     def __init__(self, command_translator=None,
                  git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
@@ -550,6 +985,7 @@ class CommandExecutor:
         self.git_bash_exe = git_bash_exe
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
+        self.test_mode = test_mode
 
         # ExecutionEngine - UNICO PUNTO per subprocess
         self.executor = ExecutionEngine(test_mode=test_mode, logger=self.logger)
@@ -557,9 +993,59 @@ class CommandExecutor:
         # Detect available native binaries
         self.available_bins = self._detect_native_binaries()
 
+        # ====================================================================
+        # STRATEGIC LAYER - Delegation to specialized classes
+        # ====================================================================
+
+        # Pipeline strategic analyzer (MACRO level)
+        self.pipeline_strategy = PipelineStrategy(
+            git_bash_available=bool(git_bash_exe),
+            native_bins=self.available_bins,
+            logger=self.logger,
+            test_mode=test_mode
+        )
+
+        # Single command executor (MICRO level)
+        # Needs access to translators and execution map
+        # We'll initialize this lazily when command_translator is available
+        self._single_executor = None
+
         self.logger.info(f"CommandExecutor initialized")
         self.logger.info(f"Git Bash: {'available' if git_bash_exe else 'not available'}")
         self.logger.info(f"Native binaries: {len(self.available_bins)} detected")
+
+    @property
+    def single_executor(self) -> ExecuteUnixSingleCommand:
+        """
+        Lazy initialization of ExecuteUnixSingleCommand.
+
+        Needs command_translator to be available for accessing translators.
+        """
+        if self._single_executor is None:
+            # Get translators from command_translator
+            if self.command_translator:
+                simple_translator = self.command_translator.simple
+                emulative_translator = self.command_translator.emulative
+                pipeline_translator = self.command_translator.pipeline
+            else:
+                # Fallback: no translators available
+                simple_translator = None
+                emulative_translator = None
+                pipeline_translator = None
+
+            self._single_executor = ExecuteUnixSingleCommand(
+                simple_translator=simple_translator,
+                emulative_translator=emulative_translator,
+                pipeline_translator=pipeline_translator,
+                git_bash_exe=self.git_bash_exe,
+                native_bins=self.available_bins,
+                execution_map=self._get_execution_map(),
+                gitbash_converter=self._execute_with_gitbash,
+                logger=self.logger,
+                test_mode=self.test_mode
+            )
+
+        return self._single_executor
 
     # ========================================================================
     # MAIN EXECUTION ENTRY POINT
@@ -646,201 +1132,81 @@ class CommandExecutor:
 
     def execute_bash(self, command: str, parts: List[str]) -> Tuple[str, bool]:
         """
-        Execute bash command with optimal strategy.
-        
-        This is the MAIN dispatcher - decides execution strategy.
-        
+        Execute bash command with optimal strategy - REFACTORED.
+
+        ARCHITECTURE:
+        This method is now DRAMATICALLY simplified through strategic delegation:
+
+        1. PipelineStrategy analyzes the command (MACRO level)
+        2. PipelineStrategy decides execution strategy
+        3. Based on strategy:
+           - BASH_REQUIRED/PREFERRED → Git Bash execution
+           - FAIL → Return error message
+           - SINGLE/POWERSHELL → Delegate to ExecuteUnixSingleCommand (MICRO level)
+
+        BEFORE: ~200 lines of complex conditional logic
+        AFTER: ~30 lines of clean delegation
+
         Args:
             command: Full command string
             parts: Command parts [cmd, arg1, arg2, ...]
-            
+
         Returns:
             Tuple[str, bool]: (executable_command, use_powershell)
         """
         if not parts:
             return command, False
-        
+
         cmd_name = parts[0]
-        
-        # ================================================================
-        # PIPELINE DETECTION - Check if command contains pipeline/chain
-        # ================================================================
-        
-        has_pipeline = '|' in command
-        has_chain = '&&' in command or '||' in command or ';' in command
-        has_process_subst = '<(' in command or '>(' in command
-        has_stderr_redir = '2>' in command or '|&' in command or re.search(r'2>&1', command)
+
+        if self.test_mode:
+            self.logger.info(f"[TEST-EXECUTE-BASH] {cmd_name}: {command}")
 
         # ================================================================
-        # STDERR REDIRECTION - 2>, 2>&1, |&
+        # STEP 1: PIPELINE STRATEGIC ANALYSIS (MACRO)
         # ================================================================
-        # CRITICAL: Stderr redirection operators are SHELL syntax, not command args
-        # - 2>file        redirect stderr to file
-        # - 2>&1          merge stderr to stdout
-        # - |&            pipe both stdout and stderr (bash shorthand for 2>&1 |)
-        # - 2>/dev/null   suppress error messages
-        #
-        # PowerShell emulation of these is UNRELIABLE:
-        # - _execute_grep(), _execute_awk(), etc. DON'T parse redirection
-        # - Redirection operators are treated as regular arguments
-        # - Result: syntax errors or silent failures
-        #
-        # ARTIGIANO: Don't emulate redirection. Pass to bash.exe.
 
-        if has_stderr_redir:
+        analysis = self.pipeline_strategy.analyze_pipeline(command)
+        strategy = self.pipeline_strategy.decide_execution_strategy(analysis, command)
+
+        self.logger.debug(f"Pipeline analysis: {analysis.complexity_level} complexity")
+        self.logger.debug(f"Execution strategy: {strategy.strategy_type} - {strategy.reason}")
+
+        # ================================================================
+        # STEP 2: EXECUTE BASED ON STRATEGY
+        # ================================================================
+
+        # Strategy: BASH_REQUIRED (must use bash.exe)
+        if strategy.strategy_type == 'BASH_REQUIRED':
             if self.git_bash_exe:
-                self.logger.debug(f"STDERR redirection detected (2>, 2>&1, |&) → using bash.exe")
                 bash_cmd = self._execute_with_gitbash(command)
                 if bash_cmd:
                     return bash_cmd, False
             else:
-                # No bash.exe for stderr redirection
-                # Attempt PowerShell but warn - semantics may be wrong
-                self.logger.warning(f"STDERR redirection in command but bash.exe not available: {command[:100]}")
-                self.logger.warning("PowerShell stderr semantics differ from bash - results may be incorrect")
-                # Continue to emulation attempt
+                # Should never happen (PipelineStrategy checks git_bash_available)
+                # But handle defensively
+                self.logger.error(f"BASH_REQUIRED but git_bash_exe not available: {command[:100]}")
+                return f'echo "ERROR: {strategy.reason}"', True
 
-        # ================================================================
-        # PROCESS SUBSTITUTION - <(...) >(...)
-        # ================================================================
-        # CRITICAL: Process substitution creates named pipes/file descriptors
-        # - <(cmd) runs cmd, creates FD with output
-        # - >(cmd) creates FD, runs cmd on data written to it
-        # - Sub-commands can be COMPLEX (pipelines, chains)
-        # - NO PowerShell equivalent
-        # - bash.exe handles natively and perfectly
-        #
-        # ARTIGIANO: Don't emulate. Pass to bash.exe.
-
-        if has_process_subst:
+        # Strategy: BASH_PREFERRED (prefer bash.exe but can fallback)
+        elif strategy.strategy_type == 'BASH_PREFERRED':
             if self.git_bash_exe:
-                self.logger.debug(f"Process substitution detected <(...) or >(...) → using bash.exe")
                 bash_cmd = self._execute_with_gitbash(command)
                 if bash_cmd:
                     return bash_cmd, False
-            else:
-                # NO bash.exe for process substitution - CRITICAL FAILURE
-                self.logger.error(f"Process substitution REQUIRES bash.exe: {command[:100]}")
-                self.logger.error("bash.exe not available - command will FAIL")
-                # Cannot emulate process substitution reliably
-                return f'echo "ERROR: Process substitution requires bash.exe (not available)"', True
+            # Fallback to single command execution
+            self.logger.debug("bash.exe preferred but trying emulation fallback")
+            return self.single_executor.execute_single(cmd_name, command, parts)
 
-        # ================================================================
-        # COMMAND CHAINS - && || ;
-        # ================================================================
-        # CRITICAL: Chains have different semantics in bash vs PowerShell
-        # - Exit code propagation differs
-        # - Short-circuit evaluation behavior differs
-        # - Error handling differs
-        # For PERFECT emulation, chains MUST use bash.exe
+        # Strategy: FAIL (cannot execute)
+        elif strategy.strategy_type == 'FAIL':
+            self.logger.error(f"Command cannot be executed: {strategy.reason}")
+            return f'echo "ERROR: {strategy.reason}"', True
 
-        if has_chain:
-            if self.git_bash_exe:
-                self.logger.debug(f"Command chain detected (&&, ||, ;) → using bash.exe")
-                bash_cmd = self._execute_with_gitbash(command)
-                if bash_cmd:
-                    return bash_cmd, False
-            else:
-                # No bash.exe for chain - CRITICAL
-                self.logger.error(f"Command chain requires bash.exe: {command[:100]}")
-                self.logger.error("bash.exe not available - chain execution may behave incorrectly")
-                # Continue but results may be wrong
-
-        # ================================================================
-        # PIPELINES - |
-        # ================================================================
-
-        if has_pipeline:
-            # Check pipeline strategies
-            matched_strategy = None
-            for pattern, strategy in self.PIPELINE_STRATEGIES.items():
-                if re.search(pattern, command):
-                    self.logger.debug(f"Pipeline pattern matched: {pattern} → {strategy}")
-                    matched_strategy = strategy
-
-                    if strategy == 'bash_exe_required':
-                        if self.git_bash_exe:
-                            # Must use bash.exe
-                            bash_cmd = self._execute_with_gitbash(command)
-                            if bash_cmd:
-                                return bash_cmd, False
-                        else:
-                            # CRITICAL: bash.exe REQUIRED but not available
-                            self.logger.error(f"Pipeline requires bash.exe but not available: {command[:100]}")
-                            # Try fallback anyway but warn
-                            self.logger.warning("Attempting PowerShell emulation - may produce incorrect results")
-                            break  # Continue to emulation with warning
-
-                    elif strategy == 'bash_exe_preferred':
-                        if self.git_bash_exe:
-                            # Prefer bash.exe but can fallback
-                            bash_cmd = self._execute_with_gitbash(command)
-                            if bash_cmd:
-                                return bash_cmd, False
-                        # If bash not available, continue to emulation
-                        self.logger.debug("bash.exe preferred but not available, trying emulation")
-                        break
-
-                    elif strategy == 'powershell_ok':
-                        # Can handle with PowerShell - continue to normal flow
-                        break
-
-                    # Strategy handled, exit pattern loop
-                    break
-
-            # DEFAULT SAFETY NET: Pipeline detected but no pattern matched
-            # OR pattern matched but bash.exe not available for required/preferred
-            if matched_strategy is None or (matched_strategy in ['bash_exe_required', 'bash_exe_preferred'] and not self.git_bash_exe):
-                # Check if pipeline contains any BASH_EXE_PREFERRED commands
-                contains_complex = False
-                for complex_cmd in self.BASH_EXE_PREFERRED:
-                    if complex_cmd in command:
-                        contains_complex = True
-                        break
-
-                if contains_complex or matched_strategy is None:
-                    # Complex pipeline or unknown pattern
-                    if self.git_bash_exe:
-                        self.logger.debug("Pipeline with complex commands → using bash.exe (safety net)")
-                        bash_cmd = self._execute_with_gitbash(command)
-                        if bash_cmd:
-                            return bash_cmd, False
-                    else:
-                        # NO bash.exe for complex pipeline - CRITICAL situation
-                        # User requirement: PERFECT emulation at ANY cost
-                        # If we can't guarantee perfect, we should fail honestly
-                        self.logger.error(f"Complex pipeline requires bash.exe: {command[:100]}")
-                        self.logger.error("bash.exe not available - emulation may fail or produce wrong results")
-                        # Continue to try emulation but user is warned
-        
-        # ================================================================
-        # TIER 1: Pattern Cache - Fast path
-        # ================================================================
-        
-        # Strategy 1: Git Bash passthrough (100% compatibility)
-        if cmd_name in self.BASH_EXE_PREFERRED and self.git_bash_exe:
-            bash_cmd = self._execute_with_gitbash(command)
-            if bash_cmd:
-                self.logger.debug(f"Using Git Bash for {cmd_name}")
-                return bash_cmd, False
-        
-        # Strategy 2: Native binary (best performance)
-        if cmd_name in self.available_bins:
-            self.logger.debug(f"Using native binary for {cmd_name}")
-            return command, False  # Pass through to binary
-        
-        # Strategy 3: Check execution map (complex emulation)
-        execution_map = self._get_execution_map()
-        if cmd_name in execution_map:
-            executor = execution_map[cmd_name]
-            self.logger.debug(f"Using emulation for {cmd_name}")
-            return executor(command, parts)
-        
-        # ================================================================
-        # TIER 2: Fallback - Unknown patterns
-        # ================================================================
-        
-        return self._intelligent_fallback(command, parts)
+        # Strategy: POWERSHELL or SINGLE (delegate to micro-level executor)
+        else:
+            # Delegate to ExecuteUnixSingleCommand for micro-level strategy
+            return self.single_executor.execute_single(cmd_name, command, parts)
     
     # ========================================================================
     # BINARY DETECTION
@@ -912,75 +1278,7 @@ class CommandExecutor:
         # Match Windows absolute paths
         pattern = r'[A-Za-z]:[/\\][^\s;|&<>()]*'
         return re.sub(pattern, convert_path, cmd)
-    
-    # ========================================================================
-    # FALLBACK STRATEGY
-    # ========================================================================
-    
-    def _intelligent_fallback(self, command: str, parts: List[str]) -> Tuple[str, bool]:
-        """
-        Fallback for unknown command patterns.
 
-        Tries multiple strategies in order.
-
-        FIX #14: Recognize PowerShell cmdlets and powershell command itself
-        """
-        cmd_name = parts[0]
-
-        # FIX #14: Detect PowerShell cmdlets and commands
-        POWERSHELL_CMDLETS = {
-            'Get-Content', 'Set-Content', 'Get-ChildItem', 'Get-Item',
-            'Select-String', 'Select-Object', 'ForEach-Object', 'Where-Object',
-            'Measure-Object', 'Sort-Object', 'Get-Unique', 'Group-Object',
-            'Compare-Object', 'Test-Path', 'New-Item', 'Remove-Item',
-            'Copy-Item', 'Move-Item', 'Rename-Item',
-            'Write-Host', 'Write-Output', 'Read-Host',
-            'powershell', 'pwsh'  # PowerShell executables themselves
-        }
-
-        # Check if this is a PowerShell cmdlet
-        if cmd_name in POWERSHELL_CMDLETS:
-            self.logger.debug(f"PowerShell cmdlet detected: {cmd_name}")
-            # Return command as-is but flag for PowerShell execution
-            return command, True
-
-        # Try Git Bash as fallback
-        if self.git_bash_exe:
-            bash_cmd = self._execute_with_gitbash(command)
-            if bash_cmd:
-                self.logger.debug(f"Fallback: Git Bash for {cmd_name}")
-                return bash_cmd, False
-
-        # Delegate to CommandTranslator for simple 1:1 mappings
-        if self.command_translator:
-            result = self._delegate_to_translator(command, parts)
-            if result:
-                return result
-
-        # Last resort - pass through as-is
-        self.logger.warning(f"Unknown command: {cmd_name} - passing through")
-        return command, False
-    
-    def _delegate_to_translator(self, command: str, parts: List[str]) -> Optional[Tuple[str, bool]]:
-        """
-        Delegate to CommandTranslator for simple mappings.
-        
-        Returns None if translator unavailable or method not found.
-        """
-        if not self.command_translator:
-            return None
-        
-        cmd_name = parts[0]
-        method = getattr(self.command_translator, f'_translate_{cmd_name}', None)
-        
-        if method:
-            try:
-                return method(command, parts)
-            except Exception as e:
-                self.logger.error(f"Translator delegation failed for {cmd_name}: {e}")
-        
-        return None
-    
     # ========================================================================
     # EXECUTION MAP - Command dispatcher
     # ========================================================================
