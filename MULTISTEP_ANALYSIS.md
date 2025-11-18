@@ -79,38 +79,39 @@ Un metodo è MULTISTEP se:
 
 **PATTERN IDENTIFICATO:** Solo 2 metodi preprocessing sono MULTISTEP (eseguono + usano output):
 
-| Line | Method | MULTISTEP | Note |
-|------|--------|-----------|------|
-| 6227 | `__init__` | FALSE | Inizializzazione |
-| 6341 | `_detect_git_bash` | FALSE | Detection |
-| 6377 | `_detect_system_python` | FALSE | Detection |
-| 6413 | `_expand_braces` | FALSE | Pattern expansion |
-| 6483 | `_process_heredocs` | **TRUE** | ✅ Esegue bash.exe per expand vars → usa stdout |
-| 6663 | `_process_substitution` | **TRUE** | ✅ Esegue comando → usa stdout per temp file |
-| 6758 | `_process_command_substitution_recursive` | FALSE | Pattern finder |
-| 6858 | `_translate_substitution_content` | FALSE | Translator |
-| 6957 | `_expand_variables` | FALSE | Variable expansion |
-| 7200 | `_preprocess_test_commands` | FALSE | Pattern replace |
-| 7230 | `_expand_aliases` | FALSE | Alias replace |
-| 7259 | `_process_subshell` | FALSE | Pattern remove |
-| 7287 | `_process_command_grouping` | FALSE | Pattern remove |
-| 7309 | `_process_xargs` | FALSE | Pattern conversion |
-| 7336 | `_process_find_exec` | FALSE | Pattern conversion |
-| 7363 | `_process_escape_sequences` | FALSE | Escape handling |
-| 7377 | `_has_control_structures` | FALSE | Boolean detection |
-| 7382 | `_convert_control_structures_to_script` | FALSE | Creates script file, no exec |
-| 7414 | `_bash_to_powershell` | FALSE | Conversion |
-| 7519 | `_convert_test_to_powershell` | FALSE | Conversion |
-| 7559 | `_cleanup_temp_files` | FALSE | Cleanup |
-| 7569 | `_needs_powershell` | FALSE | Boolean detection |
-| 7622 | `_adapt_for_powershell` | FALSE | Conversion |
-| 7657 | `_setup_virtual_env` | FALSE | Setup/init |
-| 7705 | `execute` | FALSE | Delegation, no multi-step |
-| 7768 | `_setup_environment` | FALSE | Setup dict |
-| 7789 | `_format_result` | FALSE | Formatting |
-| 7823 | `get_definition` | FALSE | Returns dict |
+| Line | Method | MULTISTEP | DUPLICATO | Note |
+|------|--------|-----------|-----------|------|
+| 6227 | `__init__` | FALSE | CommandTranslator, CommandExecutor | Inizializzazione |
+| 6341 | `_detect_git_bash` | FALSE | - | Detection |
+| 6377 | `_detect_system_python` | FALSE | - | Detection |
+| 6413 | `_expand_braces` | FALSE | CommandTranslator | Pattern expansion |
+| 6483 | `_process_heredocs` | **TRUE** | CommandTranslator (quasi-identico) | ✅ Esegue bash.exe per expand vars → usa stdout |
+| 6663 | `_process_substitution` | **TRUE** | CommandTranslator (quasi-identico) | ✅ Esegue comando → usa stdout per temp file |
+| 6758 | `_process_command_substitution_recursive` | FALSE | CommandTranslator | Pattern finder |
+| 6858 | `_translate_substitution_content` | FALSE | CommandTranslator | Translator |
+| 6957 | `_expand_variables` | FALSE | CommandTranslator | Variable expansion |
+| 7200 | `_preprocess_test_commands` | FALSE | CommandTranslator | Pattern replace |
+| 7230 | `_expand_aliases` | FALSE | CommandTranslator | Alias replace |
+| 7259 | `_process_subshell` | FALSE | CommandTranslator | Pattern remove |
+| 7287 | `_process_command_grouping` | FALSE | CommandTranslator | Pattern remove |
+| 7309 | `_process_xargs` | FALSE | CommandTranslator | Pattern conversion |
+| 7336 | `_process_find_exec` | FALSE | CommandTranslator | Pattern conversion |
+| 7363 | `_process_escape_sequences` | FALSE | CommandTranslator | Escape handling |
+| 7377 | `_has_control_structures` | FALSE | CommandTranslator | Boolean detection |
+| 7382 | `_convert_control_structures_to_script` | FALSE | CommandTranslator | Creates script file, no exec |
+| 7414 | `_bash_to_powershell` | FALSE | CommandTranslator | Conversion |
+| 7519 | `_convert_test_to_powershell` | FALSE | CommandTranslator | Conversion |
+| 7559 | `_cleanup_temp_files` | FALSE | CommandTranslator | Cleanup |
+| 7569 | `_needs_powershell` | FALSE | CommandTranslator | Boolean detection |
+| 7622 | `_adapt_for_powershell` | FALSE | CommandTranslator | Conversion |
+| 7657 | `_setup_virtual_env` | FALSE | - | Setup/init |
+| 7705 | `execute` | FALSE | CommandExecutor | Delegation, no multi-step |
+| 7768 | `_setup_environment` | FALSE | - | Setup dict |
+| 7789 | `_format_result` | FALSE | - | Formatting |
+| 7823 | `get_definition` | FALSE | - | Returns dict |
 
 **RESULT: 28/28 metodi analizzati - 2 MULTISTEP trovati**
+**DUPLICATI: 21/28 metodi sono duplicati in CommandTranslator**
 
 ---
 
@@ -391,6 +392,37 @@ Un metodo è MULTISTEP se:
 
 ---
 
+## ANALISI DUPLICATI
+
+**TOTALE DUPLICATI: 107 metodi su 269 (39.8%)**
+
+### Pattern Architetturale Identificato
+
+**CommandTranslator è LEGACY/MONOLITICO:**
+- Contiene versioni vecchie di TUTTI i metodi preprocessing (da BashToolExecutor)
+- Contiene versioni vecchie di TUTTI i _translate_* (da Simple/Pipeline/Emulative Translator)
+- Dovrebbe solo **delegare** ai translator specializzati, non contenere implementazioni
+
+**Architettura ATTUALE (refactored):**
+1. **BashToolExecutor** → preprocessing (versioni ATTIVE)
+2. **CommandExecutor** → strategy + execution
+3. **SimpleTranslator + PipelineTranslator + EmulativeTranslator** → translation (versioni ATTIVE)
+4. **CommandTranslator** → orchestra i 3 translator (delega, non implementa)
+
+**Duplicati principali:**
+- BashToolExecutor ↔ CommandTranslator: 21 metodi (preprocessing)
+- SimpleTranslator ↔ CommandTranslator: 22 metodi (_translate_* semplici)
+- PipelineTranslator ↔ CommandTranslator: 23 metodi (_translate_* pipeline)
+- EmulativeTranslator ↔ CommandTranslator: 32 metodi (_translate_* complessi)
+
+**Status duplicati MULTISTEP:**
+- `_process_heredocs`: quasi-identici (solo diff: `_setup_environment()` vs `_get_default_environment()`)
+- `_process_substitution`: quasi-identici (solo diff: `_setup_environment()` vs `_get_default_environment()`)
+
+Vedi **DUPLICATE_ANALYSIS.md** per dettagli completi.
+
+---
+
 ## CONCLUSIONE
 
 Solo **4 metodi su 269** (1.5%) sono MULTISTEP e necessitano del workaround testmode AS IF.
@@ -399,4 +431,12 @@ Tutti e 4 sono metodi preprocessing che:
 1. Eseguono comando via executor
 2. Usano lo stdout per processare step successivo
 
-**AZIONE NECESSARIA:** Aggiungere testmode workaround AS IF solo a questi 4 metodi.
+**AZIONE NECESSARIA:**
+1. Aggiungere testmode workaround AS IF a questi 4 metodi:
+   - BashToolExecutor._process_heredocs (line 6483) ← ATTIVO
+   - BashToolExecutor._process_substitution (line 6663) ← ATTIVO
+   - CommandTranslator._process_heredocs (line 9737) ← LEGACY
+   - CommandTranslator._process_substitution (line 9907) ← LEGACY
+
+2. **PRIORITÀ:** Modificare SOLO le versioni in BashToolExecutor (attive).
+   Le versioni in CommandTranslator sono legacy e potrebbero essere rimosse in futuro.
