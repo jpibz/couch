@@ -28,119 +28,154 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 
 ### Breakdown Duplicazioni
 
-| Categoria | Metodi | Pattern Duplicazione |
-|-----------|--------|---------------------|
-| **Preprocessing** | 14 | BashToolExecutor ↔ CommandTranslator |
-| **Variable Expansion** | 20 | BashToolExecutor ↔ CommandTranslator |
-| **Control Structures** | 8 | BashToolExecutor ↔ CommandTranslator |
-| **Translation Simple** | 21 | CommandTranslator ↔ SimpleTranslator |
-| **Translation Emulative** | 27 | CommandTranslator ↔ EmulativeTranslator |
-| **Translation Pipeline** | 22 | CommandTranslator ↔ PipelineTranslator |
-| **Helper Parsing** | 4 | Multi-class (3 classi) |
-| **Helper AWK/JQ** | 4 | Multi-class (3 classi) |
-| **Execution** | 1 | BashToolExecutor ↔ CommandExecutor |
-| **Core** | 1 | Tutte le 6 classi |
-| **TOTALE** | **122** | |
+| Categoria | Metodi | Pattern Duplicazione | Destinazione Finale |
+|-----------|--------|---------------------|---------------------|
+| **Preprocessing** | 14 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
+| **Variable Expansion** | 20 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
+| **Control Structures** | 8 | BashToolExecutor ↔ CommandTranslator | **🆕 BashPreprocessor** (nuova classe) |
+| **Translation Simple** | 21 | CommandTranslator ↔ SimpleTranslator | SimpleTranslator |
+| **Translation Emulative** | 27 | CommandTranslator ↔ EmulativeTranslator | EmulativeTranslator |
+| **Translation Pipeline** | 22 | CommandTranslator ↔ PipelineTranslator | PipelineTranslator |
+| **Helper Parsing** | 4 | Multi-class (3 classi) | EmulativeTranslator |
+| **Helper AWK/JQ** | 4 | Multi-class (3 classi) | EmulativeTranslator |
+| **Execution** | 1 | BashToolExecutor ↔ CommandExecutor | Entrambe (ruoli diversi) |
+| **Core** | 1 | Tutte le 6 classi | Tutte (__init__) |
+| **TOTALE** | **122** | | |
 
 ---
 
 ## CATEGORIA 1: PREPROCESSING (14 metodi)
 
 **Pattern**: BashToolExecutor ↔ CommandTranslator
-**Destinazione finale**: BashToolExecutor (mantiene logica preprocessing)
+**Destinazione finale**: 🆕 **BashPreprocessor** (nuova classe da creare)
 
-| # | Metodo | Presente In | Destinazione |
-|---|--------|-------------|--------------|
-| 1 | `_adapt_for_powershell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 2 | `_bash_to_powershell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 3 | `_cleanup_temp_files` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 4 | `_needs_powershell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 5 | `_preprocess_test_commands` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 6 | `_process_command_grouping` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 7 | `_process_command_substitution_recursive` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 8 | `_process_escape_sequences` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 9 | `_process_find_exec` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 10 | `_process_heredocs` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 11 | `_process_subshell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 12 | `_process_substitution` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 13 | `_process_xargs` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 14 | `_translate_substitution_content` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
+| # | Metodo | Presente In | Destinazione Finale |
+|---|--------|-------------|-------------------|
+| 1 | `_adapt_for_powershell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 2 | `_bash_to_powershell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 3 | `_cleanup_temp_files` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 4 | `_needs_powershell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 5 | `_preprocess_test_commands` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 6 | `_process_command_grouping` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 7 | `_process_command_substitution_recursive` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 8 | `_process_escape_sequences` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 9 | `_process_find_exec` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 10 | `_process_heredocs` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 11 | `_process_subshell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 12 | `_process_substitution` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 13 | `_process_xargs` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 14 | `_translate_substitution_content` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
 
-**Rationale**:
-- Questi metodi gestiscono preprocessing bash (heredocs, substitution, command grouping)
-- BashToolExecutor è il punto di ingresso che fa preprocessing PRIMA di passare a Executor/Translator
-- CommandTranslator li ha duplicati ma verrà eliminata
-- Vanno TUTTI in BashToolExecutor
+**Rationale** (AGGIORNATO):
+- ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
+- ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
+- Questi metodi gestiscono preprocessing bash syntax (heredocs, substitution, command grouping)
+- BashPreprocessor sarà usata da BashToolExecutor PRIMA di passare a CommandExecutor
+- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (preprocessing) → CommandExecutor (execution)
 
 **Azione**:
-1. Verificare che BashToolExecutor abbia le implementazioni complete
-2. Eliminare da CommandTranslator quando viene rimossa
+1. Creare nuova classe `BashPreprocessor` nell'architettura finale
+2. Migrare i 14 metodi da BashToolExecutor/CommandTranslator → BashPreprocessor
+3. BashToolExecutor usa `self.preprocessor = BashPreprocessor()` per delegare
+4. Eliminare da BashToolExecutor e CommandTranslator
+
+**Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
 
 ---
 
 ## CATEGORIA 2: VARIABLE EXPANSION (20 metodi)
 
 **Pattern**: BashToolExecutor ↔ CommandTranslator
-**Destinazione finale**: BashToolExecutor (mantiene logica variable expansion)
+**Destinazione finale**: 🆕 **BashPreprocessor** (nuova classe da creare)
 
-| # | Metodo | Presente In | Destinazione |
-|---|--------|-------------|--------------|
-| 1 | `_expand_aliases` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 2 | `_expand_braces` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 3 | `_expand_variables` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 4 | `expand_arithmetic` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 5 | `expand_assign` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 6 | `expand_case` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 7 | `expand_default` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 8 | `expand_grouping` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 9 | `expand_length` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 10 | `expand_remove_prefix` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 11 | `expand_remove_suffix` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 12 | `expand_simple_brace` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 13 | `expand_simple_var` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 14 | `expand_single_brace` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 15 | `expand_substitution` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 16 | `find_substitutions` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 17 | `is_complex_substitution` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 18 | `remove_subshell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 19 | `replace_input_substitution` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 20 | `replace_output_substitution` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
+| # | Metodo | Presente In | Destinazione Finale |
+|---|--------|-------------|-------------------|
+| 1 | `_expand_aliases` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 2 | `_expand_braces` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 3 | `_expand_variables` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 4 | `expand_arithmetic` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 5 | `expand_assign` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 6 | `expand_case` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 7 | `expand_default` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 8 | `expand_grouping` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 9 | `expand_length` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 10 | `expand_remove_prefix` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 11 | `expand_remove_suffix` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 12 | `expand_simple_brace` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 13 | `expand_simple_var` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 14 | `expand_single_brace` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 15 | `expand_substitution` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 16 | `find_substitutions` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 17 | `is_complex_substitution` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 18 | `remove_subshell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 19 | `replace_input_substitution` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 20 | `replace_output_substitution` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
 
-**Rationale**:
-- Variable expansion è preprocessing bash (${var}, $((expr)), ${var:-default}, etc.)
-- BashToolExecutor gestisce TUTTO il preprocessing
-- Separazione responsabilità: Preprocessing (BashToolExecutor) vs Translation (Translators)
+**Rationale** (AGGIORNATO):
+- ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
+- ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
+- Variable expansion è preprocessing bash fondamentale (${var}, $((expr)), ${var:-default}, brace expansion, etc.)
+- Deve avvenire PRIMA dell'esecuzione nel BashPreprocessor
+- Separazione responsabilità: BashToolExecutor (coordinator) → BashPreprocessor (variable expansion) → CommandExecutor (execution)
+
+**Pattern bash gestiti**:
+- Simple: `$var`, `${var}`
+- Default/Assign: `${var:-default}`, `${var:=value}`
+- Length/Substring: `${#var}`, `${var:offset:length}`
+- Pattern removal: `${var#pattern}`, `${var%pattern}`
+- Case conversion: `${var^^}`, `${var,,}`
+- Brace expansion: `{a,b,c}`, `{1..10}`
+- Arithmetic: `$((expr))`
+- Command/Process substitution: `$(cmd)`, `` `cmd` ``, `<(cmd)`, `>(cmd)`
 
 **Azione**:
-1. Mantenere in BashToolExecutor
-2. Eliminare da CommandTranslator
+1. Creare nuova classe `BashPreprocessor` con questi 20 metodi
+2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
+3. BashToolExecutor delega expansion a BashPreprocessor
+4. Eliminare da BashToolExecutor e CommandTranslator
+
+**Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
 
 ---
 
 ## CATEGORIA 3: CONTROL STRUCTURES (8 metodi)
 
 **Pattern**: BashToolExecutor ↔ CommandTranslator
-**Destinazione finale**: BashToolExecutor (mantiene logica control structures)
+**Destinazione finale**: 🆕 **BashPreprocessor** (nuova classe da creare)
 
-| # | Metodo | Presente In | Destinazione |
-|---|--------|-------------|--------------|
-| 1 | `_convert_control_structures_to_script` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 2 | `_convert_test_to_powershell` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 3 | `_has_control_structures` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 4 | `convert_double_test` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 5 | `convert_for` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 6 | `convert_if` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 7 | `convert_test` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
-| 8 | `convert_while` | BashToolExecutor, CommandTranslator | **BashToolExecutor** |
+| # | Metodo | Presente In | Destinazione Finale |
+|---|--------|-------------|-------------------|
+| 1 | `_convert_control_structures_to_script` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 2 | `_convert_test_to_powershell` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 3 | `_has_control_structures` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 4 | `convert_double_test` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 5 | `convert_for` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 6 | `convert_if` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 7 | `convert_test` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
+| 8 | `convert_while` | BashToolExecutor, CommandTranslator | **🆕 BashPreprocessor** |
 
-**Rationale**:
-- Control structures (if, for, while, test) sono preprocessing bash
-- Conversione da bash syntax a PowerShell/script
-- BashToolExecutor gestisce preprocessing
+**Rationale** (AGGIORNATO):
+- ❌ **INCORRETTA destinazione precedente**: Questi metodi NON appartengono a BashToolExecutor (deve essere thin coordinator)
+- ✅ **CORRETTA destinazione**: Vanno in NUOVA classe **BashPreprocessor**
+- Control structures bash (if, for, while, test) devono essere convertiti PRIMA dell'esecuzione
+- Conversione if/for/while → PowerShell è preprocessing bash syntax
+- Strettamente correlato a variable expansion (variabili nei loop devono essere espanse)
+
+**Control structures gestiti**:
+- `if [ condition ]; then ... fi` → PowerShell if
+- `if [[ condition ]]; then ... fi` → PowerShell if (extended test)
+- `for var in list; do ... done` → PowerShell foreach
+- `while [ condition ]; do ... done` → PowerShell while
+- `[ test ]` → `Test-Path`, `-eq`, `-ne`, `-gt`, etc.
+- `[[ test ]]` → PowerShell conditional expressions
 
 **Azione**:
-1. Mantenere in BashToolExecutor
-2. Eliminare da CommandTranslator
+1. Creare nuova classe `BashPreprocessor` con questi 8 metodi
+2. Migrare da BashToolExecutor/CommandTranslator → BashPreprocessor
+3. BashToolExecutor delega control structures conversion a BashPreprocessor
+4. Eliminare da BashToolExecutor e CommandTranslator
+
+**Vedi**: `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi
 
 ---
 
@@ -368,13 +403,13 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 
 ---
 
-## SUMMARY TABLE - DESTINAZIONE FINALE
+## SUMMARY TABLE - DESTINAZIONE FINALE (AGGIORNATO)
 
 | Categoria | Metodi | Destinazione Finale | Azione |
 |-----------|--------|-------------------|---------|
-| Preprocessing | 14 | **BashToolExecutor** | Eliminare da CommandTranslator |
-| Variable Expansion | 20 | **BashToolExecutor** | Eliminare da CommandTranslator |
-| Control Structures | 8 | **BashToolExecutor** | Eliminare da CommandTranslator |
+| Preprocessing | 14 | **🆕 BashPreprocessor** (nuova classe) | Creare BashPreprocessor, migrare da BashToolExecutor/CommandTranslator |
+| Variable Expansion | 20 | **🆕 BashPreprocessor** (nuova classe) | Creare BashPreprocessor, migrare da BashToolExecutor/CommandTranslator |
+| Control Structures | 8 | **🆕 BashPreprocessor** (nuova classe) | Creare BashPreprocessor, migrare da BashToolExecutor/CommandTranslator |
 | Translation Simple | 21 | **SimpleTranslator** | Eliminare da CommandTranslator |
 | Translation Emulative | 27 | **EmulativeTranslator** | Eliminare da CommandTranslator |
 | Translation Pipeline | 22 | **PipelineTranslator** | Eliminare da CommandTranslator |
@@ -384,20 +419,25 @@ Dall'analisi delle 6 classi coinvolte nel refactoring sono stati identificati **
 | Core | 1 | **Tutte** | Nessuna (costruttori) |
 | **TOTALE** | **122** | | |
 
+**NOTA IMPORTANTE**: Le prime 3 categorie (42 metodi totali) vanno in una **NUOVA classe BashPreprocessor** che deve essere creata nell'architettura finale. Vedi `PREPROCESSING_DESTINATION_ANALYSIS.md` per dettagli completi.
+
 ---
 
-## IMPACT ANALYSIS
+## IMPACT ANALYSIS (AGGIORNATO)
 
-### Metodi da Eliminare per Classe
+### Metodi da Eliminare/Migrare per Classe
 
 | Classe | Metodi da Eliminare | Destinazione |
 |--------|-------------------|--------------|
-| **CommandTranslator** | 127 metodi → **ELIMINARE INTERA CLASSE** | Distribuiti tra Simple/Emulative/Pipeline + BashToolExecutor |
+| **CommandTranslator** | 127 metodi → **ELIMINARE INTERA CLASSE** | Distribuiti tra Simple/Emulative/Pipeline + **BashPreprocessor** |
 | **CommandExecutor** | 8 metodi (helper duplicati) | EmulativeTranslator |
-| **BashToolExecutor** | 0 (mantiene tutti) | - |
+| **BashToolExecutor** | **42 metodi (preprocessing/expansion/control)** | **🆕 BashPreprocessor** |
+| **🆕 BashPreprocessor** | **NUOVA CLASSE** - riceve 42 metodi | Da BashToolExecutor + CommandTranslator |
 | **SimpleTranslator** | 0 (mantiene tutti) | - |
 | **EmulativeTranslator** | 0 (mantiene + riceve 12 helper) | - |
 | **PipelineTranslator** | 0 (mantiene tutti) | - |
+
+**Nota Importante**: BashPreprocessor è una NUOVA classe che deve essere creata nell'architettura finale per gestire preprocessing bash, variable expansion e control structures.
 
 ### Lines of Code Impact
 
