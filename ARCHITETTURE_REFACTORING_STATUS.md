@@ -30,19 +30,22 @@ CommandExecutor
 │
 └─ ExecuteUnixSingleCommand (LIVELLO MICRO - singolo comando)
    │
-   ├─ execute_single(cmd_name, command, parts) → (cmd, use_powershell)
+   ├─ execute_single(command) → (cmd, use_powershell)
+   │  │  ACCETTA: Stringa comando COMPLETA (come CommandEmulator)
+   │  │  SCOMPONE: Internamente per estrarre cmd_name
+   │  │  USA cmd_name: SOLO per scegliere strategia
    │
-   ├─ PRIORITY 1: SimpleTranslator (1:1 commands)
-   │  └─ pwd, cd, mkdir, rm, mv, etc.
+   ├─ PRIORITY 1: Bash Passthrough (BASH_EXE_PREFERRED commands)
+   │  └─ find, complex awk/sed, xargs - perfect compatibility
    │
    ├─ PRIORITY 2: Native Binary (best performance)
    │  └─ tar.exe, grep.exe, awk.exe, sed.exe
    │
-   ├─ PRIORITY 3: Bash Passthrough (perfect compatibility)
-   │  └─ find, complex awk/sed, xargs
+   ├─ PRIORITY 3: Execution Map (complex emulation)
+   │  └─ Specialized handlers for complex commands
    │
-   └─ PRIORITY 4: EmulativeTranslator (fallback)
-      └─ PowerShell emulation
+   └─ PRIORITY 4: Intelligent Fallback
+      └─ PowerShell cmdlets, SimpleTranslator, PipelineTranslator
       └─ Gestisce priorità e fallback INCROCIATI
          (se native binary fallisce → bash passthrough → emulation)
 ```
@@ -205,26 +208,34 @@ class ExecuteUnixSingleCommand:
         self.test_mode = test_mode
         self.logger = logger
 
-    def execute_single(self, cmd_name: str, command: str,
-                      parts: List[str]) -> Tuple[str, bool]:
+    def execute_single(self, command: str) -> Tuple[str, bool]:
         """
         Esegue singolo comando con strategia ottimale.
 
+        DESIGN PRINCIPLE (come CommandEmulator):
+        - Accetta stringa comando COMPLETA
+        - Scompone INTERNAMENTE per estrarre cmd_name
+        - Usa cmd_name SOLO per scegliere strategia esecuzione
+        - Chi chiama NON deve scomporre il comando
+
         PRIORITY CHAIN:
-        1. SimpleTranslator (pwd, cd, mkdir) - instant 1:1
+        1. Bash Passthrough (BASH_EXE_PREFERRED) - perfect compatibility
         2. Native Binary (grep.exe, awk.exe) - best performance
-        3. Bash Passthrough (complex find, awk) - perfect compatibility
-        4. EmulativeTranslator (fallback) - PowerShell emulation
+        3. Execution Map (complex emulation) - specialized handlers
+        4. Intelligent Fallback - PowerShell/SimpleTranslator/PipelineTranslator
+
+        Args:
+            command: Full command string (e.g., "grep -r pattern .")
 
         Returns:
             (executable_command, use_powershell)
 
         Example Flow:
-            cmd_name = "grep"
-            1. Try SimpleTranslator → not 1:1 command
-            2. Try grep.exe → found! Return ("grep.exe -r pattern .", False)
-            3. If grep.exe not found → Try bash.exe
-            4. If bash fails → Emulate with PowerShell Select-String
+            command = "grep -r pattern ."
+            → Internally extracts cmd_name = "grep"
+            → Checks BASH_EXE_PREFERRED → no
+            → Checks native_bins → found grep.exe
+            → Returns ("grep.exe -r pattern .", False)
         """
         pass
 
@@ -340,8 +351,8 @@ class CommandExecutor:
                                                  timeout, cwd, env)
 
         else:  # NATIVE or POWERSHELL
-            parts = command.split()
-            return self.single_executor.execute_single(parts[0], command, parts)
+            # Delega a ExecuteUnixSingleCommand - passa SOLO il comando
+            return self.single_executor.execute_single(command)
 
     def execute_bash(self, command, parts):
         """
@@ -368,7 +379,8 @@ class CommandExecutor:
             return self._execute_hybrid_pipeline(command, strategy.split_points)
 
         else:  # NATIVE or POWERSHELL
-            return self.single_executor.execute_single(parts[0], command, parts)
+            # Delega a ExecuteUnixSingleCommand - passa SOLO il comando
+            return self.single_executor.execute_single(command)
 ```
 
 ---
@@ -530,9 +542,12 @@ Flow:
 2. PipelineStrategy.decide_execution_strategy()
    → strategy_type: POWERSHELL (simple 1:1)
 
-3. ExecuteUnixSingleCommand.execute_single()
-   → _try_simple_translation()
-   → SUCCESS: "Get-Location"
+3. ExecuteUnixSingleCommand.execute_single("pwd")
+   → Internally: cmd_name = "pwd" (extracted from command)
+   → Checks BASH_EXE_PREFERRED → no
+   → Checks native_bins → no
+   → Checks execution_map → yes (_execute_pwd)
+   → Returns PowerShell command
 
 Result: PowerShell Get-Location (instant, no subprocess)
 ```
@@ -548,9 +563,11 @@ Flow:
 2. PipelineStrategy.decide_execution_strategy()
    → strategy_type: NATIVE_BINS
 
-3. ExecuteUnixSingleCommand.execute_single()
-   → _try_simple_translation() → SKIP
-   → _try_native_binary() → SUCCESS: "grep.exe -r 'pattern' ."
+3. ExecuteUnixSingleCommand.execute_single("grep -r 'pattern' .")
+   → Internally: cmd_name = "grep" (extracted from command)
+   → Checks BASH_EXE_PREFERRED → no
+   → Checks native_bins → yes (grep.exe available)
+   → Returns "grep.exe -r 'pattern' ." (pass-through)
 
 Result: Native grep.exe execution (best performance)
 ```
