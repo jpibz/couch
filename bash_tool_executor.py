@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, SimpleTranslator, PipelineTranslator, EmulativeTranslator
+from unix_translator import PathTranslator, CommandEmulator
 
 
 class SandboxValidator:
@@ -531,7 +531,8 @@ class ExecutionEngine:
                 raise RuntimeError(f"Virtual environment not found: {venv_path}")
         
         # Check default BASH_TOOL_ENV
-        default_venv = self.path_translator.workspace_root / 'BASH_TOOL_ENV'
+        path_translator = PathTranslator()
+        default_venv = path_translator.workspace_root / 'BASH_TOOL_ENV'
         
         if default_venv.exists():
             self.logger.info(f"Using default venv: {default_venv}")
@@ -983,40 +984,17 @@ class ExecuteUnixSingleCommand:
     - Strategic analysis (uses PipelineStrategy)
     """
 
-    def __init__(self,
-                 simple_translator,
-                 emulative_translator,
-                 pipeline_translator,
-                 git_bash_exe: Optional[str],
-                 native_bins: Dict[str, str],
-                 execution_map: Dict[str, Callable],
-                 gitbash_converter: Callable,
-                 logger: logging.Logger = None,
+    def __init__(self, logger: logging.Logger = None,
                  test_mode: bool = False):
         """
         Initialize ExecuteUnixSingleCommand.
 
         Args:
-            simple_translator: SimpleTranslator instance
-            emulative_translator: EmulativeTranslator instance
-            pipeline_translator: PipelineTranslator instance
-            git_bash_exe: Path to bash.exe (optional)
-            native_bins: Dict of available native binaries
-            execution_map: Dict of command-specific executors
-            gitbash_converter: Function to convert command to git bash format
             logger: Logger instance
             test_mode: If True, log decisions without executing
         """
-        # Initialize translators (SimpleTranslator, EmulativeTranslator, PipelineTranslator)
-        # CommandTranslator has been eliminated - use translators directly
-        self.simple_translator = SimpleTranslator()
-        self.emulative_translator = EmulativeTranslator()
-        self.pipeline_translator = PipelineTranslator()
-        
-        self.git_bash_exe = git_bash_exe
-        self.native_bins = native_bins
-        self.execution_map = execution_map
-        self.gitbash_converter = gitbash_converter
+        self.command_emulator = CommandEmulator()
+
         self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
         self.test_mode = test_mode
 
@@ -1453,8 +1431,7 @@ class CommandExecutor:
         'jq': 'jq.exe',
     }
 
-    def __init__(self, simple_translator=None, emulative_translator=None, pipeline_translator=None,
-                 git_bash_exe=None, claude_home_unix="/home/claude", logger=None, test_mode=False):
+    def __init__(self, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
         Initialize CommandExecutor.
 
@@ -1464,18 +1441,11 @@ class CommandExecutor:
         commands reach this layer.
 
         Args:
-            simple_translator: SimpleTranslator instance
-            emulative_translator: EmulativeTranslator instance
-            pipeline_translator: PipelineTranslator instance
-            git_bash_exe: Path to bash.exe (optional)
             claude_home_unix: Unix home directory for tilde expansion (default: /home/claude)
             logger: Logger instance
             test_mode: If True, use ExecutionEngine in test mode
         """
-        self.simple_translator = simple_translator
-        self.emulative_translator = emulative_translator
-        self.pipeline_translator = PipelineTranslator()
-        self.git_bash_exe = git_bash_exe
+
         self.claude_home_unix = claude_home_unix
         self.logger = logger or logging.getLogger('CommandExecutor')
         self.test_mode = test_mode
@@ -1492,7 +1462,6 @@ class CommandExecutor:
 
         # Pipeline strategic analyzer (MACRO level)
         self.pipeline_strategy = PipelineStrategy(
-            git_bash_available=bool(git_bash_exe),
             native_bins=self.available_bins,
             logger=self.logger,
             test_mode=test_mode
@@ -1504,7 +1473,6 @@ class CommandExecutor:
         self._single_executor = None
 
         self.logger.info(f"CommandExecutor initialized")
-        self.logger.info(f"Git Bash: {'available' if git_bash_exe else 'not available'}")
         self.logger.info(f"Native binaries: {len(self.available_bins)} detected")
 
     @property
@@ -1515,19 +1483,9 @@ class CommandExecutor:
         Uses translators passed during initialization.
         """
         if self._single_executor is None:
-            # Use translators from instance variables
-            simple_translator = self.simple_translator
-            emulative_translator = self.emulative_translator
-            pipeline_translator = self.pipeline_translator
+
 
             self._single_executor = ExecuteUnixSingleCommand(
-                simple_translator=simple_translator,
-                emulative_translator=emulative_translator,
-                pipeline_translator=pipeline_translator,
-                git_bash_exe=self.git_bash_exe,
-                native_bins=self.available_bins,
-                execution_map=self._get_execution_map(),
-                gitbash_converter=self._execute_with_gitbash,
                 logger=self.logger,
                 test_mode=self.test_mode
             )
