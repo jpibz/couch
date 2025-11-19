@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from translators import PathTranslator, CommandEmulator
+from unix_translator import PathTranslator, CommandEmulator
 
 
 # ============================================================================
