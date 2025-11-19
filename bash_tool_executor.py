@@ -251,40 +251,58 @@ class ExecutionEngine:
         # Python and virtual environment setup
         self.workspace_root = workspace_root
 
-        # Detect or use provided Python executable
-        if python_executable:
-            self.python_executable = python_executable
+        if test_mode:
+            # TEST MODE: Skip detection and setup, assume everything is available
+            self.python_executable = python_executable or 'python'
+            self.virtual_env = None
+            self.environment = os.environ.copy()
+
+            # Populate availability dict with all capabilities as True
+            self.available = {
+                'python': True,
+                'bash': True,
+            }
+            # Add all native binaries as available
+            for cmd in self.NATIVE_BINS.keys():
+                self.available[cmd] = True
+
+            self.logger.info("[TEST MODE] All capabilities set as available")
         else:
-            # Detect system Python inline
-            self.python_executable = None
-            for cmd in ['python', 'python.exe']:
-                try:
-                    result = subprocess.run(
-                        [cmd, '--version'],
-                        capture_output=True,
-                        timeout=2,
-                        text=True
-                    )
-                    if result.returncode == 0:
-                        version = result.stdout.strip()
-                        self.logger.info(f"Detected Python: {cmd} ({version})")
-                        self.python_executable = cmd
-                        break
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    continue
+            # PRODUCTION MODE: Perform real detection and setup
+            # Detect or use provided Python executable
+            if python_executable:
+                self.python_executable = python_executable
+            else:
+                # Detect system Python inline
+                self.python_executable = None
+                for cmd in ['python', 'python.exe']:
+                    try:
+                        result = subprocess.run(
+                            [cmd, '--version'],
+                            capture_output=True,
+                            timeout=2,
+                            text=True
+                        )
+                        if result.returncode == 0:
+                            version = result.stdout.strip()
+                            self.logger.info(f"Detected Python: {cmd} ({version})")
+                            self.python_executable = cmd
+                            break
+                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                        continue
 
-            if not self.python_executable:
-                self.logger.critical("CRITICAL: Python not found in system PATH")
-                self.logger.critical("Bash tool requires Python for full functionality")
+                if not self.python_executable:
+                    self.logger.critical("CRITICAL: Python not found in system PATH")
+                    self.logger.critical("Bash tool requires Python for full functionality")
 
-        # Setup virtual environment
-        self.virtual_env = self._setup_virtual_env(virtual_env)
+            # Setup virtual environment
+            self.virtual_env = self._setup_virtual_env(virtual_env)
 
-        # Setup execution environment
-        self.environment = self._setup_environment()
+            # Setup execution environment
+            self.environment = self._setup_environment()
 
-        # Detect available binaries and capabilities
-        self.available = self._detect_available_capabilities()
+            # Detect available binaries and capabilities
+            self.available = self._detect_available_capabilities()
 
         # Execution statistics
         self.stats = {
