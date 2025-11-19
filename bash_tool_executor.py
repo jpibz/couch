@@ -219,16 +219,72 @@ class ExecutionEngine:
     Questo permette switching test/production in UN punto.
     """
 
-    def __init__(self, test_mode: bool = False, logger: logging.Logger = None):
+    # Native Windows binaries to detect
+    NATIVE_BINS = {
+        'diff': 'diff.exe',
+        'tar': 'tar.exe',
+        'awk': 'awk.exe',
+        'sed': 'sed.exe',
+        'grep': 'grep.exe',
+        'jq': 'jq.exe',
+    }
+
+    def __init__(self,
+                 test_mode: bool = False,
+                 logger: logging.Logger = None,
+                 python_executable: Optional[str] = None,
+                 workspace_root: Optional[Path] = None,
+                 virtual_env: Optional[str] = None):
         """
         Initialize execution engine.
 
         Args:
             test_mode: If True, print commands instead of executing
             logger: Logger instance for execution tracking
+            python_executable: Path to Python executable (for venv setup)
+            workspace_root: Workspace root directory (for venv setup)
+            virtual_env: Virtual environment path (optional)
         """
         self.test_mode = test_mode
         self.logger = logger or logging.getLogger('ExecutionEngine')
+
+        # Python and virtual environment setup
+        self.workspace_root = workspace_root
+
+        # Detect or use provided Python executable
+        if python_executable:
+            self.python_executable = python_executable
+        else:
+            # Detect system Python inline
+            self.python_executable = None
+            for cmd in ['python', 'python.exe']:
+                try:
+                    result = subprocess.run(
+                        [cmd, '--version'],
+                        capture_output=True,
+                        timeout=2,
+                        text=True
+                    )
+                    if result.returncode == 0:
+                        version = result.stdout.strip()
+                        self.logger.info(f"Detected Python: {cmd} ({version})")
+                        self.python_executable = cmd
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    continue
+
+            if not self.python_executable:
+                self.logger.critical("CRITICAL: Python not found in system PATH")
+                self.logger.critical("Bash tool requires Python for full functionality")
+
+        # Setup virtual environment
+        self.virtual_env = self._setup_virtual_env(virtual_env)
+
+        # Setup execution environment
+        self.environment = self._setup_environment()
+
+        # Detect available binaries and capabilities
+        self.available = self._detect_available_capabilities()
 
         # Execution statistics
         self.stats = {
@@ -238,6 +294,59 @@ class ExecutionEngine:
             'native': 0,
             'total': 0
         }
+
+    def _detect_available_capabilities(self) -> Dict[str, bool]:
+        """
+        Detect all available capabilities at initialization.
+
+        Returns:
+            Dict mapping capability name to availability status
+        """
+        capabilities = {}
+
+        # Python availability
+        capabilities['python'] = bool(self.python_executable)
+
+        # Git Bash availability - detect inline
+        bash_found = False
+        for path in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"]:
+            if Path(path).exists():
+                self.logger.info(f"Found Git Bash: {path}")
+                bash_found = True
+                break
+
+        if not bash_found:
+            try:
+                result = subprocess.run(
+                    ['where', 'bash.exe'],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if result.returncode == 0:
+                    bash_path = result.stdout.strip().split('\n')[0]
+                    if 'Git' in bash_path:
+                        self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                        bash_found = True
+            except:
+                pass
+
+        capabilities['bash'] = bash_found
+
+        # Native binaries availability
+        for cmd, binary in self.NATIVE_BINS.items():
+            try:
+                result = subprocess.run(
+                    ['where', binary],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                capabilities[cmd] = (result.returncode == 0)
+            except Exception:
+                capabilities[cmd] = False
+
+        return capabilities
 
     def execute_cmd(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
@@ -372,13 +481,14 @@ class ExecutionEngine:
         pattern = r'[A-Za-z]:[/\\][^\s;|&<>()]*'
         return re.sub(pattern, convert_path, cmd)
 
-    def execute_native(self, bin_path: str, args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    def execute_native(self, bin_path: str, args: List[str], test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute native binary directly
 
         Args:
             bin_path: Path to binary
             args: Command arguments
+            test_mode_stdout: Optional stdout to return in test mode (AS IF execution succeeded)
             **kwargs: Additional subprocess.run arguments
 
         Returns:
@@ -392,10 +502,14 @@ class ExecutionEngine:
         if self.test_mode:
             self.logger.info(f"[TEST-Native] {cmd_str}")
             print(f"[TEST MODE] Would execute (Native): {cmd_str}")
+
+            # Use AS IF stdout if provided, otherwise echo
+            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] native: {cmd_str}"
+
             return subprocess.CompletedProcess(
                 args=[bin_path] + args,
                 returncode=0,
-                stdout=f"[TEST MODE OUTPUT] native: {cmd_str}",
+                stdout=stdout,
                 stderr=""
             )
 
@@ -416,109 +530,34 @@ class ExecutionEngine:
         for key in self.stats:
             self.stats[key] = 0
 
+    def is_available(self, name: str) -> bool:
+        """
+        Check if a binary/functionality is available.
+
+        Args:
+            name: Name to check - can be:
+                  - "python": Check if Python executable is configured
+                  - "bash": Check if Git Bash is available
+                  - Native bin name (e.g., "grep", "awk"): Check if binary exists in PATH
+
+        Returns:
+            True if available, False otherwise
+        """
+        return self.available.get(name.lower(), False)
+
     # ==================== SETUP/DETECTION METHODS ====================
 
-    def _detect_git_bash(self) -> Optional[str]:
-        """
-        Detect Git Bash executable.
-
-        Standard locations:
-        - C:\Program Files\Git\bin\bash.exe
-        - C:\Program Files (x86)\Git\bin\bash.exe
-        """
-        candidates = [
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ]
-
-        for path in candidates:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                return path
-
-        # Try PATH
-        try:
-            result = subprocess.run(
-                ['where', 'bash.exe'],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                bash_path = result.stdout.strip().split('\n')[0]
-                if 'Git' in bash_path:
-                    self.logger.info(f"Found Git Bash in PATH: {bash_path}")
-                    return bash_path
-        except:
-            pass
-
-        return None
-    
-    def _detect_native_binaries(self) -> Dict[str, str]:
-        """
-        Detect which native Windows binaries are available.
-        
-        Returns:
-            Dict of available binaries {cmd: binary_path}
-        """
-        available = {}
-        
-        for cmd, binary in self.NATIVE_BINS.items():
-            try:
-                result = subprocess.run(
-                    ['where', binary],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if result.returncode == 0:
-                    available[cmd] = binary
-            except Exception:
-                pass
-        
-        return available
-
-    def _detect_system_python(self) -> str:
-        """
-        Detect system Python - FAIL FAST if missing.
-        
-        Bash tool without Python is INCOMPLETE and should be disabled.
-        """
-        candidates = ['python', 'python.exe']
-        
-        for cmd in candidates:
-            try:
-                result = subprocess.run(
-                    [cmd, '--version'], 
-                    capture_output=True, 
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode == 0:
-                    version = result.stdout.strip()
-                    self.logger.info(f"Detected Python: {cmd} ({version})")
-                    return cmd
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                continue
-        
-        # Python NOT FOUND - tool is incomplete
-        self.logger.critical("CRITICAL: Python not found in system PATH")
-        self.logger.critical("Bash tool requires Python for full functionality")
-        
-        # Disable tool immediately
-        self.enabled = False
-        
-        raise RuntimeError(
-            "Python executable not found in system PATH. "
-            "Bash tool is incomplete without Python and has been disabled. "
-            "Install Python or provide python_executable parameter explicitly."
-        )
-    
     def _setup_virtual_env(self, virtual_env: Optional[str]) -> Optional[Path]:
         """Setup virtual environment - BLOCKING at initialization is acceptable.
-        
+
         Creates venv at initialization if missing. System blocks once at startup,
         then venv path exists for all subsequent operations.
+
+        Args:
+            virtual_env: Optional virtual environment path
+
+        Returns:
+            Path to virtual environment or None
         """
         if virtual_env:
             # User specified venv
@@ -529,29 +568,37 @@ class ExecutionEngine:
             else:
                 self.logger.error(f"Specified venv not found: {venv_path}")
                 raise RuntimeError(f"Virtual environment not found: {venv_path}")
-        
-        # Check default BASH_TOOL_ENV
-        default_venv = self.path_translator.workspace_root / 'BASH_TOOL_ENV'
-        
+
+        # Check default BASH_TOOL_ENV (only if workspace_root is set)
+        if not self.workspace_root:
+            self.logger.warning("No workspace_root configured, skipping virtual environment setup")
+            return None
+
+        default_venv = self.workspace_root / 'BASH_TOOL_ENV'
+
         if default_venv.exists():
             self.logger.info(f"Using default venv: {default_venv}")
             return default_venv
-        
+
         # Create default venv - BLOCKING but only at initialization
+        if not self.python_executable:
+            self.logger.warning("No Python executable configured, cannot create virtual environment")
+            return None
+
         try:
             self.logger.warning(f"Virtual environment missing. Creating at: {default_venv}")
             self.logger.warning("This is a ONE-TIME operation that may take up to 60 seconds...")
-            
+
             subprocess.run(
                 [self.python_executable, '-m', 'venv', str(default_venv)],
                 check=True,
                 timeout=60,
                 capture_output=True
             )
-            
+
             self.logger.info(f"Virtual environment created successfully: {default_venv}")
             return default_venv
-            
+
         except subprocess.TimeoutExpired:
             self.logger.error("Virtual environment creation timed out")
             raise RuntimeError("Failed to create virtual environment: timeout after 60s")
