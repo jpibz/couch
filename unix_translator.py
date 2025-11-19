@@ -337,16 +337,26 @@ class CommandEmulator:
     """
 
     def __init__(self):
-        """Initialize SimpleTranslator"""
-        # Command map with all translators (73 commands)
+        """Initialize CommandEmulator"""
+        # Command map with all translators (70 commands)
 
-        # QUICK COMMANDS: Simple 1:1 translations (< 20 lines)
-        # These are fast, lightweight PowerShell translations
+        # QUICK COMMANDS: Simple/medium complexity (< 100 lines PowerShell)
+        # These are fast, efficient PowerShell translations for common commands
+        # HEAVY commands (>= 100 lines) require Bash Git or complex emulation:
+        # tar, jq, gzip, ln, grep, hexdump, join, uniq, split, awk, sort, diff, sed, curl
         self.quick_commands = {
+            # < 20 lines - Very simple
             'pwd', 'ps', 'chmod', 'chown', 'df', 'true', 'false',
             'whoami', 'hostname', 'which', 'sleep', 'cd', 'basename',
-            'dirname', 'kill', 'mkdir', 'mv', 'yes', 'env', 'printenv',
-            'export'
+            'dirname', 'kill', 'mkdir', 'sha256sum', 'sha1sum', 'md5sum',
+            'mv', 'yes', 'env', 'printenv', 'wget', 'export',
+            # 20-49 lines - Simple
+            'file', 'stat', 'realpath', 'tee', 'find', 'touch', 'readlink',
+            'seq', 'wc', 'du', 'echo', 'date',
+            # 50-99 lines - Medium but still reasonably quick
+            'head', 'tail', 'rm', 'watch', 'base64', 'cat', 'tr', 'strings',
+            'zip', 'cp', 'ls', 'test', 'cut', 'unzip', 'paste', 'comm',
+            'timeout', 'gunzip', 'column'
         }
 
         self.command_map = {
@@ -475,22 +485,27 @@ class CommandEmulator:
 
     def is_quick_command(self, cmd_name: str) -> bool:
         """
-        Check if command is "quick" (simple 1:1 or brief PowerShell script).
+        Check if command is "quick" (< 100 lines PowerShell implementation).
 
-        QUICK COMMANDS are:
-        - Simple 1:1 translations (< 20 lines of PowerShell)
-        - Fast execution (no subprocess overhead)
-        - Lightweight PowerShell scripts
+        QUICK COMMANDS (56 total, < 100 lines):
+        - Common commands: ls, cat, rm, cp, echo, head, tail, find, etc.
+        - Fast to moderately fast PowerShell translations
+        - Covers ~80% of typical Unix command usage
+
+        HEAVY COMMANDS (14 total, >= 100 lines):
+        - grep, sed, awk, curl, diff, jq, sort, tar, gzip, etc.
+        - Complex emulation requiring Bash Git for best compatibility
+        - Should be handled by Bash Git (Priority 3) or heavy script (Priority 4)
 
         Used by ExecuteUnixSingleCommand to decide execution strategy:
-        - Quick commands: Use CommandEmulator (fast, inline)
-        - Non-quick commands: Try Bash Git or heavy script
+        - Quick commands: Use CommandEmulator (Priority 2)
+        - Heavy commands: Try Bash Git (Priority 3) or heavy script (Priority 4)
 
         Args:
             cmd_name: Command name (e.g., 'ls', 'grep', 'pwd')
 
         Returns:
-            True if quick command, False if requires heavy processing
+            True if quick command (< 100 lines), False if heavy (>= 100 lines)
         """
         return cmd_name in self.quick_commands
 
