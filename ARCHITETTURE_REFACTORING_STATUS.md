@@ -525,26 +525,9 @@ class CommandExecutor:
         if strategy.strategy_type in ['BASH_REQUIRED', 'BASH_PREFERRED']:
             return self.execution_engine.execute_bash(self.git_bash_exe, command)
 
-        else:  # NATIVE or POWERSHELL - MICRO level
-            parts = command.split()
-            cmd_name = parts[0]
-
-            # Esecuzione tattica singolo comando
-            translated_cmd, use_powershell = self.single_executor.execute_single(
-                cmd_name=cmd_name,
-                command=command,
-                parts=parts,
-                execution_engine=self.execution_engine,  # Dependency injection
-                git_bash_exe=self.git_bash_exe,
-                native_bins=self.available_bins
-            )
-
-            # Esecuzione con ExecutionEngine
-            if use_powershell:
-                return self.execution_engine.execute_powershell(translated_cmd)
-            else:
-                return self.execution_engine.execute_cmd(translated_cmd)
-```
+        else:  # NATIVE or POWERSHELL
+            # Delega a ExecuteUnixSingleCommand - passa SOLO il comando
+            return self.single_executor.execute_single(command)
 
 ---
 
@@ -570,23 +553,9 @@ class CommandExecutor:
 
 ### DOPO (Architettura Pulita)
 
-```
-✅ CommandEmulator UNICO (73 comandi in command_map)
-   → Unificazione logica: tutti emulano comandi Unix
-   → Categorizzazione chiara: SIMPLE/MEDIUM/COMPLEX
-   → Metodi marcati FALLBACK quando executor ha _execute_*
-
-✅ ExecuteUnixSingleCommand semplificato (2 parametri init)
-   → Una sola dipendenza: CommandEmulator
-   → ExecutionEngine iniettato a runtime (dependency injection)
-   → Logica fallback pulita e lineare
-
-✅ ExecutionEngine potenziato
-   → Python venv detection & setup automatico
-   → Capabilities detection (self.available dict)
-   → Test mode bypass
-   → execute_native() con Python environment
-   → is_available(name) per query capabilities
+        else:  # NATIVE or POWERSHELL
+            # Delega a ExecuteUnixSingleCommand - passa SOLO il comando
+            return self.single_executor.execute_single(command)
 ```
 
 ---
@@ -745,7 +714,12 @@ Result: Full bash.exe execution (perfect compatibility)
 
 **Beneficio**: Single point of truth per execution environment
 
-### 7.3 Perché Dependency Injection in ExecuteUnixSingleCommand?
+3. ExecuteUnixSingleCommand.execute_single("pwd")
+   → Internally: cmd_name = "pwd" (extracted from command)
+   → Checks BASH_EXE_PREFERRED → no
+   → Checks native_bins → no
+   → Checks execution_map → yes (_execute_pwd)
+   → Returns PowerShell command
 
 **PRIMA**: ExecuteUnixSingleCommand con 7 attributi instance
 ```python
@@ -755,10 +729,24 @@ self.execution_map = execution_map
 # Accoppiamento forte
 ```
 
-**DOPO**: Dependency injection a runtime
-```python
-def execute_single(self, ..., execution_engine, git_bash_exe, native_bins):
-    # Accoppiamento debole, testabilità migliorata
+### Esempio 2: Native Binary
+```bash
+Input: "grep -r 'pattern' ."
+
+Flow:
+1. PipelineStrategy.analyze_pipeline()
+   → No pipeline, complexity: LOW
+
+2. PipelineStrategy.decide_execution_strategy()
+   → strategy_type: NATIVE_BINS
+
+3. ExecuteUnixSingleCommand.execute_single("grep -r 'pattern' .")
+   → Internally: cmd_name = "grep" (extracted from command)
+   → Checks BASH_EXE_PREFERRED → no
+   → Checks native_bins → yes (grep.exe available)
+   → Returns "grep.exe -r 'pattern' ." (pass-through)
+
+Result: Native grep.exe execution (best performance)
 ```
 
 **Beneficio**: Testabilità, flessibilità, nessuno stato mutabile
