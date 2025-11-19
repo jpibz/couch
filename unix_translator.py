@@ -337,8 +337,52 @@ class CommandEmulator:
     """
 
     def __init__(self):
-        """Initialize SimpleTranslator"""
-        # Command map with all translators (73 commands)
+        """Initialize CommandEmulator"""
+        # Command map with all translators (70 commands)
+
+        # QUICK COMMANDS: ALWAYS fast execution (27 comandi)
+        # Based on OUTPUT analysis, NOT method line count
+        # See COMMANDEMULATOR_OUTPUT_ANALYSIS.md for full classification
+        #
+        # TIER 1: CMD 1:1 - Native Windows commands (22 comandi)
+        # TIER 2: PowerShell single cmdlet - No pipeline (5 comandi)
+        #
+        # Excluded from quick_commands:
+        # - TIER 3: Conditional (16) - PS only for complex flags
+        # - TIER 4: PS Pipeline (20) - Medium complexity
+        # - TIER 5: PS Complex (14) - Heavy, prefer Bash Git
+        self.quick_commands = {
+            # TIER 1: CMD 1:1 - Direct Windows commands (instant)
+            'basename',   # echo filename
+            'cd',         # cd /d path
+            'chmod',      # no-op echo
+            'chown',      # no-op echo
+            'cp',         # copy /y
+            'df',         # wmic logicaldisk
+            'env',        # set / echo %VAR%
+            'export',     # set VAR=value
+            'false',      # exit /b 1
+            'hostname',   # hostname
+            'kill',       # taskkill
+            'mkdir',      # mkdir
+            'mv',         # move /y
+            'printenv',   # set / echo %VAR%
+            'ps',         # tasklist
+            'pwd',        # cd
+            'rm',         # del / rmdir
+            'sleep',      # timeout /t
+            'true',       # exit /b 0
+            'wget',       # curl -o/-O
+            'which',      # where
+            'whoami',     # echo %USERNAME%
+
+            # TIER 2: PowerShell single cmdlet - No pipeline (very fast)
+            'dirname',    # (Get-Item).Directory.FullName
+            'find',       # Get-ChildItem -Recurse
+            'md5sum',     # Get-FileHash -Algorithm MD5
+            'sha1sum',    # Get-FileHash -Algorithm SHA1
+            'sha256sum'   # Get-FileHash -Algorithm SHA256
+        }
 
         self.command_map = {
             # ===== SIMPLE 1:1 TRANSLATIONS (< 20 righe) =====
@@ -463,7 +507,33 @@ class CommandEmulator:
             return translated
 
         return unix_command
-    
+
+    def is_quick_command(self, cmd_name: str) -> bool:
+        """
+        Check if command is "quick" (< 100 lines PowerShell implementation).
+
+        QUICK COMMANDS (56 total, < 100 lines):
+        - Common commands: ls, cat, rm, cp, echo, head, tail, find, etc.
+        - Fast to moderately fast PowerShell translations
+        - Covers ~80% of typical Unix command usage
+
+        HEAVY COMMANDS (14 total, >= 100 lines):
+        - grep, sed, awk, curl, diff, jq, sort, tar, gzip, etc.
+        - Complex emulation requiring Bash Git for best compatibility
+        - Should be handled by Bash Git (Priority 3) or heavy script (Priority 4)
+
+        Used by ExecuteUnixSingleCommand to decide execution strategy:
+        - Quick commands: Use CommandEmulator (Priority 2)
+        - Heavy commands: Try Bash Git (Priority 3) or heavy script (Priority 4)
+
+        Args:
+            cmd_name: Command name (e.g., 'ls', 'grep', 'pwd')
+
+        Returns:
+            True if quick command (< 100 lines), False if heavy (>= 100 lines)
+        """
+        return cmd_name in self.quick_commands
+
     def _translate_ls(self, cmd: str, parts):
         """Translate ls with FULL flag support - ALL flags implemented"""
         flags = []
