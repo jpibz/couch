@@ -340,23 +340,48 @@ class CommandEmulator:
         """Initialize CommandEmulator"""
         # Command map with all translators (70 commands)
 
-        # QUICK COMMANDS: Simple/medium complexity (< 100 lines PowerShell)
-        # These are fast, efficient PowerShell translations for common commands
-        # HEAVY commands (>= 100 lines) require Bash Git or complex emulation:
-        # tar, jq, gzip, ln, grep, hexdump, join, uniq, split, awk, sort, diff, sed, curl
+        # QUICK COMMANDS: ALWAYS fast execution (27 comandi)
+        # Based on OUTPUT analysis, NOT method line count
+        # See COMMANDEMULATOR_OUTPUT_ANALYSIS.md for full classification
+        #
+        # TIER 1: CMD 1:1 - Native Windows commands (22 comandi)
+        # TIER 2: PowerShell single cmdlet - No pipeline (5 comandi)
+        #
+        # Excluded from quick_commands:
+        # - TIER 3: Conditional (16) - PS only for complex flags
+        # - TIER 4: PS Pipeline (20) - Medium complexity
+        # - TIER 5: PS Complex (14) - Heavy, prefer Bash Git
         self.quick_commands = {
-            # < 20 lines - Very simple
-            'pwd', 'ps', 'chmod', 'chown', 'df', 'true', 'false',
-            'whoami', 'hostname', 'which', 'sleep', 'cd', 'basename',
-            'dirname', 'kill', 'mkdir', 'sha256sum', 'sha1sum', 'md5sum',
-            'mv', 'yes', 'env', 'printenv', 'wget', 'export',
-            # 20-49 lines - Simple
-            'file', 'stat', 'realpath', 'tee', 'find', 'touch', 'readlink',
-            'seq', 'wc', 'du', 'echo', 'date',
-            # 50-99 lines - Medium but still reasonably quick
-            'head', 'tail', 'rm', 'watch', 'base64', 'cat', 'tr', 'strings',
-            'zip', 'cp', 'ls', 'test', 'cut', 'unzip', 'paste', 'comm',
-            'timeout', 'gunzip', 'column'
+            # TIER 1: CMD 1:1 - Direct Windows commands (instant)
+            'basename',   # echo filename
+            'cd',         # cd /d path
+            'chmod',      # no-op echo
+            'chown',      # no-op echo
+            'cp',         # copy /y
+            'df',         # wmic logicaldisk
+            'env',        # set / echo %VAR%
+            'export',     # set VAR=value
+            'false',      # exit /b 1
+            'hostname',   # hostname
+            'kill',       # taskkill
+            'mkdir',      # mkdir
+            'mv',         # move /y
+            'printenv',   # set / echo %VAR%
+            'ps',         # tasklist
+            'pwd',        # cd
+            'rm',         # del / rmdir
+            'sleep',      # timeout /t
+            'true',       # exit /b 0
+            'wget',       # curl -o/-O
+            'which',      # where
+            'whoami',     # echo %USERNAME%
+
+            # TIER 2: PowerShell single cmdlet - No pipeline (very fast)
+            'dirname',    # (Get-Item).Directory.FullName
+            'find',       # Get-ChildItem -Recurse
+            'md5sum',     # Get-FileHash -Algorithm MD5
+            'sha1sum',    # Get-FileHash -Algorithm SHA1
+            'sha256sum'   # Get-FileHash -Algorithm SHA256
         }
 
         self.command_map = {
