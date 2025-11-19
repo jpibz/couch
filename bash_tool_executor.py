@@ -283,7 +283,8 @@ class ExecutionEngine:
         self.path_translator = PathTranslator()
         # Python and virtual environment setup
         self.workspace_root = self.path_translator.get_workspace_root()
-
+        self.bash_path = None
+        
         if test_mode:
             # TEST MODE: Skip detection and setup, assume everything is available
             self.python_executable = 'python'
@@ -302,35 +303,31 @@ class ExecutionEngine:
             self.logger.info("[TEST MODE] All capabilities set as available")
         else:
             # PRODUCTION MODE: Perform real detection and setup
-            # Detect or use provided Python executable
-            if python_executable:
-                self.python_executable = python_executable
-            else:
-                # Detect system Python inline
-                self.python_executable = None
-                for cmd in ['python', 'python.exe']:
-                    try:
-                        result = subprocess.run(
-                            [cmd, '--version'],
-                            capture_output=True,
-                            timeout=2,
-                            text=True
-                        )
-                        if result.returncode == 0:
-                            version = result.stdout.strip()
-                            self.logger.info(f"Detected Python: {cmd} ({version})")
-                            self.python_executable = cmd
-                            break
-                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                        continue
+            # Detect system Python inline
+            self.python_executable = None
+            for cmd in ['python', 'python.exe']:
+                try:
+                    result = subprocess.run(
+                        [cmd, '--version'],
+                        capture_output=True,
+                        timeout=2,
+                        text=True
+                    )
+                    if result.returncode == 0:
+                        version = result.stdout.strip()
+                        self.logger.info(f"Detected Python: {cmd} ({version})")
+                        self.python_executable = cmd
+                        break
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    continue
 
-                if not self.python_executable:
-                    self.logger.critical("CRITICAL: Python not found in system PATH")
-                    self.logger.critical("Bash tool requires Python for full functionality")
+            if not self.python_executable:
+                self.logger.critical("CRITICAL: Python not found in system PATH")
+                self.logger.critical("Bash tool requires Python for full functionality")
 
             # Setup virtual environment
-            self.virtual_env = self._setup_virtual_env(virtual_env)
-
+            self.virtual_env = self._setup_virtual_env()
+    
             # Setup execution environment
             self.environment = self._setup_environment()
 
@@ -375,9 +372,9 @@ class ExecutionEngine:
                     timeout=2
                 )
                 if result.returncode == 0:
-                    bash_path = result.stdout.strip().split('\n')[0]
-                    if 'Git' in bash_path:
-                        self.logger.info(f"Found Git Bash in PATH: {bash_path}")
+                    self.bash_path = result.stdout.strip().split('\n')[0]
+                    if 'Git' in self.bash_path:
+                        self.logger.info(f"Found Git Bash in PATH: {self.bash_path}")
                         bash_found = True
             except:
                 pass
@@ -473,7 +470,7 @@ class ExecutionEngine:
             **kwargs
         )
 
-    def execute_bash(self, bash_path: str, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
+    def execute_bash(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via Git Bash
 
@@ -497,7 +494,7 @@ class ExecutionEngine:
             stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] bash: {command}"
 
             return subprocess.CompletedProcess(
-                args=[bash_path, '-c', command],
+                args=[self.bash_path, '-c', command],
                 returncode=0,
                 stdout=stdout,
                 stderr=""
@@ -508,7 +505,7 @@ class ExecutionEngine:
 
         self.logger.debug(f"Executing Git Bash: {git_command}")
         return subprocess.run(
-            [bash_path, '-c', command],
+            [self.bash_path, '-c', command],
             capture_output=True,
             text=True,
             **kwargs
@@ -1087,10 +1084,6 @@ class ExecuteUnixSingleCommand:
     """
 
     def __init__(self,
-                 execution_engine: 'ExecutionEngine',
-                 command_emulator: CommandEmulator,
-                 git_bash_exe: Optional[str],
-                 git_bash_converter: Callable,
                  logger: logging.Logger = None,
                  test_mode: bool = False):
         """
@@ -1104,12 +1097,10 @@ class ExecuteUnixSingleCommand:
             logger: Logger instance
             test_mode: If True, log decisions without executing
         """
-        self.engine = execution_engine
-        self.emulator = command_emulator
-        self.git_bash_exe = git_bash_exe
-        self.gitbash_converter = git_bash_converter
         self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
         self.test_mode = test_mode
+        self.engine = ExecutionEngine( self.logger, self.test_mode)
+        self.emulator = CommandEmulator()
 
     def execute_single(self, command: str) -> Tuple[str, bool]:
         """
@@ -1159,7 +1150,7 @@ class ExecuteUnixSingleCommand:
         # ================================================================
         if self.engine.is_available(cmd_name):
             self.logger.debug(f"Strategy: Native binary ({cmd_name}.exe)")
-            return command, False  # Pass through to native binary
+            return self.engine.execute_native(cmd_name, parts[1:])
 
         # ================================================================
         # PRIORITY 2: CommandEmulator Quick (FAST INLINE)
@@ -1167,29 +1158,27 @@ class ExecuteUnixSingleCommand:
         if self.emulator.is_quick_command(cmd_name):
             self.logger.debug(f"Strategy: Quick PowerShell script ({cmd_name})")
             translated = self.emulator.emulate_command(command)
-            return translated, True
+            return self.engine.execute_powershell(translated)
 
         # ================================================================
         # PRIORITY 3: Bash Git (if supported) + FALLBACK TO SCRIPT
         # ================================================================
-        if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.git_bash_exe:
-            # Try Bash Git
-            bash_cmd = self.gitbash_converter(command)
-            if bash_cmd:
+        if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.engine.capabilities['bash']:
+            try:
                 self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
-                return bash_cmd, False
-            # Fallback to script if bash conversion fails
-            self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
-            translated = self.emulator.emulate_command(command)
-            return translated, True
+                return self.engine.execute_bash(command)
+            except Exception:
+                # Fallback to script if bash conversion fails
+                self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
+                translated = self.emulator.emulate_command(command)
+                return self.engine.execute_powershell(translated)
 
         # ================================================================
         # PRIORITY 4: CommandEmulator Script (HEAVY EMULATION)
         # ================================================================
         self.logger.debug(f"Strategy: Heavy PowerShell script ({cmd_name})")
         translated = self.emulator.emulate_command(command)
-        return translated, True
-
+        return self.engine.execute_powershell(translated)
 
 # ============================================================================
 # COMMAND EXECUTOR - Main orchestrator
@@ -1202,29 +1191,10 @@ class CommandExecutor:
     RESPONSIBILITIES:
     - Orchestrate command execution with strategic delegation
     - Coordinate PipelineStrategy and ExecuteUnixSingleCommand
-    - Provide helper methods (git bash conversion, binary detection)
-    - Manage ExecutionEngine for subprocess operations
+    - Preprocessing 
 
-    DELEGATES TO:
-    - PipelineStrategy: Pipeline analysis and strategic decisions
-    - ExecuteUnixSingleCommand: Single command execution with fallbacks
-    - ExecutionEngine: Subprocess execution
-
-    NOT responsible for:
-    - Syntax translation (CommandTranslator)
-    - Path translation (PathTranslator)
-    - Preprocessing (BashToolExecutor)
     """
 
-    # Native Windows binaries available (Git for Windows)
-    NATIVE_BINS = {
-        'diff': 'diff.exe',
-        'tar': 'tar.exe',
-        'awk': 'awk.exe',
-        'sed': 'sed.exe',
-        'grep': 'grep.exe',
-        'jq': 'jq.exe',
-    }
 
     def __init__(self, claude_home_unix="/home/claude", logger=None, test_mode=False):
         """
