@@ -1,0 +1,223 @@
+    def translate(self, unix_command: str):
+        """
+        Translate Unix command → Windows with operator support.
+
+        RESPONSIBILITY:
+        - Parse operators (|, &&, >, etc.) into segments
+        - Translate simple commands via _translate_single_command()
+        - BYPASS complex commands (EXECUTOR_MANAGED) for CommandExecutor strategy selection
+        - Handle operator-specific transformations (&> → > ... 2>&1)
+
+        FLOW:
+        1. Parse command into segments: [("command", "ls -la"), ("operator", "|"), ...]
+        2. For each command segment:
+           - If EXECUTOR_MANAGED → pass through RAW (bypass)
+           - Else → translate via command_map[cmd]()
+        3. Recombine segments with operators
+
+        OPERATORS SUPPORTED:
+        - Pipes: |
+        - Redirects: >, >>, <, <<, 2>, 2>&1, 1>&2, &>
+        - Concatenation: &&, ||, ;
+
+        SPECIAL CASES:
+        - &> (bash redirect both) → converted to > file 2>&1
+        - Redirect targets (filenames) → not translated, paths already handled
+
+        Args:
+            unix_command: Full Unix command with possible operators
+
+        Returns:
+            Tuple[str, bool, str]: (translated_command, use_shell, method)
+            - translated_command: Command ready for execution
+            - use_shell: Always True (legacy, not used)
+            - method: 'mapped' if translated, 'passthrough' if unchanged,
+                     'executor_managed' if bypassed to executor
+        """
+        
+        # Parse command structure (handle operators)
+        segments = self._parse_command_structure(unix_command)
+        
+        # Translate each command segment
+        translated_segments = []
+        overall_method = 'passthrough'
+        redirect_ops = ['>', '>>', '<', '<<', '2>', '2>&1', '1>&2', '&>']
+        
+        for i, (seg_type, seg_content) in enumerate(segments):
+            if seg_type == 'command':
+                # Check if this is a redirect target (filename)
+                is_redirect_target = (i > 0 and 
+                                     segments[i-1][0] == 'operator' and 
+                                     segments[i-1][1] in redirect_ops)
+                
+                if is_redirect_target:
+                    # Path already translated by translate_paths_in_string in execute()
+                    # Just use the path as-is
+                    translated_segments.append(seg_content)
+                else:
+                    # Full command translation
+                    trans_cmd, _, method = self._translate_single_command(seg_content)
+                    translated_segments.append(trans_cmd)
+                    if method == 'mapped':
+                        overall_method = 'mapped'
+            elif seg_type == 'operator':
+                # Special handling for certain operators
+                if seg_content == '&>':
+                    # Convert bash &> to Windows > ... 2>&1
+                    translated_segments.append('>')
+                    # Next segment will be filename, then we append 2>&1
+                    # We'll handle this after the loop
+                    translated_segments.append('__REDIRECT_BOTH__')
+                elif seg_content == '<<':
+                    # Heredoc - for now, pass through (complex to translate)
+                    translated_segments.append(seg_content)
+                else:
+                    # Other operators pass through
+                    translated_segments.append(seg_content)
+        
+        # Post-process __REDIRECT_BOTH__ markers
+        final_segments = []
+        i = 0
+        while i < len(translated_segments):
+            if translated_segments[i] == '__REDIRECT_BOTH__':
+                # Previous was >, next should be filename, add 2>&1 after
+                final_segments.append(translated_segments[i-1])  # filename
+                final_segments.append('2>&1')
+                i += 1
+            elif i > 0 and translated_segments[i-1] == '__REDIRECT_BOTH__':
+                # Skip, already handled
+                i += 1
+            else:
+                final_segments.append(translated_segments[i])
+                i += 1
+        
+        translated = ' '.join(final_segments)
+        return translated, True, overall_method
+    
+    def _parse_command_structure(self, command: str):
+        """
+        Parse command into segments: command/operator.
+
+        This is the OPERATOR PARSER - splits command on operators while preserving
+        operator order and structure.
+
+        ALGORITHM:
+        1. Scan command string character by character
+        2. Match longest operator at each position (2>&1 before 2>)
+        3. Split on operators, preserving both commands and operators as segments
+        4. Skip whitespace after operators
+
+        OPERATOR PRECEDENCE (longest match first):
+        - 2>&1, 1>&2 (must match before 2>, >)
+        - <<, >> (must match before <, >)
+        - &> (bash stderr+stdout redirect)
+        - &&, || (logical operators)
+        - 2> (stderr redirect)
+        - |, >, <, ; (single char operators)
+
+        Args:
+            command: Full command string possibly containing operators
+
+        Returns:
+            List[Tuple[str, str]]: Segments as [("command"|"operator", content), ...]
+
+        Example:
+            Input: "find . -name '*.py' | grep test > out.txt"
+            Output: [
+                ("command", "find . -name '*.py'"),
+                ("operator", "|"),
+                ("command", "grep test"),
+                ("operator", ">"),
+                ("command", "out.txt")
+            ]
+        """
+        # Operator list - ORDERED for longest-match parsing
+        operators = [
+            '2>&1',  # stderr to stdout redirect (must be before 2>)
+            '1>&2',  # stdout to stderr redirect  
+            '<<',    # heredoc input
+            '>>',    # append redirect
+            '&>',    # redirect both stdout+stderr (bash)
+            '&&',    # logical AND
+            '||',    # logical OR
+            '2>',    # stderr redirect
+            '|',     # pipe
+            '>',     # stdout redirect
+            '<',     # stdin redirect
+            ';'      # command separator
+        ]
+        
+        segments = []
+        current_cmd = []
+        i = 0
+        
+        while i < len(command):
+            # Check for operator match
+            found_op = None
+            for op in operators:
+                if command[i:i+len(op)] == op:
+                    found_op = op
+                    break
+            
+            if found_op:
+                # Save accumulated command
+                if current_cmd:
+                    segments.append(('command', ''.join(current_cmd).strip()))
+                    current_cmd = []
+                
+                # Save operator
+                segments.append(('operator', found_op))
+                i += len(found_op)
+                
+                # Skip whitespace after operator
+                while i < len(command) and command[i] in ' \t':
+                    i += 1
+            else:
+                current_cmd.append(command[i])
+                i += 1
+        
+        # Save final command segment
+        if current_cmd:
+            segments.append(('command', ''.join(current_cmd).strip()))
+        
+        return segments
+    
+    def _translate_single_command(self, unix_command: str):
+        """Translate a single command (no operators)"""
+        parts = unix_command.strip().split()
+        if not parts:
+            return unix_command, True, 'passthrough'
+
+        base_cmd = parts[0]
+
+        # Commands managed by CommandExecutor - pass through RAW
+        # These commands have complex emulations in CommandExecutor._execute_*
+        # and need to reach execute_bash() BEFORE translation for strategy selection
+        EXECUTOR_MANAGED = {
+            'find', 'curl', 'sed', 'diff', 'sort', 'uniq', 'awk', 'split',
+            'grep', 'join', 'ln', 'sha256sum', 'sha1sum', 'md5sum',
+            'gzip', 'gunzip', 'tar', 'zip', 'unzip', 'hexdump', 'strings',
+            'base64', 'timeout', 'watch', 'column', 'jq', 'wget', 'paste',
+            'comm'
+        }
+
+        if base_cmd in EXECUTOR_MANAGED:
+            # Pass through - CommandExecutor will handle strategy selection
+            return unix_command, True, 'executor_managed'
+
+        # Check translator for simple 1:1 translations
+        if base_cmd in self.command_map:
+            translator = self.command_map[base_cmd]
+            try:
+                translated, use_shell = translator(unix_command, parts)
+                return translated, use_shell, 'mapped'
+            except Exception:
+                pass
+
+        # Python3 → Python (Windows doesn't have python3)
+        if base_cmd == 'python3':
+            # Replace ALL occurrences, not just first
+            translated = unix_command.replace('python3', 'python')
+            return translated, True, 'mapped'
+
+        return unix_command, True, 'passthrough'
