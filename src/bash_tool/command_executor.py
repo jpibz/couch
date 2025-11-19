@@ -227,7 +227,7 @@ class CommandExecutor:
     # MAIN EXECUTION ENTRY POINT
     # ========================================================================
 
-    def execute(self, command: str) -> subprocess.CompletedProcess:
+    def execute(self, command: str, nesting_level: int = 0) -> subprocess.CompletedProcess:
         
         self.logger.info(f"Executing: {command[:100]}")
         
@@ -257,11 +257,11 @@ class CommandExecutor:
             command = self._expand_braces(command)
             
             # STEP 0.5: Here documents <<EOF
-            command, heredoc_files = self._process_heredocs(command)
+            command, heredoc_files = self._process_heredocs(command, nesting_level)
             temp_files.extend(heredoc_files)
             
             # STEP 0.6: Process substitution <(cmd) >(cmd)
-            command, procsub_files = self._process_substitution(command)
+            command, procsub_files = self._process_substitution(command, nesting_level)
             temp_files.extend(procsub_files)
             
             # STEP 0.7: Variable expansion ${var:-default}, tilde, arithmetic
@@ -274,7 +274,7 @@ class CommandExecutor:
             command = self._process_find_exec(command)
             
             # STEP 0.10: Command substitution $(...) - RECURSIVE TRANSLATION
-            command = self._process_command_substitution_recursive(command)
+            command = self._process_command_substitution_recursive(command, nesting_level)
             
             return self._single_executor.execute_single(command)
 
@@ -376,7 +376,7 @@ class CommandExecutor:
         
         return command
     
-    def _process_heredocs(self, command: str) -> Tuple[str, List[Path]]:
+    def _process_heredocs(self, command: str, nesting_level: int = 0) -> Tuple[str, List[Path]]:
         """
         Process here documents.
         
@@ -470,7 +470,7 @@ class CommandExecutor:
 
             if should_expand:
                 # Attempt variable expansion via bash.exe
-                if self.git_bash_exe:
+                if self._single_executor.engine.capabilities['bash']:
                     try:
                         # Use bash to expand the content
                         # We pass content via echo to let bash do expansion
@@ -488,14 +488,11 @@ EXPAND_DELIMITER'''
 EXPAND_DELIMITER'''
 
                         # Execute via bash.exe through ExecutionEngine
-                        bash_path = self.git_bash_exe
-                        result = self.command_executor.engine.execute_bash(
-                            bash_path,
+                        result = self._single_executor.engine.execute_bash(
                             expansion_script,
                             test_mode_stdout=content,  # AS IF: content expanded (in TESTMODE)
                             timeout=5,
-                            cwd=str(self.scratch_dir),
-                            env=self._setup_environment(),
+                            cwd=str(self.working_dir),
                             errors='replace',
                             encoding='utf-8'
                         )
@@ -520,7 +517,7 @@ EXPAND_DELIMITER'''
                     # Continue with literal content
 
             # Create temp file
-            temp_file = self.scratch_dir / f'heredoc_{threading.get_ident()}_{len(temp_files)}.tmp'
+            temp_file = self.scratch_dir / f'heredoc_{nesting_level}_{threading.get_ident()}_{len(temp_files)}.tmp'
 
             try:
                 with open(temp_file, 'w', encoding='utf-8') as f:
@@ -547,7 +544,7 @@ EXPAND_DELIMITER'''
         
         return result_command, temp_files
     
-    def _process_substitution(self, command: str) -> Tuple[str, List[Path]]:
+    def _process_substitution(self, command: str, nesting_level: int = 0) -> Tuple[str, List[Path]]:
         """
         Process substitution: <(command), >(command)
         
@@ -580,7 +577,7 @@ EXPAND_DELIMITER'''
                 result = self._single_executor.execute_single(cmd, test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n")  # AS IF: realistic output
 
                 # Create temp file with output
-                temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
+                temp_file = cwd / f'procsub_input_{nesting_level}_{threading.get_ident()}_{len(temp_files)}.tmp'
 
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     f.write(result.stdout)
@@ -608,7 +605,7 @@ EXPAND_DELIMITER'''
             cmd = match.group(1)
             
             # Create temp file for output
-            temp_file = cwd / f'procsub_output_{threading.get_ident()}_{len(temp_files)}.tmp'
+            temp_file = cwd / f'procsub_output_{nesting_level}_{threading.get_ident()}_{len(temp_files)}.tmp'
             temp_files.append(temp_file)
             
             # Store the command and temp file for post-processing
@@ -632,7 +629,7 @@ EXPAND_DELIMITER'''
 
         return command, temp_files
     
-    def _process_command_substitution_recursive(self, command: str) -> str:
+    def _process_command_substitution_recursive(self, command: str, nesting_level: int = 0) -> str:
         """
         Process command substitution $(...) with RECURSIVE translation.
 
@@ -718,19 +715,15 @@ EXPAND_DELIMITER'''
         for start, end, content in substitutions_reversed:
             # Translate the content
             try:
-                # RECURSIVE: content might have nested $(...)
-                translated_content = self._translate_substitution_content(content)
-
-                # Replace in command (preserve $(...) wrapper for PowerShell)
-                replacement = f"$({translated_content})"
-                command = command[:start] + replacement + command[end:]
+                # RECURSIVE
+                result = self.execute(content, nesting_level + 1)
                 
             except Exception as e:
                 self.logger.error(f"Command substitution translation failed: {e}")
                 # Keep original on error
                 continue
         
-        return command
+        return result.stdout.strip()
     
     def _translate_substitution_content(self, content: str) -> str:
         """
@@ -762,7 +755,7 @@ EXPAND_DELIMITER'''
 
         # STEP 1: Recursively handle nested $(...)
         if '$(' in content:
-            content = self._process_command_substitution_recursive(content)
+            content = self._process_command_substitution_recursive(content, nesting_level)
 
         # ================================================================
         # ARTIGIANO: Detect if command inside $(...) is COMPLEX
@@ -791,16 +784,14 @@ EXPAND_DELIMITER'''
 
             return False
 
-        if is_complex_substitution(content):
-            # COMPLEX command inside $(...) -> execute with bash.exe
-            if self.git_bash_exe:
+            if self._single_executor.engine.capabilities['bash']:
                 self.logger.debug(f"Complex command in $(...) -> using bash.exe: {content[:50]}")
                 # Need to execute bash.exe, capture output, and insert as string
                 # This is tricky - we're in preprocessing, haven't executed yet
                 # Return a PowerShell invocation that runs bash.exe
                 bash_escaped = content.replace('"', '`"').replace('$', '`$')
                 # Convert to bash.exe invocation that captures output
-                return f'& "{self.git_bash_exe}" -c "{bash_escaped}"'
+                return f'& "{self._single_executor.engine.paths["bash"]}" -c "{bash_escaped}"'
             else:
                 self.logger.warning(f"Complex command in $(...) but no bash.exe - may fail: {content[:50]}")
                 # Fall through to PowerShell translation (may fail)
@@ -819,17 +810,10 @@ EXPAND_DELIMITER'''
         # - All individual commands
         # CRITICAL: force_translate=True to translate EXECUTOR_MANAGED commands (find, grep, etc.)
         # Inside $(), there's no "strategy selection" - must translate immediately
-        translated, use_shell, method = self.command_translator.translate(content, force_translate=True)
-
-        # STEP 4: Clean up for PowerShell context
-        # Command translator might wrap in cmd /c - remove that for $(...) context
-        if translated.startswith('cmd /c '):
-            translated = translated[7:]
-        elif translated.startswith('cmd.exe /c '):
-            translated = translated[11:]
+        result = self.execute(content, nesting_level + 1)
 
         # PowerShell $(...) expects bare commands, not cmd wrappers
-        return translated
+        return result.stdout.strip()
     
     def _expand_variables(self, command: str) -> str:
         """
