@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Type, Callable, Dict, Any, List, Optional, Tuple, Tuple
 from abc import ABC, abstractmethod
-from unix_translator import PathTranslator, CommandEmulator
+from translators import PathTranslator, CommandEmulator
 
 
 # ============================================================================
@@ -1156,7 +1156,7 @@ class ExecuteUnixSingleCommand:
         self.engine = ExecutionEngine( self.logger, self.test_mode)
         self.emulator = CommandEmulator()
 
-    def execute_single(self, command: str) -> subprocess.CompletedProcess:
+    def execute_single(self, command: str, test_mode_stdout=None) -> subprocess.CompletedProcess:
         """
         Execute single ATOMIC Unix command with optimal strategy.
 
@@ -1207,7 +1207,7 @@ class ExecuteUnixSingleCommand:
         # ================================================================
         if self.engine.is_available(cmd_name):
             self.logger.debug(f"Strategy: Native binary ({cmd_name}.exe)")
-            return self.engine.execute_native(cmd_name, parts[1:])
+            return self.engine.execute_native(cmd_name, parts[1:], test_mode_stdout)
 
         # ================================================================
         # PRIORITY 2: CommandEmulator Quick (FAST INLINE)
@@ -1216,9 +1216,9 @@ class ExecuteUnixSingleCommand:
             self.logger.debug(f"Strategy: Quick PowerShell script ({cmd_name})")
             translated = self.emulator.emulate_command(command)
             if self._needs_powershell(translated):
-                return self.engine.execute_powershell(translated)
+                return self.engine.execute_powershell(translated, test_mode_stdout)
             else:
-                return self.engine.execute_cmd(translated)
+                return self.engine.execute_cmd(translated, test_mode_stdout)
 
         # ================================================================
         # PRIORITY 3: Bash Git (if supported) + FALLBACK TO SCRIPT
@@ -1226,22 +1226,22 @@ class ExecuteUnixSingleCommand:
         if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.engine.capabilities['bash']:
             try:
                 self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
-                return self.engine.execute_bash(command)
+                return self.engine.execute_bash(command, test_mode_stdout)
             except Exception:
                 # Fallback to script if bash conversion fails
                 self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
                 translated = self.emulator.emulate_command(command)
                 if self._needs_powershell(translated):
-                    return self.engine.execute_powershell(translated)
+                    return self.engine.execute_powershell(translated, test_mode_stdout)
                 else:
-                    return self.engine.execute_cmd(translated)
+                    return self.engine.execute_cmd(translated, test_mode_stdout)
 
         # ================================================================
         # PRIORITY 4: CommandEmulator Script (HEAVY EMULATION)
         # ================================================================
         self.logger.debug(f"Strategy: Heavy PowerShell script ({cmd_name})")
         translated = self.emulator.emulate_command(command)
-        return self.engine.execute_powershell(translated)
+        return self.engine.execute_powershell(translated, test_mode_stdout)
 
 
     def _needs_powershell(self, command: str) -> bool:
@@ -1353,10 +1353,6 @@ class CommandExecutor:
         self.working_dir = working_dir
         self.logger = logger or logging.getLogger('CommandExecutor')
         self.test_mode = test_mode
-
-        
-        # ExecutionEngine - UNICO PUNTO per subprocess
-        self.engine = ExecutionEngine(working_dir=working_dir, test_mode=test_mode, logger=self.logger)
 
         # ====================================================================
         # STRATEGIC LAYER - Delegation to specialized classes
@@ -1719,8 +1715,7 @@ EXPAND_DELIMITER'''
         input_pattern = r'<\(([^)]+)\)'
         output_pattern = r'>\(([^)]+)\)'
         
-        cwd = self.scratch_dir
-        env = self._setup_environment()
+        cwd = self.working_dir
         
         def replace_input_substitution(match):
             """Replace <(cmd) with temp file containing cmd output"""
@@ -1731,18 +1726,8 @@ EXPAND_DELIMITER'''
                 # NOTE: Paths already translated by BashToolExecutor.execute()
                 # No need to translate again here
 
-                # Translate command
-                translated, _, _ = self.command_translator.translate(cmd)
-
                 # Execute via ExecutionEngine
-                result = self.command_executor.engine.execute_cmd(
-                    translated,
-                    test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n",  # AS IF: realistic output
-                    timeout=30,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace'
-                )
+                result = self._single_executor.execute_single(cmd, test_mode_stdout=f"[TEST MODE] Process substitution output for: {cmd}\n")  # AS IF: realistic output
 
                 # Create temp file with output
                 temp_file = cwd / f'procsub_input_{threading.get_ident()}_{len(temp_files)}.tmp'
