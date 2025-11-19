@@ -17,6 +17,42 @@ from abc import ABC, abstractmethod
 from unix_translator import PathTranslator, CommandEmulator
 
 
+# ============================================================================
+# BASH GIT MINIMAL - Unsupported Commands
+# ============================================================================
+# Git Bash (minimal) is a lightweight POSIX environment for Windows.
+# It includes most standard UNIX commands but LACKS external tools.
+#
+# SUPPORTED: find, grep, awk, sed, tar, gzip, sort, uniq, cut, etc.
+# NOT SUPPORTED: External tools that require separate installation
+#
+# This set defines commands that Git Bash CANNOT execute.
+# Used by ExecuteUnixSingleCommand to skip Bash attempt and go to script.
+BASH_GIT_UNSUPPORTED_COMMANDS = {
+    # JSON/data tools (require external installation)
+    'jq',         # JSON processor - not included in Git Bash
+
+    # Network tools (may not be available in minimal Git Bash)
+    'wget',       # Download tool - not always present
+    'curl',       # URL tool - may have limited version or absent
+
+    # GNU-specific tools (not in minimal POSIX)
+    'timeout',    # GNU timeout command - not in Git Bash
+
+    # Checksums (may use different syntax or be absent)
+    'sha256sum',  # May not be available or have different name
+    'sha1sum',    # May not be available or have different name
+    'md5sum',     # May not be available or have different name
+
+    # Compression (some formats not supported)
+    'zip',        # Requires Info-ZIP tools
+    'unzip',      # Requires Info-ZIP tools
+
+    # Special tools
+    'watch',      # Not in minimal Git Bash
+}
+
+
 class SandboxValidator:
     """
     Sandbox validator for bash command execution.
@@ -1040,444 +1076,124 @@ class ExecuteUnixSingleCommand:
     Single Unix command executor - MICRO level strategy.
 
     RESPONSIBILITIES:
-    - Execute ONE Unix command with optimal strategy
-    - Choose between: Simple 1:1, Native Binary, Bash Passthrough, Emulation
-    - Manage priority chain with fallbacks
-    - Interface with the 3 Translators (Simple/Pipeline/Emulative)
+    - Execute ONE ATOMIC Unix command (no pipelines/chains)
+    - Choose optimal strategy: Native Bin → Quick Script → Bash Git → Heavy Script
+    - Simple, focused decision logic
 
     NOT responsible for:
-    - Analyzing pipeline structure
-    - Managing subprocess (uses ExecutionEngine)
-    - Path translation
-    - Strategic analysis (uses PipelineStrategy)
+    - Analyzing pipelines/chains (that's PipelineStrategy's job)
+    - Managing subprocess (that's ExecutionEngine's job)
+    - Complex fallbacks (keep it simple!)
     """
 
-    def __init__(self, logger: logging.Logger = None,
+    def __init__(self,
+                 execution_engine: 'ExecutionEngine',
+                 command_emulator: CommandEmulator,
+                 git_bash_exe: Optional[str],
+                 git_bash_converter: Callable,
+                 logger: logging.Logger = None,
                  test_mode: bool = False):
         """
         Initialize ExecuteUnixSingleCommand.
 
         Args:
+            execution_engine: ExecutionEngine instance (for is_available checks)
+            command_emulator: CommandEmulator instance (for translation)
+            git_bash_exe: Path to bash.exe (None if not available)
+            git_bash_converter: Function to convert command to bash format
             logger: Logger instance
             test_mode: If True, log decisions without executing
         """
-        self.command_emulator = CommandEmulator()
-
+        self.engine = execution_engine
+        self.emulator = command_emulator
+        self.git_bash_exe = git_bash_exe
+        self.gitbash_converter = git_bash_converter
         self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
         self.test_mode = test_mode
 
-        # Commands PREFERRED for bash.exe (from PipelineStrategy)
-        self.BASH_EXE_PREFERRED = PipelineStrategy.BASH_EXE_PREFERRED
-
     def execute_single(self, command: str) -> Tuple[str, bool]:
         """
-        Execute single Unix command with optimal strategy.
+        Execute single ATOMIC Unix command with optimal strategy.
 
-        RESPONSIBILITY:
-        - Accept FULL command string (like CommandEmulator.emulate_command)
-        - Parse command INTERNALLY to extract cmd_name
-        - Use cmd_name ONLY to choose execution strategy
-        - Return executable command
+        DESIGN:
+        - Accepts FULL command string (e.g., "grep -r pattern .")
+        - Parses INTERNALLY to extract cmd_name
+        - Uses cmd_name ONLY to choose strategy
+        - Returns executable command
 
-        PRIORITY CHAIN:
-        1. Bash Passthrough (BASH_EXE_PREFERRED commands) - perfect compatibility
-        2. Native Binary (grep.exe, awk.exe) - best performance
-        3. Execution Map (complex emulation) - specialized handlers
-        4. Intelligent Fallback - try multiple strategies
+        STRATEGY (SIMPLE & CLEAR):
+        1. Native Binary (grep.exe, awk.exe) → Best performance
+        2. CommandEmulator Quick (< 20 lines) → Fast inline scripts
+        3. Bash Git (if supported) + fallback → POSIX compatibility
+        4. CommandEmulator Script → Heavy PowerShell emulation
 
         Args:
-            command: Full command string (e.g., "ls -la /home")
+            command: Full command string (e.g., "grep -r pattern .")
 
         Returns:
             Tuple[str, bool]: (executable_command, use_powershell)
+                             use_powershell=True → PowerShell script
+                             use_powershell=False → Native binary or bash.exe
         """
         # ================================================================
         # INTERNAL PARSING - Extract cmd_name to choose strategy
         # ================================================================
         import shlex
-        parts = shlex.split(command) if ' ' in command else [command]
+        try:
+            parts = shlex.split(command) if ' ' in command else [command]
+        except ValueError:
+            # Quote parsing error, fallback to simple split
+            parts = command.split()
+
+        if not parts:
+            # Empty command
+            return command, True
+
         cmd_name = parts[0]
 
         if self.test_mode:
-            self.logger.info(f"[TEST-SINGLE-EXEC] {cmd_name}: {command}")
+            self.logger.info(f"[SINGLE-EXEC] {cmd_name}: {command}")
 
         # ================================================================
-        # PRIORITY 1: Bash Passthrough (for PREFERRED commands)
+        # PRIORITY 1: Native Binary (BEST PERFORMANCE)
         # ================================================================
-        if cmd_name in self.BASH_EXE_PREFERRED and self.git_bash_exe:
+        if self.engine.is_available(cmd_name):
+            self.logger.debug(f"Strategy: Native binary ({cmd_name}.exe)")
+            return command, False  # Pass through to native binary
+
+        # ================================================================
+        # PRIORITY 2: CommandEmulator Quick (FAST INLINE)
+        # ================================================================
+        if self.emulator.is_quick_command(cmd_name):
+            self.logger.debug(f"Strategy: Quick PowerShell script ({cmd_name})")
+            translated = self.emulator.emulate_command(command)
+            return translated, True
+
+        # ================================================================
+        # PRIORITY 3: Bash Git (if supported) + FALLBACK TO SCRIPT
+        # ================================================================
+        if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.git_bash_exe:
+            # Try Bash Git
             bash_cmd = self.gitbash_converter(command)
             if bash_cmd:
-                self.logger.debug(f"Using Git Bash for {cmd_name}")
+                self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
                 return bash_cmd, False
+            # Fallback to script if bash conversion fails
+            self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
+            translated = self.emulator.emulate_command(command)
+            return translated, True
 
         # ================================================================
-        # PRIORITY 2: Native Binary (best performance)
+        # PRIORITY 4: CommandEmulator Script (HEAVY EMULATION)
         # ================================================================
-        if cmd_name in self.native_bins:
-            self.logger.debug(f"Using native binary for {cmd_name}")
-            return command, False  # Pass through to binary
+        self.logger.debug(f"Strategy: Heavy PowerShell script ({cmd_name})")
+        translated = self.emulator.emulate_command(command)
+        return translated, True
 
-        # ================================================================
-        # PRIORITY 3: Execution Map (complex emulation)
-        # ================================================================
-        if cmd_name in self.execution_map:
-            executor = self.execution_map[cmd_name]
-            self.logger.debug(f"Using emulation for {cmd_name}")
-            return executor(command, parts)
 
-        # ================================================================
-        # PRIORITY 4: Intelligent Fallback
-        # ================================================================
-        return self._intelligent_fallback(cmd_name, command, parts)
-
-    def _intelligent_fallback(self, cmd_name: str, command: str, parts: List[str]) -> Tuple[str, bool]:
-        """
-        Intelligent fallback for unknown commands.
-
-        Tries multiple strategies in order.
-        """
-        # Check if PowerShell cmdlet
-        POWERSHELL_CMDLETS = {
-            'Get-Content', 'Set-Content', 'Get-ChildItem', 'Get-Item',
-            'Select-String', 'Select-Object', 'ForEach-Object', 'Where-Object',
-            'Measure-Object', 'Sort-Object', 'Get-Unique', 'Group-Object',
-            'Compare-Object', 'Test-Path', 'New-Item', 'Remove-Item',
-            'Copy-Item', 'Move-Item', 'Rename-Item',
-            'Write-Host', 'Write-Output', 'Read-Host',
-            'powershell', 'pwsh'
-        }
-
-        if cmd_name in POWERSHELL_CMDLETS:
-            self.logger.debug(f"PowerShell cmdlet detected: {cmd_name}")
-            return command, True
-
-        # Try Git Bash as fallback
-        if self.git_bash_exe:
-            bash_cmd = self.gitbash_converter(command)
-            if bash_cmd:
-                self.logger.debug(f"Fallback: Git Bash for {cmd_name}")
-                return bash_cmd, False
-
-        # Try SimpleTranslator for 1:1 mappings
-        simple_method = getattr(self.simple, f'_translate_{cmd_name}', None)
-        if simple_method:
-            try:
-                result = simple_method(command, parts)
-                if result:
-                    self.logger.debug(f"Fallback: SimpleTranslator for {cmd_name}")
-                    return result
-            except Exception as e:
-                self.logger.error(f"SimpleTranslator failed for {cmd_name}: {e}")
-
-        # Try PipelineTranslator
-        pipeline_method = getattr(self.pipeline, f'_translate_{cmd_name}', None)
-        if pipeline_method:
-            try:
-                result = pipeline_method(command, parts)
-                if result:
-                    self.logger.debug(f"Fallback: PipelineTranslator for {cmd_name}")
-                    return result
-            except Exception as e:
-                self.logger.error(f"PipelineTranslator failed for {cmd_name}: {e}")
-
-        # Try EmulativeTranslator
-        emulative_method = getattr(self.emulative, f'_translate_{cmd_name}', None)
-        if emulative_method:
-            try:
-                result = emulative_method(command, parts)
-                if result:
-                    self.logger.debug(f"Fallback: EmulativeTranslator for {cmd_name}")
-                    return result
-            except Exception as e:
-                self.logger.error(f"EmulativeTranslator failed for {cmd_name}: {e}")
-
-        # Last resort - pass through as-is
-        self.logger.warning(f"Unknown command: {cmd_name} - passing through")
-        return command, False
-
-    # ==================== CONTROL STRUCTURE METHODS (migrated) ====================
-
-    def _has_control_structures(self, command: str) -> bool:
-        """Check if command contains bash control structures"""
-        keywords = ['for ', 'while ', 'if ', 'case ', 'function ', 'until ']
-        return any(kw in command for kw in keywords)
-    
-    def _convert_control_structures_to_script(self, command: str) -> Tuple[str, Optional[Path]]:
-        """
-        Convert bash control structures to PowerShell script.
-        
-        For complex structures (for, while, if), create temp PowerShell script.
-        
-        Returns:
-            (modified_command, temp_script_file)
-        """
-        if not self._has_control_structures(command):
-            return command, None
-        
-        # Create PowerShell script with bash-like logic
-        cwd = self.scratch_dir
-        script_file = cwd / f'bash_script_{threading.get_ident()}.ps1'
-        
-        try:
-            # Convert bash script to PowerShell
-            ps_script = self._bash_to_powershell(command)
-            
-            with open(script_file, 'w', encoding='utf-8') as f:
-                f.write(ps_script)
-            
-            # Return command to execute script
-            new_command = f'powershell -ExecutionPolicy Bypass -File "{script_file}"'
-            
-            return new_command, script_file
-        
-        except Exception as e:
-            self.logger.error(f"Failed to convert control structures: {e}")
-            return command, None
-    
-    def _bash_to_powershell(self, bash_script: str) -> str:
-        """
-        Convert bash control structures to PowerShell.
-        
-        Handles:
-        - for loops
-        - while loops
-        - if statements
-        - test conditions conversion
-        - variable references
-        """
-        import re
-        
-        # For loop: for i in {1..10}; do echo $i; done
-        for_pattern = r'for\s+(\w+)\s+in\s+([^;]+);\s*do\s+(.+?);\s*done'
-        
-        def convert_for(match):
-            var = match.group(1)
-            range_expr = match.group(2).strip()
-            body = match.group(3).strip()
-            
-            # Convert bash $var to PowerShell $var (already compatible)
-            # Convert echo to Write-Host
-            body = body.replace('echo ', 'Write-Host ')
-            
-            # Parse range
-            if '..' in range_expr:
-                # Range like 1..10
-                ps = f'foreach (${var} in {range_expr}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            else:
-                # List like "a b c"
-                items = range_expr.split()
-                items_str = ','.join([f'"{item}"' for item in items])
-                ps = f'foreach (${var} in {items_str}) {{\n'
-                ps += f'    {body}\n'
-                ps += '}\n'
-            
-            return ps
-        
-        # Check for for loop
-        if 'for ' in bash_script and ' in ' in bash_script and '; do ' in bash_script:
-            bash_script = re.sub(for_pattern, convert_for, bash_script, flags=re.DOTALL)
-        
-        # While loop: while condition; do ...; done
-        while_pattern = r'while\s+(.+?);\s*do\s+(.+?);\s*done'
-        
-        def convert_while(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'while ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'while ' in bash_script:
-            bash_script = re.sub(while_pattern, convert_while, bash_script, flags=re.DOTALL)
-        
-        # If statement: if condition; then ...; fi
-        if_pattern = r'if\s+(.+?);\s*then\s+(.+?);\s*fi'
-        
-        def convert_if(match):
-            condition = match.group(1).strip()
-            body = match.group(2).strip()
-            
-            # Convert test conditions to PowerShell
-            condition = self._convert_test_to_powershell(condition)
-            
-            # Convert body commands
-            body = body.replace('echo ', 'Write-Host ')
-            
-            ps = f'if ({condition}) {{\n'
-            ps += f'    {body}\n'
-            ps += '}\n'
-            
-            return ps
-        
-        if 'if ' in bash_script and ' then ' in bash_script:
-            bash_script = re.sub(if_pattern, convert_if, bash_script, flags=re.DOTALL)
-        
-        # Convert common bash commands to PowerShell equivalents
-        conversions = {
-            'echo ': 'Write-Host ',
-            'cat ': 'Get-Content ',
-            'ls ': 'Get-ChildItem ',
-            'rm ': 'Remove-Item ',
-            'cp ': 'Copy-Item ',
-            'mv ': 'Move-Item ',
-            'mkdir ': 'New-Item -ItemType Directory -Path ',
-        }
-        
-        for bash_cmd, ps_cmd in conversions.items():
-            bash_script = bash_script.replace(bash_cmd, ps_cmd)
-        
-        return bash_script
-    
-    def _convert_test_to_powershell(self, test_expr: str) -> str:
-        """
-        Convert bash test conditions to PowerShell.
-        
-        Examples:
-        [ -f file ] -> Test-Path file
-        [ "$a" = "$b" ] -> $a -eq $b
-        """
-        # Remove [ ] brackets
-        test_expr = test_expr.strip()
-        if test_expr.startswith('[') and test_expr.endswith(']'):
-            test_expr = test_expr[1:-1].strip()
-        
-        # File tests
-        if '-f ' in test_expr:
-            # Extract filename
-            file = test_expr.split('-f ')[1].strip().strip('"')
-            return f'Test-Path "{file}"'
-        elif '-d ' in test_expr:
-            # Directory test
-            dir = test_expr.split('-d ')[1].strip().strip('"')
-            return f'Test-Path "{dir}" -PathType Container'
-        elif '-e ' in test_expr:
-            # Exists test
-            path = test_expr.split('-e ')[1].strip().strip('"')
-            return f'Test-Path "{path}"'
-        
-        # String comparisons
-        elif ' = ' in test_expr or ' == ' in test_expr:
-            parts = re.split(r'\s*=\s*', test_expr)
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -eq {parts[1].strip()}'
-        elif ' != ' in test_expr:
-            parts = test_expr.split(' != ')
-            if len(parts) == 2:
-                return f'{parts[0].strip()} -ne {parts[1].strip()}'
-        
-        # Fallback: return as-is
-        return test_expr
-    
-    def _cleanup_temp_files(self, temp_files: List[Path]):
-        """Cleanup temporary files created during execution"""
-        for temp_file in temp_files:
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-                    self.logger.debug(f"Cleaned up temp file: {temp_file}")
-            except Exception as e:
-                self.logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
-    
-    def _needs_powershell(self, command: str) -> bool:
-        """
-        Detect if command needs PowerShell instead of cmd.exe.
-
-        PowerShell required for:
-        - Command substitution: $(...)
-        - Backticks: `...`
-        - Process substitution: <(...)
-        - Complex variable expansion
-        - PowerShell cmdlets (Get-ChildItem, ForEach-Object, etc.)
-
-        Returns:
-            True if PowerShell required, False if cmd.exe sufficient
-        """
-        # PowerShell cmdlets
-        powershell_cmdlets = [
-            'Get-ChildItem', 'ForEach-Object', 'Select-Object', 'Where-Object',
-            'Measure-Object', 'Select-String', 'Get-Content', 'Set-Content',
-            'Out-File', 'Write-Output', 'Write-Host', 'Write-Error',
-            '$input', '$_'  # PowerShell variables
-        ]
-
-        for cmdlet in powershell_cmdlets:
-            if cmdlet in command:
-                return True
-
-        # Command substitution patterns
-        if '$(' in command:
-            return True
-
-        # Backtick command substitution
-        if '`' in command:
-            # Check it's not just in a string
-            # Simple heuristic: backticks outside of quotes
-            in_quotes = False
-            quote_char = None
-            for i, char in enumerate(command):
-                if char in ('"', "'") and (i == 0 or command[i-1] != '\\'):
-                    if not in_quotes:
-                        in_quotes = True
-                        quote_char = char
-                    elif char == quote_char:
-                        in_quotes = False
-                        quote_char = None
-                elif char == '`' and not in_quotes:
-                    return True
-
-        # Process substitution
-        if '<(' in command or '>(' in command:
-            return True
-
-        return False
-    
-    def _adapt_for_powershell(self, command: str) -> str:
-        """
-        Adapt Unix command for PowerShell execution.
-        
-        Translations:
-        - Backticks `cmd` -> $(...) PowerShell syntax
-        - Preserve pipes, redirects, logical operators
-        - Path translations already done by PathTranslator
-        
-        Args:
-            command: Unix command with Windows paths already translated
-            
-        Returns:
-            Command adapted for PowerShell
-        """
-        adapted = command
-        
-        # Convert backticks to PowerShell command substitution
-        # Pattern: `command` -> $(command)
-        # Handle escaped backticks (don't convert)
-        import re
-        
-        # Find all backtick pairs (not escaped)
-        # This is a simple implementation - may need refinement for complex cases
-        backtick_pattern = r'(?<!\\)`([^`]+)`'
-        adapted = re.sub(backtick_pattern, r'$(\1)', adapted)
-        
-        # PowerShell uses different redirection for null
-        # /dev/null -> $null
-        adapted = adapted.replace('/dev/null', '$null')
-        
-        # Note: Most other Unix patterns (pipes, redirects, &&, ||) work in PowerShell
-        
-        return adapted
-    
-
+# ============================================================================
+# COMMAND EXECUTOR - Main orchestrator
+# ============================================================================
 
 class CommandExecutor:
     """
@@ -1559,12 +1275,14 @@ class CommandExecutor:
         """
         Lazy initialization of ExecuteUnixSingleCommand.
 
-        Uses translators passed during initialization.
+        Provides all dependencies needed for execution strategy.
         """
         if self._single_executor is None:
-
-
             self._single_executor = ExecuteUnixSingleCommand(
+                execution_engine=self.executor,
+                command_emulator=CommandEmulator(),
+                git_bash_exe=self.git_bash_exe,
+                git_bash_converter=self.gitbash_converter,
                 logger=self.logger,
                 test_mode=self.test_mode
             )

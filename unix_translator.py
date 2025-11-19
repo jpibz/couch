@@ -340,6 +340,15 @@ class CommandEmulator:
         """Initialize SimpleTranslator"""
         # Command map with all translators (73 commands)
 
+        # QUICK COMMANDS: Simple 1:1 translations (< 20 lines)
+        # These are fast, lightweight PowerShell translations
+        self.quick_commands = {
+            'pwd', 'ps', 'chmod', 'chown', 'df', 'true', 'false',
+            'whoami', 'hostname', 'which', 'sleep', 'cd', 'basename',
+            'dirname', 'kill', 'mkdir', 'mv', 'yes', 'env', 'printenv',
+            'export'
+        }
+
         self.command_map = {
             # ===== SIMPLE 1:1 TRANSLATIONS (< 20 righe) =====
             'pwd': self._translate_pwd,           # 3 lines
@@ -463,7 +472,28 @@ class CommandEmulator:
             return translated
 
         return unix_command
-    
+
+    def is_quick_command(self, cmd_name: str) -> bool:
+        """
+        Check if command is "quick" (simple 1:1 or brief PowerShell script).
+
+        QUICK COMMANDS are:
+        - Simple 1:1 translations (< 20 lines of PowerShell)
+        - Fast execution (no subprocess overhead)
+        - Lightweight PowerShell scripts
+
+        Used by ExecuteUnixSingleCommand to decide execution strategy:
+        - Quick commands: Use CommandEmulator (fast, inline)
+        - Non-quick commands: Try Bash Git or heavy script
+
+        Args:
+            cmd_name: Command name (e.g., 'ls', 'grep', 'pwd')
+
+        Returns:
+            True if quick command, False if requires heavy processing
+        """
+        return cmd_name in self.quick_commands
+
     def _translate_ls(self, cmd: str, parts):
         """Translate ls with FULL flag support - ALL flags implemented"""
         flags = []
