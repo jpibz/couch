@@ -1,5 +1,165 @@
 """
 Command Emulator - Unix to PowerShell translation (73 commands)
+
+ARCHITECTURE:
+This is the MASSIVE TRANSLATION ENGINE that converts Unix commands to PowerShell scripts.
+Contains 73 command translators totaling 5669 lines of code.
+
+Position in hierarchy:
+    ExecuteUnixSingleCommand / PipelineStrategy
+       ↓
+    CommandEmulator ← THIS CLASS (Unix→PowerShell translation)
+       ↓
+    ExecutionEngine.execute_powershell(translated_script)
+
+RESPONSIBILITIES:
+1. Translate 73 Unix commands to PowerShell equivalents
+2. Preserve command semantics (flags, arguments, output format)
+3. Handle edge cases and special behaviors
+4. Distinguish "quick" (< 20 lines) vs "heavy" (> 100 lines) scripts
+5. Provide fallback translations when native binaries/bash unavailable
+
+NOT RESPONSIBLE FOR:
+- Executing commands (done by ExecutionEngine)
+- Deciding which commands to translate (done by ExecuteUnixSingleCommand/PipelineStrategy)
+- Path translation (done by PathTranslator)
+- Preprocessing (done by CommandExecutor)
+- Security validation (done by SandboxValidator)
+
+TRANSLATION CATEGORIES:
+1. SIMPLE (< 20 lines) - Quick inline emulations:
+   - pwd, ps, chmod, chown, df, true, false, whoami, hostname
+   - which, sleep, cd, basename, dirname, kill, mkdir, mv, yes
+   - env, printenv, export
+   Total: 21 commands
+
+2. MEDIUM (20-100 lines) - More complex emulations:
+   - touch, echo, wc, du, date, head, tail, rm, cat, cp, ls
+   - tee, seq, file, stat, readlink, realpath, test, tr
+   Total: 18 commands
+
+3. COMPLEX (> 100 lines) - FALLBACK ONLY (prefer native/bash):
+   - Text processing: grep (124), sed (233), awk (211), cut (107)
+   - Data processing: sort (190), uniq (161), join (140), split (196)
+   - Network: curl (239), wget (16)
+   - Compression: tar (110), gzip (115), gunzip (92), zip (69), unzip (88)
+   - Utils: diff (212), jq (212), find (24), timeout (112)
+   - Checksums: sha256sum (9), sha1sum (9), md5sum (9), base64 (11)
+   Total: 34 commands
+
+DESIGN PATTERN:
+- Command Pattern: Each command has dedicated translator method
+- Strategy Pattern: Different translation strategies based on complexity
+- Adapter Pattern: Adapts Unix command semantics to PowerShell
+- Template Method: Common parsing patterns reused across translators
+
+TRANSLATION APPROACH:
+1. Parse Unix command flags and arguments (using shlex or regex)
+2. Map Unix flags to PowerShell equivalents
+3. Generate PowerShell script that produces equivalent output
+4. Handle special cases (pipes, redirections, escaping)
+
+EXAMPLE TRANSLATIONS:
+
+**Simple (pwd):**
+    Unix: pwd
+    PowerShell: (Get-Location).Path
+
+**Medium (ls -la):**
+    Unix: ls -la /home/claude
+    PowerShell: Get-ChildItem -Path /home/claude -Force | ForEach-Object { ... }
+    (75 lines handling -l, -a, -h, -R, -t, -r, -S, -d flags)
+
+**Complex (grep -r "pattern" .):**
+    Unix: grep -r "pattern" .
+    PowerShell: Get-ChildItem -Recurse | Select-String -Pattern "pattern" | ...
+    (124 lines handling -r, -i, -v, -n, -l, -c, -A, -B, -C, -E, -F flags)
+
+KEY TRANSLATION CHALLENGES:
+1. Flag mapping: Unix flags → PowerShell cmdlet parameters
+2. Output formatting: Match Unix output format exactly (for parsing)
+3. Edge cases: Symbolic links, permissions, hidden files, special characters
+4. Piping semantics: Unix text streams vs PowerShell object pipelines
+5. Error handling: Match Unix error messages and exit codes
+
+QUICK vs HEAVY DISTINCTION:
+- is_quick_command(cmd_name) → True if < 20 lines (SIMPLE category)
+- Used by ExecuteUnixSingleCommand to decide:
+  - Quick → Inline PowerShell (fast)
+  - Heavy → Prefer bash.exe or native binary (fallback to PowerShell)
+
+TRANSLATION QUALITY LEVELS:
+1. PERFECT: Output identical to Unix (pwd, whoami, hostname)
+2. GOOD: Output equivalent, minor formatting differences (ls, cat, echo)
+3. ACCEPTABLE: Core functionality works, edge cases differ (grep, sed, awk)
+4. FALLBACK: Basic emulation, complex features unsupported (jq, curl, tar)
+
+COMMAND MAP:
+self.command_map = {
+    'pwd': self._translate_pwd,
+    'ls': self._translate_ls,
+    'cat': self._translate_cat,
+    'grep': self._translate_grep,
+    ... (73 total)
+}
+
+Each translator method signature:
+    def _translate_<command>(self, args: str) -> str:
+        \"\"\"Translate Unix <command> to PowerShell\"\"\"
+        # Parse args
+        # Generate PowerShell script
+        return powershell_script
+
+USAGE PATTERN:
+    emulator = CommandEmulator()
+
+    # Check if command is quick (< 20 lines)
+    if emulator.is_quick_command('pwd'):
+        script = emulator.emulate_command('pwd')
+        # script: "(Get-Location).Path"
+
+    # Translate complex command
+    script = emulator.emulate_command('ls -la /home/claude')
+    # script: "Get-ChildItem -Path /home/claude -Force | ..."
+
+    # Execute via ExecutionEngine
+    result = execution_engine.execute_powershell(script)
+
+SPECIAL COMMANDS:
+- find: Fallback translator exists but ExecutionEngine has optimized _execute_find
+- grep/awk/sed: Complex translators but GITBASH_PASSTHROUGH (prefer bash.exe)
+- wget/curl: Basic emulations but executor may have _execute_wget/_execute_curl
+- Checksums: Simple translators but executor may have _execute_sha256sum etc.
+
+SEMANTIC PRESERVATION:
+Critical Unix behaviors preserved:
+1. Exit codes: 0 = success, non-zero = error
+2. Stdout/stderr separation
+3. Flag semantics: -r (recursive), -i (case-insensitive), -v (invert), etc.
+4. Output format: Space-separated, newline-delimited, tab-aligned
+5. Error messages: Match Unix error format where possible
+
+LIMITATIONS:
+1. Some flags unsupported (documented in code comments)
+2. POSIX regex vs .NET regex differences (grep, sed, awk)
+3. Symbolic link handling (Windows vs Unix differences)
+4. Locale/encoding differences (sort, uniq behavior)
+5. Performance: PowerShell scripts slower than native binaries
+
+WHY 73 COMMANDS?
+These are the most common Unix commands used in development workflows:
+- File operations: ls, cat, cp, mv, rm, mkdir, touch, find
+- Text processing: grep, sed, awk, cut, sort, uniq, tr, wc
+- Inspection: pwd, ps, whoami, which, file, stat
+- Network: curl, wget
+- Compression: tar, gzip, zip
+- Utilities: echo, date, sleep, test, basename, dirname
+
+FUTURE EXPANSION:
+Additional commands can be added by:
+1. Create _translate_<command>(self, args: str) method
+2. Add entry to self.command_map
+3. Follow existing patterns for flag parsing and output formatting
 """
 import re
 import logging

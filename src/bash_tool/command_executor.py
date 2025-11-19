@@ -1,5 +1,165 @@
 """
 Command Executor - Main preprocessing and execution coordinator
+
+ARCHITECTURE:
+This is the CENTRAL COORDINATOR for command preprocessing and execution strategy.
+It sits between BashToolExecutor (orchestrator) and the execution layers.
+
+Position in hierarchy:
+    BashToolExecutor (entry point, path translation, security)
+       ↓
+    CommandExecutor ← THIS CLASS (preprocessing + strategy coordination)
+       ↓
+    ├── PipelineStrategy (MACRO: analyze pipelines/chains)
+    ├── ExecuteUnixSingleCommand (MICRO: execute single commands)
+    └── ExecutionEngine (subprocess management)
+
+RESPONSIBILITIES:
+1. PREPROCESSING - Handle bash patterns BEFORE translation/execution:
+   - Alias expansion (ll → ls -la, la → ls -A)
+   - Tilde expansion (~/ → /home/claude/, ~user → /home/user/)
+   - Variable expansion (${VAR}, $VAR, ${VAR:-default}, ${VAR#pattern})
+   - Command substitution ($(command), `command`)
+   - Brace expansion ({a,b,c}, {1..10})
+   - Arithmetic expansion ($((expr)))
+   - Here-document handling (<<EOF ... EOF)
+   - Here-string handling (<<< "string")
+   - Quote processing (preserve spaces, handle escapes)
+
+2. STRATEGIC COORDINATION:
+   - Delegate to PipelineStrategy for pipelines/chains analysis
+   - Delegate to ExecuteUnixSingleCommand for single atomic commands
+   - Execute based on strategy decision (BASH_REQUIRED, BASH_PREFERRED, etc.)
+
+3. RECURSIVE EXECUTION:
+   - Command substitution calls execute() recursively
+   - Example: echo $(ls -la) → execute("ls -la") → substitute result → execute("echo ...")
+
+NOT RESPONSIBLE FOR:
+- Path translation (done by PathTranslator in BashToolExecutor)
+- Security validation (done by SandboxValidator in BashToolExecutor)
+- Command translation Unix→PowerShell (done by CommandEmulator)
+- Subprocess management (done by ExecutionEngine)
+- Pattern matching for pipeline strategies (done by PipelineStrategy)
+
+PREPROCESSING PIPELINE (execute() method):
+    command →
+        STEP 0.0: Expand aliases (ll → ls -la)
+        STEP 0.1: Expand tilde (~/ → /home/claude/)
+        STEP 0.2: Expand variables (${VAR}, $VAR)
+        STEP 0.3: Command substitution ($(cmd), recursively calls execute())
+        STEP 0.4: Brace expansion ({a,b,c} → a b c)
+        STEP 0.5: Arithmetic expansion ($((2+2)) → 4)
+        STEP 1: Process here-documents (<<EOF)
+        STEP 2: Process here-strings (<<< "string")
+        ↓
+        STRATEGY DECISION:
+        ├── Has pipeline/chain? → PipelineStrategy.analyze_pipeline()
+        │   └→ ExecutionStrategy (BASH_REQUIRED, BASH_PREFERRED, POWERSHELL, etc.)
+        │      └→ execute_bash() or execute_powershell()
+        │
+        └── Single command? → ExecuteUnixSingleCommand.execute_single()
+            └→ CompletedProcess
+
+RECURSIVE PATTERN (CRITICAL):
+Command substitution creates recursive calls:
+    execute("echo $(ls -la)") →
+        1. Detect $(...) pattern
+        2. Extract "ls -la"
+        3. execute("ls -la") ← RECURSIVE CALL
+        4. Capture result
+        5. Substitute into "echo file1 file2 file3"
+        6. execute("echo file1 file2 file3")
+
+This is WHY preprocessing must happen BEFORE translation.
+
+DESIGN PATTERN:
+- Coordinator Pattern: Orchestrates multiple specialized components
+- Template Method: execute() follows fixed preprocessing pipeline
+- Strategy Pattern: Delegates to PipelineStrategy/ExecuteUnixSingleCommand
+- Recursive Pattern: execute() can call itself for command substitution
+
+KEY PREPROCESSING METHODS:
+- _expand_aliases(command) → Converts ll to "ls -la", la to "ls -A"
+- _expand_tilde(command) → Converts ~/ to /home/claude/
+- _expand_variables(command) → ${VAR}, ${VAR:-default}, ${VAR#pattern}
+- _process_command_substitution(command) → $(cmd), `cmd` (recursive!)
+- _expand_braces(command) → {a,b,c}, {1..10}, {01..10}
+- _expand_arithmetic(command) → $((2+2)) → 4
+- _process_here_documents(command) → <<EOF content EOF
+- _process_here_strings(command) → <<< "string"
+
+VARIABLE EXPANSION FEATURES:
+- Basic: $VAR, ${VAR}
+- Default value: ${VAR:-default} → "default" if VAR unset
+- Remove prefix: ${VAR#pattern} → Remove shortest prefix matching pattern
+- Remove suffix: ${VAR%pattern} → Remove shortest suffix matching pattern
+- Substring: ${VAR:offset:length}
+- Length: ${#VAR}
+
+COMMAND SUBSTITUTION:
+Two forms supported:
+1. Modern: $(command)
+2. Legacy: `command` (backticks)
+
+Both trigger recursive execute() call.
+
+BRACE EXPANSION:
+- Lists: {a,b,c} → a b c
+- Sequences: {1..10} → 1 2 3 4 5 6 7 8 9 10
+- Zero-padded: {01..10} → 01 02 03 ... 10
+- Letters: {a..z} → a b c ... z
+- Nested: {a,b}{1,2} → a1 a2 b1 b2
+
+ARITHMETIC EXPANSION:
+- $((expression)) → Evaluates math expression
+- Operators: + - * / % ** (power)
+- Example: $((2+2)) → 4, $((10*3)) → 30
+
+HERE-DOCUMENTS:
+    cat <<EOF
+    line 1
+    line 2
+    EOF
+    →
+    Writes temp file with content, replaces with file path
+
+HERE-STRINGS:
+    grep "pattern" <<< "search this text"
+    →
+    Writes temp file with string, adds < temp_file
+
+DATA FLOW EXAMPLE:
+    execute("echo $(ls -la ~/)") →
+        1. Expand tilde: "echo $(ls -la /home/claude/)"
+        2. Command substitution:
+           - Extract: "ls -la /home/claude/"
+           - execute("ls -la /home/claude/") ← RECURSIVE
+           - Result: "file1\\nfile2\\nfile3"
+           - Substitute: "echo file1 file2 file3"
+        3. Single command (no pipeline)
+        4. ExecuteUnixSingleCommand.execute_single("echo file1 file2 file3")
+        5. Return CompletedProcess
+
+USAGE PATTERN:
+    executor = CommandExecutor(
+        working_dir="/workspace",
+        logger=logger,
+        test_mode=False
+    )
+
+    result = executor.execute("ls -la | grep TODO")
+    # result: CompletedProcess(returncode=0, stdout="...", stderr="")
+
+CLEANUP:
+CommandExecutor tracks temporary files (here-docs, here-strings) and cleans them up
+after execution in the finally block.
+
+WHY PREPROCESSING BEFORE TRANSLATION?
+1. Command substitution needs to execute BEFORE translation
+2. Brace expansion creates multiple commands to translate
+3. Variable expansion must happen in bash semantics
+4. Path translation happens BEFORE this layer (in BashToolExecutor)
 """
 import os
 import subprocess

@@ -1,5 +1,138 @@
 """
 Execution Engine - Single point for all subprocess operations
+
+ARCHITECTURE:
+This is the SINGLE SUBPROCESS EXECUTION POINT for the entire bash_tool system.
+ALL subprocess calls MUST go through this class (no direct subprocess.run() elsewhere).
+
+Position in hierarchy:
+    ├── ExecuteUnixSingleCommand
+    ├── PipelineStrategy
+    └── CommandExecutor
+           ↓
+        ExecutionEngine ← THIS CLASS (SINGLE POINT)
+           ↓
+        subprocess.run() / subprocess.Popen()
+
+RESPONSIBILITIES:
+1. Single execution point for ALL subprocess operations
+2. Environment detection and capability discovery:
+   - Python executable detection
+   - Virtual environment setup and management
+   - Git Bash detection (bash.exe)
+   - Native binary detection (grep.exe, awk.exe, sed.exe, diff.exe, tar.exe, jq.exe)
+3. Multiple execution methods:
+   - execute_bash(): Execute via Git Bash (bash.exe -c "command")
+   - execute_native(): Execute native binary (grep.exe args)
+   - execute_powershell(): Execute PowerShell script
+   - execute_cmd(): Execute cmd.exe command
+   - execute_python(): Execute Python script (with venv support)
+4. Test mode: Print commands without executing (for testing)
+5. Logging: Trace all executions for debugging
+6. Metrics: Track execution types (future feature)
+7. Error handling: Centralized subprocess error management
+
+NOT RESPONSIBLE FOR:
+- Command translation (done by CommandEmulator)
+- Execution strategy decisions (done by PipelineStrategy/ExecuteUnixSingleCommand)
+- Path translation (done by PathTranslator)
+- Security validation (done by SandboxValidator)
+- Preprocessing (done by CommandExecutor)
+
+WHY SINGLE POINT?
+1. Test mode: Switch test/production in ONE place (no scattered subprocess calls)
+2. Logging: All executions visible in logs
+3. Metrics: Count execution types (bash vs native vs powershell)
+4. Error handling: Consistent error handling
+5. Environment management: Virtual environment activation in ONE place
+
+CAPABILITY DETECTION:
+On initialization, ExecutionEngine detects available capabilities:
+- self.capabilities['python'] = True/False
+- self.capabilities['bash'] = True/False
+- self.capabilities['grep'] = True/False (native grep.exe)
+- self.capabilities['awk'] = True/False (native awk.exe)
+- etc.
+
+These capabilities are used by upper layers to decide execution strategy.
+
+DESIGN PATTERN:
+- Facade Pattern: Simple interface hiding complex subprocess management
+- Strategy Pattern: Different execution methods (bash, native, powershell, cmd, python)
+- Singleton Pattern (conceptual): Should be single instance per BashToolExecutor
+- Factory Pattern: Creates subprocess with correct configuration
+
+EXECUTION METHODS:
+1. execute_bash(command) → CompletedProcess
+   - Uses: bash.exe -c "command"
+   - Best for: POSIX compatibility, complex pipelines, stderr redirection
+   - Requires: Git Bash installed
+
+2. execute_native(cmd_name, args) → CompletedProcess
+   - Uses: cmd_name.exe args (direct binary execution)
+   - Best for: Performance (no translation overhead)
+   - Requires: Native binary available (grep.exe, awk.exe, etc.)
+
+3. execute_powershell(script) → CompletedProcess
+   - Uses: powershell.exe -Command "script"
+   - Best for: Emulated commands, complex PowerShell scripts
+   - Requires: PowerShell (always available on Windows)
+
+4. execute_cmd(command) → CompletedProcess
+   - Uses: cmd.exe /c "command"
+   - Best for: Simple Windows commands (dir, type, etc.)
+   - Requires: cmd.exe (always available on Windows)
+
+5. execute_python(script) → CompletedProcess
+   - Uses: python.exe script.py (with venv activation if configured)
+   - Best for: Python-based emulations
+   - Requires: Python installed
+
+DATA FLOW:
+    execute_bash("grep -r TODO .") →
+        1. Test mode? → Log and return fake result
+        2. bash.exe available? → Check self.capabilities['bash']
+        3. Build command: ["bash.exe", "-c", "grep -r TODO ."]
+        4. subprocess.run(command, capture_output=True, timeout=timeout)
+        5. Return CompletedProcess
+
+USAGE PATTERN:
+    engine = ExecutionEngine(
+        working_dir=Path("C:/workspace"),
+        test_mode=False,
+        logger=logger
+    )
+
+    # Check capabilities
+    if engine.capabilities['bash']:
+        result = engine.execute_bash("find . -name '*.py'")
+    elif engine.is_available('grep'):
+        result = engine.execute_native('grep', ['-r', 'TODO', '.'])
+    else:
+        result = engine.execute_powershell("Get-ChildItem -Recurse *.py")
+
+TEST MODE:
+When test_mode=True:
+- All capabilities set to True (bash, python, native bins)
+- Commands logged but NOT executed
+- Fake CompletedProcess returned with test_mode_stdout parameter
+
+VIRTUAL ENVIRONMENT:
+ExecutionEngine manages Python virtual environment:
+1. Detection: Check if venv exists at workspace_root/venv
+2. Activation: Prepend venv/Scripts to PATH when executing Python
+3. Isolation: Python scripts run in isolated environment
+
+NATIVE BINARY DETECTION:
+ExecutionEngine scans PATH for native Windows binaries:
+- grep.exe (GNU grep for Windows)
+- awk.exe (GNU awk)
+- sed.exe (GNU sed)
+- diff.exe (GNU diff)
+- tar.exe (BSD tar, included in Windows 10+)
+- jq.exe (JSON processor)
+
+These provide BEST PERFORMANCE (no translation) when available.
 """
 import os
 import subprocess

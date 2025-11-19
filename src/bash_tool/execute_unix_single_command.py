@@ -1,5 +1,82 @@
 """
 Execute Unix Single Command - MICRO level single command execution strategy
+
+ARCHITECTURE:
+This is the MICRO LEVEL execution strategy for SINGLE ATOMIC Unix commands.
+Complementary to PipelineStrategy (MACRO level for pipelines/chains).
+
+Position in hierarchy:
+    CommandExecutor
+       ↓
+    ├── PipelineStrategy (MACRO: pipelines, chains, complex patterns)
+    └── ExecuteUnixSingleCommand (MICRO: single atomic commands) ← THIS CLASS
+           ↓
+        ├── ExecutionEngine (subprocess management)
+        └── CommandEmulator (Unix→PowerShell translation)
+
+RESPONSIBILITIES:
+1. Execute ONE ATOMIC Unix command (no pipes, no chains, no command substitution)
+2. Choose optimal execution strategy for single command:
+   - PRIORITY 1: Native Binary (grep.exe, awk.exe) → Best performance, zero translation
+   - PRIORITY 2: Quick Script (< 20 lines PowerShell) → Fast inline emulation
+   - PRIORITY 3: Bash Git (if available) → POSIX compatibility
+   - PRIORITY 4: Heavy Script (> 20 lines PowerShell) → Full emulation
+3. Simple, focused decision logic (no complex fallbacks)
+4. Command name extraction from full command string
+
+NOT RESPONSIBLE FOR:
+- Analyzing pipelines/chains (that's PipelineStrategy's job at MACRO level)
+- Managing subprocess (that's ExecutionEngine's job)
+- Path translation (already done by PathTranslator before this point)
+- Security validation (already done by SandboxValidator before this point)
+- Bash pattern preprocessing (already done by CommandExecutor before this point)
+
+STRATEGY DECISION TREE:
+    execute_single(command) →
+        Parse command → extract cmd_name
+           ↓
+        1. Is native binary available? (grep.exe, awk.exe, etc.)
+           YES → ExecutionEngine.execute_native() → DONE
+           NO → Continue
+           ↓
+        2. Is "quick" command? (< 20 lines PowerShell) AND not in GITBASH_PASSTHROUGH?
+           YES → CommandEmulator.emulate_command() → ExecutionEngine.execute_powershell()
+           NO → Continue
+           ↓
+        3. Is Git Bash available? AND command supported?
+           YES → ExecutionEngine.execute_bash() → DONE (or fallback to #4 if fails)
+           NO → Continue
+           ↓
+        4. CommandEmulator.emulate_command() → ExecutionEngine.execute_powershell()
+
+DESIGN PATTERN:
+- Strategy Pattern: Different execution strategies for different command types
+- Chain of Responsibility: Try strategies in priority order until one succeeds
+- Adapter Pattern: CommandEmulator adapts Unix commands to PowerShell
+
+DATA FLOW:
+    execute_single("grep -r pattern .") →
+        1. Parse → cmd_name = "grep"
+        2. Check native: is_available("grep") → YES → execute_native("grep", ["-r", "pattern", "."])
+        3. Return CompletedProcess
+
+USAGE PATTERN:
+    executor = ExecuteUnixSingleCommand(logger=logger, test_mode=False)
+    result = executor.execute_single("grep -r TODO src/")
+    # result: subprocess.CompletedProcess(returncode=0, stdout="...", stderr="")
+
+KEY CONCEPTS:
+- ATOMIC: Command must be single, no pipes/chains
+- COMMAND NAME: First word of command used to determine strategy
+- QUICK vs HEAVY: CommandEmulator distinguishes quick (< 20 lines) vs heavy (> 20 lines) scripts
+- GITBASH_PASSTHROUGH: Commands better handled by Git Bash than PowerShell emulation
+  (find, awk, sed, grep with complex patterns)
+
+STRATEGY RATIONALE:
+1. Native binaries: Best performance (no translation, direct execution)
+2. Quick scripts: Fast (inline PowerShell, no bash.exe overhead)
+3. Bash Git: POSIX compatibility (complex commands work correctly)
+4. Heavy scripts: Full emulation (fallback when nothing else works)
 """
 import subprocess
 import logging

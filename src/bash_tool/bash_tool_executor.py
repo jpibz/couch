@@ -1,5 +1,61 @@
 """
 Bash Tool Executor - Main orchestrator (thin layer)
+
+ARCHITECTURE:
+This is the TOP-LEVEL ENTRY POINT for bash command execution on Windows.
+It is a THIN ORCHESTRATOR that delegates almost all work to specialized components.
+
+Position in hierarchy:
+    USER/API
+       ↓
+    BashToolExecutor (this class) ← ORCHESTRATOR
+       ↓
+    ├── PathTranslator ← Unix/Windows path conversion
+    ├── SandboxValidator ← Security checks
+    └── CommandExecutor ← Command execution strategy + preprocessing
+
+RESPONSIBILITIES:
+1. Tool registration and initialization (inherits from ToolExecutor ABC)
+2. Path translation orchestration (Unix → Windows before execution, Windows → Unix in results)
+3. Security orchestration (sandbox validation)
+4. Result formatting (matches bash_tool API contract)
+5. Timeout management (different timeouts for python vs other commands)
+6. Temp file cleanup
+
+NOT RESPONSIBLE FOR:
+- Command translation (delegated to CommandEmulator via CommandExecutor)
+- Execution strategy decisions (delegated to PipelineStrategy/ExecuteUnixSingleCommand)
+- Subprocess management (delegated to ExecutionEngine)
+- Bash pattern preprocessing (delegated to CommandExecutor)
+- Path translation logic (delegated to PathTranslator)
+- Security validation logic (delegated to SandboxValidator)
+
+DESIGN PATTERN:
+- Facade Pattern: Provides simple interface hiding complex subsystem
+- Delegation Pattern: Delegates almost all work to specialized components
+- Template Method: execute() method follows fixed orchestration template
+
+DATA FLOW:
+    execute(tool_input) →
+        1. PathTranslator.translate_paths_in_string(command, 'to_windows')
+        2. SandboxValidator.validate_command(command)
+        3. CommandExecutor.execute(command) → (result, translated_cmd, method)
+        4. PathTranslator.translate_paths_in_string(result, 'to_unix')
+        5. _format_result(result) → formatted_string
+
+USAGE PATTERN:
+    executor = BashToolExecutor(working_dir="/home/claude/workspace")
+    result = executor.execute({"command": "ls -la /home/claude"})
+    # Returns: "Exit code: 0\\n\\nfile1.txt\\nfile2.txt"
+
+CONFIGURATION:
+- TESTMODE flag: Set to True to skip path translation and sandbox validation (for testing)
+- working_dir: Tool working directory (from ConfigurationManager)
+- scratch_dir: Tool-specific scratch directory (for temporary files)
+
+API CONTRACT:
+The execute() method returns a string formatted as:
+    Exit code: N [\\n\\n stdout] [\\n\\n--- stderr ---\\n stderr]
 """
 import logging
 from pathlib import Path

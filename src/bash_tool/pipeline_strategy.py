@@ -1,5 +1,139 @@
 """
 Pipeline Strategy - MACRO level pipeline analysis
+
+ARCHITECTURE:
+This is the MACRO LEVEL strategic analyzer for PIPELINES and COMMAND CHAINS.
+Complementary to ExecuteUnixSingleCommand (MICRO level for single commands).
+
+Position in hierarchy:
+    CommandExecutor
+       ↓
+    ├── PipelineStrategy (MACRO: pipelines, chains, complex patterns) ← THIS CLASS
+    │      ↓
+    │   Creates: PipelineAnalysis + ExecutionStrategy
+    │
+    └── ExecuteUnixSingleCommand (MICRO: single atomic commands)
+
+RESPONSIBILITIES:
+1. Analyze entire pipeline/chain structure (pattern recognition)
+2. Detect structural elements (pipes, chains, redirections, process substitution)
+3. Pattern matching against known pipeline scenarios (140+ patterns)
+4. Decide overall execution strategy (BASH_REQUIRED, BASH_PREFERRED, POWERSHELL, etc.)
+5. Provide fallback strategies when primary strategy fails
+6. Determine if pipeline can be split (future optimization)
+
+NOT RESPONSIBLE FOR:
+- Executing commands (done by ExecutionEngine)
+- Translating syntax (done by CommandEmulator)
+- Managing subprocess (done by ExecutionEngine)
+- Path translation (done by PathTranslator)
+- Single command execution (done by ExecuteUnixSingleCommand)
+
+STRATEGY TYPES:
+1. BASH_REQUIRED: Command MUST use bash.exe (no alternative)
+   - Process substitution: <(...) or >(...)
+   - Complex pipelines: find | xargs, awk with BEGIN/END, sed multi-expression
+   - Stderr redirection: 2>, 2>&1, |&
+   - Command chains: &&, ||, ; (for correct semantics)
+
+2. BASH_PREFERRED: bash.exe is better but PowerShell can work
+   - Multi-stage text processing: sort | uniq, grep | sort
+   - head/tail in pipelines
+   - Commands with subtle edge cases
+
+3. POWERSHELL: PowerShell emulation is sufficient
+   - Simple pipelines: echo | base64, cat | grep (simple)
+   - Well-emulated commands
+
+4. SINGLE: Not a pipeline, delegate to ExecuteUnixSingleCommand
+   - No pipes, no chains, single atomic command
+
+5. FAIL: Cannot execute (process substitution without bash.exe)
+
+PATTERN MATCHING:
+140+ regex patterns organized in priority categories:
+- BASH_REQUIRED patterns (55+ patterns): find|grep, xargs, awk|*, sed|*, complex grep
+- BASH_PREFERRED patterns (35+ patterns): sort|uniq, head|tail, grep|sort
+- POWERSHELL_OK patterns (10+ patterns): echo|base64, cat|base64, ls|wc
+
+Pattern format: regex → strategy_type
+Example: r'find.*\|.*grep' → 'bash_exe_required'
+
+ANALYSIS FLOW:
+    analyze_pipeline(command) →
+        1. Detect structural elements (pipes, chains, redirections)
+        2. Extract command names from pipeline parts
+        3. Pattern matching (140+ patterns)
+        4. Determine complexity level (HIGH/MEDIUM/LOW)
+        5. Return PipelineAnalysis
+
+    decide_execution_strategy(analysis, command) →
+        1. Check CRITICAL patterns (process subst, stderr redir, chains)
+        2. Check matched pattern from analysis
+        3. Determine if bash.exe available
+        4. Return ExecutionStrategy with fallbacks
+
+DESIGN PATTERN:
+- Strategy Pattern: Different execution strategies based on pipeline characteristics
+- Pattern Matching: Regex-based pattern recognition
+- Factory Pattern: Creates ExecutionStrategy objects based on analysis
+- Fallback Chain: Primary strategy with optional fallback strategy
+
+DATA FLOW:
+    analyze_pipeline("find . -name '*.py' | xargs grep TODO") →
+        PipelineAnalysis(
+            has_pipeline=True,
+            command_count=2,
+            command_names=['find', 'xargs'],
+            matched_pattern=r'find.*\|.*xargs',
+            complexity_level='HIGH'
+        )
+        ↓
+    decide_execution_strategy(analysis, command) →
+        ExecutionStrategy(
+            strategy_type='BASH_REQUIRED',
+            reason='Pipeline pattern requires bash.exe: find.*\|.*xargs'
+        )
+
+USAGE PATTERN:
+    strategy = PipelineStrategy(
+        git_bash_available=True,
+        native_bins={'grep': 'C:\\Tools\\grep.exe'},
+        logger=logger,
+        test_mode=False
+    )
+
+    analysis = strategy.analyze_pipeline("find . | grep TODO")
+    execution_strategy = strategy.decide_execution_strategy(analysis, "find . | grep TODO")
+
+    if execution_strategy.strategy_type == 'BASH_REQUIRED':
+        # Use bash.exe
+        pass
+    elif execution_strategy.has_fallback():
+        # Try primary, fallback to execution_strategy.fallback_strategy
+        pass
+
+KEY CONCEPTS:
+- MACRO vs MICRO: This handles complex patterns, ExecuteUnixSingleCommand handles atomic commands
+- PATTERN PRIORITY: BASH_REQUIRED > BASH_PREFERRED > POWERSHELL_OK > DEFAULT
+- CRITICAL PATTERNS: Process substitution, stderr redirection, command chains REQUIRE bash
+- COMPLEXITY LEVELS:
+  - HIGH: Process substitution OR 3+ commands in pipeline
+  - MEDIUM: Pipeline OR chain
+  - LOW: Single command
+- GITBASH_PASSTHROUGH: Commands in constants.py that should ALWAYS use bash.exe
+  (find, awk, sed, grep, diff, tar, sort, uniq, split, join, comm, paste, xargs, cut, tr, tee)
+
+STRATEGIC DECISIONS:
+1. Performance: Native binary > Quick script > Bash > Heavy script
+2. Correctness: If bash.exe not available for REQUIRED pattern → warn and try PowerShell (may fail)
+3. Safety: Default to bash.exe for unrecognized complex patterns (safety net)
+4. Fallbacks: BASH_PREFERRED includes fallback_strategy pointing to POWERSHELL
+
+FUTURE OPTIMIZATION:
+- can_split_pipeline(): Intelligent pipeline splitting for hybrid execution
+  (e.g., "find . -name '*.py' | grep TODO | wc -l" could split at | boundaries)
+  Currently returns False (execute as whole)
 """
 import re
 import logging
