@@ -231,10 +231,7 @@ class ExecutionEngine:
 
     def __init__(self,
                  test_mode: bool = False,
-                 logger: logging.Logger = None,
-                 python_executable: Optional[str] = None,
-                 workspace_root: Optional[Path] = None,
-                 virtual_env: Optional[str] = None):
+                 logger: logging.Logger = None):
         """
         Initialize execution engine.
 
@@ -247,13 +244,13 @@ class ExecutionEngine:
         """
         self.test_mode = test_mode
         self.logger = logger or logging.getLogger('ExecutionEngine')
-
+        self.path_translator = PathTranslator()
         # Python and virtual environment setup
-        self.workspace_root = workspace_root
+        self.workspace_root = self.path_translator.get_workspace_root()
 
         if test_mode:
             # TEST MODE: Skip detection and setup, assume everything is available
-            self.python_executable = python_executable or 'python'
+            self.python_executable = 'python'
             self.virtual_env = None
             self.environment = os.environ.copy()
 
@@ -588,8 +585,7 @@ class ExecutionEngine:
                 raise RuntimeError(f"Virtual environment not found: {venv_path}")
         
         # Check default BASH_TOOL_ENV
-        path_translator = PathTranslator()
-        default_venv = path_translator.workspace_root / 'BASH_TOOL_ENV'
+        default_venv =  self.path_translator.get_workspace_root() / 'BASH_TOOL_ENV'
         
         if default_venv.exists():
             self.logger.info(f"Using default venv: {default_venv}")
