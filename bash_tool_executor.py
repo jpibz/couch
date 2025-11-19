@@ -1069,9 +1069,15 @@ class ExecuteUnixSingleCommand:
         # Commands PREFERRED for bash.exe (from PipelineStrategy)
         self.BASH_EXE_PREFERRED = PipelineStrategy.BASH_EXE_PREFERRED
 
-    def execute_single(self, cmd_name: str, command: str, parts: List[str]) -> Tuple[str, bool]:
+    def execute_single(self, command: str) -> Tuple[str, bool]:
         """
         Execute single Unix command with optimal strategy.
+
+        RESPONSIBILITY:
+        - Accept FULL command string (like CommandEmulator.emulate_command)
+        - Parse command INTERNALLY to extract cmd_name
+        - Use cmd_name ONLY to choose execution strategy
+        - Return executable command
 
         PRIORITY CHAIN:
         1. Bash Passthrough (BASH_EXE_PREFERRED commands) - perfect compatibility
@@ -1080,13 +1086,18 @@ class ExecuteUnixSingleCommand:
         4. Intelligent Fallback - try multiple strategies
 
         Args:
-            cmd_name: Command name (e.g., 'ls', 'grep')
-            command: Full command string
-            parts: Command parts [cmd, arg1, arg2, ...]
+            command: Full command string (e.g., "ls -la /home")
 
         Returns:
             Tuple[str, bool]: (executable_command, use_powershell)
         """
+        # ================================================================
+        # INTERNAL PARSING - Extract cmd_name to choose strategy
+        # ================================================================
+        import shlex
+        parts = shlex.split(command) if ' ' in command else [command]
+        cmd_name = parts[0]
+
         if self.test_mode:
             self.logger.info(f"[TEST-SINGLE-EXEC] {cmd_name}: {command}")
 
@@ -1709,7 +1720,7 @@ class CommandExecutor:
                     return bash_cmd, False
             # Fallback to single command execution
             self.logger.debug("bash.exe preferred but trying emulation fallback")
-            return self.single_executor.execute_single(cmd_name, command, parts)
+            return self.single_executor.execute_single(command)
 
         # Strategy: FAIL (cannot execute)
         elif strategy.strategy_type == 'FAIL':
@@ -1719,7 +1730,7 @@ class CommandExecutor:
         # Strategy: POWERSHELL or SINGLE (delegate to micro-level executor)
         else:
             # Delegate to ExecuteUnixSingleCommand for micro-level strategy
-            return self.single_executor.execute_single(cmd_name, command, parts)
+            return self.single_executor.execute_single(command)
 
     # ========================================================================
     # EXECUTION MAP - Command dispatcher
