@@ -1102,7 +1102,7 @@ class ExecuteUnixSingleCommand:
         self.engine = ExecutionEngine( self.logger, self.test_mode)
         self.emulator = CommandEmulator()
 
-    def execute_single(self, command: str) -> Tuple[str, bool]:
+    def execute_single(self, command: str) -> subprocess.CompletedProcess:
         """
         Execute single ATOMIC Unix command with optimal strategy.
 
@@ -1138,7 +1138,10 @@ class ExecuteUnixSingleCommand:
 
         if not parts:
             # Empty command
-            return command, True
+            return subprocess.CompletedProcess(
+                returncode=-1,
+                stderr="Empty command"
+            )
 
         cmd_name = parts[0]
 
@@ -1218,9 +1221,6 @@ class CommandExecutor:
         # ExecutionEngine - UNICO PUNTO per subprocess
         self.engine = ExecutionEngine(test_mode=test_mode, logger=self.logger)
 
-        # Detect available native binaries
-        self.available_bins = self._detect_native_binaries()
-
         # ====================================================================
         # STRATEGIC LAYER - Delegation to specialized classes
         # ====================================================================
@@ -1233,141 +1233,25 @@ class CommandExecutor:
         )
 
         # Single command executor (MICRO level)
-        # Needs access to translators and execution map
-        # We'll initialize this lazily when command_translator is available
-        self._single_executor = None
+        self._single_executor = ExecuteUnixSingleCommand(
+            logger=self.logger,
+            test_mode=self.test_mode
+        )
 
-        self.logger.info(f"CommandExecutor initialized")
-        self.logger.info(f"Native binaries: {len(self.available_bins)} detected")
-
-    @property
-    def single_executor(self) -> ExecuteUnixSingleCommand:
-        """
-        Lazy initialization of ExecuteUnixSingleCommand.
-
-        Provides all dependencies needed for execution strategy.
-        """
-        if self._single_executor is None:
-            self._single_executor = ExecuteUnixSingleCommand(
-                execution_engine=self.executor,
-                command_emulator=CommandEmulator(),
-                git_bash_exe=self.git_bash_exe,
-                git_bash_converter=self.gitbash_converter,
-                logger=self.logger,
-                test_mode=self.test_mode
-            )
-
-        return self._single_executor
+        self.logger.info("CommandExecutor initialized")
 
     # ========================================================================
     # MAIN EXECUTION ENTRY POINT
     # ========================================================================
 
-    def execute(self, command: str, timeout: int, cwd: Path, env: dict,
-                preprocessing_callbacks: dict = None) -> Tuple[subprocess.CompletedProcess, str, str]:
-        """
-        Main entry point for command execution.
+    def execute(self, command: str) -> subprocess.CompletedProcess:
 
-        ARCHITECTURE:
-        BashToolExecutor handles path translation and security validation.
-        CommandExecutor handles preprocessing, translation, and execution.
-
-        Args:
-            command: Command with Windows paths (already translated by BashToolExecutor)
-            timeout: Command timeout in seconds
-            cwd: Working directory
-            env: Environment variables
-            preprocessing_callbacks: Dict of preprocessing methods from BashToolExecutor
-                                   (temporary - will be moved here)
-
-        Returns:
-            Tuple[CompletedProcess, translated_cmd, method]:
-                - result: execution result
-                - translated_cmd: translated command (for logging)
-                - method: translation method (for logging)
-        """
-        # Temp files tracking for cleanup
-        temp_files = []
-
+        import shlex
         try:
-            # NOTE: Preprocessing methods are still in BashToolExecutor
-            # They will be moved here in next iteration
-            # For now, preprocessing must be done by BashToolExecutor before calling this
-
-            # STEP 1: Translate Unix commands -> Windows commands
-            translated_cmd, use_shell, method = self.command_translator.translate(command)
-
-            # STEP 2: Strategy selection - decide execution method
-            parts = translated_cmd.split() if translated_cmd else []
-            executable_cmd, use_powershell = self.execute_bash(translated_cmd, parts)
-            final_cmd = executable_cmd
-
-            # STEP 3: Execute via ExecutionEngine
-            if 'powershell' in final_cmd.lower() and '-File' in final_cmd:
-                # PowerShell script command (from control structures)
-                result = self.engine.execute_powershell(
-                    final_cmd,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8',
-                    shell=True
-                )
-            elif use_powershell:
-                result = self.engine.execute_powershell(
-                    final_cmd,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8'
-                )
-            else:
-                result = self.engine.execute_cmd(
-                    final_cmd,
-                    timeout=timeout,
-                    cwd=str(cwd),
-                    env=env,
-                    errors='replace',
-                    encoding='utf-8'
-                )
-
-            return result, translated_cmd, method
-
-        except subprocess.TimeoutExpired as e:
-            # Re-raise with original exception
-            raise
-        except Exception as e:
-            self.logger.error(f"Execution error: {e}", exc_info=True)
-            raise
-
-    def execute_bash(self, command: str, parts: List[str]) -> Tuple[str, bool]:
-        """
-        Execute bash command with optimal strategy - REFACTORED.
-
-        ARCHITECTURE:
-        This method is now DRAMATICALLY simplified through strategic delegation:
-
-        1. PipelineStrategy analyzes the command (MACRO level)
-        2. PipelineStrategy decides execution strategy
-        3. Based on strategy:
-           - BASH_REQUIRED/PREFERRED -> Git Bash execution
-           - FAIL -> Return error message
-           - SINGLE/POWERSHELL -> Delegate to ExecuteUnixSingleCommand (MICRO level)
-
-        BEFORE: ~200 lines of complex conditional logic
-        AFTER: ~30 lines of clean delegation
-
-        Args:
-            command: Full command string
-            parts: Command parts [cmd, arg1, arg2, ...]
-
-        Returns:
-            Tuple[str, bool]: (executable_command, use_powershell)
-        """
-        if not parts:
-            return command, False
+            parts = shlex.split(command) if ' ' in command else [command]
+        except ValueError:
+            # Quote parsing error, fallback to simple split
+            parts = command.split()
 
         cmd_name = parts[0]
 
@@ -1419,64 +1303,6 @@ class CommandExecutor:
         else:
             # Delegate to ExecuteUnixSingleCommand for micro-level strategy
             return self.single_executor.execute_single(command)
-
-    # ========================================================================
-    # EXECUTION MAP - Command dispatcher
-    # ========================================================================
-    
-    def _get_execution_map(self) -> Dict[str, Callable]:
-        """
-        Get execution map - command name to executor function.
-        
-        This is the PATTERN CACHE of known command strategies.
-        """
-        return {
-            # Heavy emulation - Complex PowerShell scripts
-            'find': self._execute_find,
-            'curl': self._execute_curl,
-            'sed': self._execute_sed,
-            'diff': self._execute_diff,
-            'sort': self._execute_sort,
-            'uniq': self._execute_uniq,
-            'awk': self._execute_awk,
-            'split': self._execute_split,
-            'grep': self._execute_grep,
-            'join': self._execute_join,
-            'ln': self._execute_ln,
-            
-            # Checksums with check mode
-            'sha256sum': self._execute_sha256sum,
-            'sha1sum': self._execute_sha1sum,
-            'md5sum': self._execute_md5sum,
-            
-            # Compression
-            'gzip': self._execute_gzip,
-            'gunzip': self._execute_gunzip,
-            'tar': self._execute_tar,
-            'zip': self._execute_zip,
-            'unzip': self._execute_unzip,
-            
-            # Binary inspection
-            'hexdump': self._execute_hexdump,
-            'strings': self._execute_strings,
-            
-            # Utilities
-            'base64': self._execute_base64,
-            'timeout': self._execute_timeout,
-            'watch': self._execute_watch,
-            'column': self._execute_column,
-            'jq': self._execute_jq,
-            'head': self._execute_head,
-            'tail': self._execute_tail,
-            'cat': self._execute_cat,
-            'wc': self._execute_wc,
-            'test': self._execute_test,
-            'paste': self._execute_paste,
-            'comm': self._execute_comm,
-
-            # Network
-            'wget': self._execute_wget,
-        }
     
     # ========================================================================
     # EXECUTION METHODS - Command-specific implementations
@@ -7246,15 +7072,9 @@ class BashToolExecutor(ToolExecutor):
     - PathTranslator: Unix/Windows path conversion
     - SandboxValidator: Security checks
     - CommandExecutor: Command execution strategy
-    - ExecutionEngine: Subprocess management
     """
 
     def __init__(self, working_dir: str, enabled: bool = False,
-                 python_executable: Optional[str] = None,
-                 virtual_env: Optional[str] = None,
-                 default_timeout: int = 30,
-                 python_timeout: int = 60,
-                 use_git_bash: bool = False,
                  **kwargs):
         """
         Initialize BashToolExecutor
@@ -7262,14 +7082,7 @@ class BashToolExecutor(ToolExecutor):
         Args:
             working_dir: Tool working directory (from ConfigurationManager)
             enabled: Tool enabled state
-            python_executable: Python path (OPTIONAL - auto-detected if missing)
-            virtual_env: Virtual env path (OPTIONAL - defaults to BASH_TOOL_ENV)
-            default_timeout: Default command timeout
-            python_timeout: Python script timeout
-            use_git_bash: EXPERIMENTAL - Use Git Bash passthrough (100% compatibility)
             
-        Raises:
-            RuntimeError: If Python not found and python_executable not provided
         """
         super().__init__('bash_tool', enabled)
 
@@ -7278,9 +7091,6 @@ class BashToolExecutor(ToolExecutor):
         self.TESTMODE = TESTMODE
 
         self.working_dir = Path(working_dir)
-        self.default_timeout = default_timeout
-        self.python_timeout = python_timeout
-        self.use_git_bash = use_git_bash
 
         # Initialize components
         self.path_translator = PathTranslator()
@@ -7290,65 +7100,19 @@ class BashToolExecutor(ToolExecutor):
         self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
         self.scratch_dir.mkdir(parents=True, exist_ok=True)
 
-        # Git Bash detection (if enabled)
-        self.git_bash_exe = None
-        if use_git_bash:
-            self.git_bash_exe = self._detect_git_bash()
-            if self.git_bash_exe:
-                self.logger.info(f"Git Bash EXPERIMENTAL mode enabled: {self.git_bash_exe}")
-            else:
-                self.logger.warning("Git Bash not found - falling back to command translation")
-
         # Get claude home directory (needed for preprocessing)
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
         # Initialize CommandExecutor (execution strategy layer)
-        # Will be fully initialized after Git Bash detection
-        self.command_executor = None
-        
-        # Python executable - CRITICAL DEPENDENCY
-        try:
-            if python_executable:
-                # Validate provided executable
-                result = subprocess.run(
-                    [python_executable, '--version'],
-                    capture_output=True,
-                    timeout=2,
-                    text=True
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(f"Invalid Python executable: {python_executable}")
 
-                self.python_executable = python_executable
-                self.logger.info(f"Using provided Python: {python_executable}")
-            else:
-                # Auto-detect (may raise RuntimeError)
-                self.python_executable = self._detect_system_python()
-
-        except RuntimeError as e:
-            # Python detection failed - tool disabled
-            self.python_executable = None
-            self.virtual_env = None
-            self.logger.error(f"BashToolExecutor initialization failed: {e}")
-            raise
-
-        # Virtual environment - only if Python available
-        self.virtual_env = self._setup_virtual_env(virtual_env)
-
-        # Initialize CommandExecutor with all dependencies now available
         self.command_executor = CommandExecutor(
-            simple_translator=self.simple_translator,
-            emulative_translator=self.emulative_translator,
-            pipeline_translator=self.pipeline_translator,
-            git_bash_exe=self.git_bash_exe,
             claude_home_unix=self.claude_home_unix,
             logger=self.logger,
             test_mode=self.TESTMODE
         )
         
         self.logger.info(
-            f"BashToolExecutor initialized: Python={self.python_executable}, "
-            f"VEnv={self.virtual_env}, GitBash={'ENABLED' if self.git_bash_exe else 'DISABLED'}"
+            "BashToolExecutor initialized"
         )
     
     def execute(self, tool_input: dict) -> str:
