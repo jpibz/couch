@@ -528,7 +528,18 @@ class ExecutionEngine:
                 stderr=""
             )
 
-        self.logger.debug(f"Executing Native: {cmd_str}")
+        # Check if executing Python - use configured environment with venv
+        bin_name = Path(bin_path).name.lower()
+        is_python = bin_name in ['python', 'python.exe', 'python3', 'python3.exe']
+
+        if is_python:
+            # Use configured environment (includes venv PATH, PYTHONIOENCODING, etc.)
+            kwargs['env'] = self.environment
+            venv_info = f" with venv: {self.virtual_env}" if self.virtual_env else ""
+            self.logger.debug(f"Executing Python{venv_info}: {cmd_str}")
+        else:
+            self.logger.debug(f"Executing Native: {cmd_str}")
+
         return subprocess.run(
             [bin_path] + args,
             capture_output=True,
