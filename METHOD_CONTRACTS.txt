@@ -1,0 +1,315 @@
+# METHOD_CONTRACTS.txt
+# Quick reference for method signatures and call chains
+# Format: grep-friendly with cross-references
+
+================================================================================
+FLAT METHOD LIST (grep-friendly)
+================================================================================
+
+# Entry Point
+BashToolExecutor.execute(tool_input: Dict) -> str
+BashToolExecutor._format_result(result, original_cmd: str, translated_cmd: str, method: str) -> str
+BashToolExecutor.get_definition() -> Dict
+
+# Orchestration
+CommandExecutor.execute(command: str, timeout: int) -> subprocess.CompletedProcess
+CommandExecutor._expand_aliases(command: str) -> str
+CommandExecutor._expand_tilde(command: str) -> str
+CommandExecutor._expand_variables(command: str) -> str
+CommandExecutor._process_command_substitution(command: str) -> str
+CommandExecutor._expand_braces(command: str) -> str
+CommandExecutor._expand_arithmetic(command: str) -> str
+CommandExecutor._process_here_documents(command: str) -> Tuple[str, List[Path]]
+CommandExecutor._process_here_strings(command: str) -> Tuple[str, List[Path]]
+CommandExecutor._cleanup_temp_files(temp_files: List[Path]) -> None
+
+# Strategy MACRO
+PipelineStrategy.analyze_pipeline(command: str) -> PipelineAnalysis
+PipelineStrategy.decide_execution_strategy(analysis: PipelineAnalysis, command: str) -> ExecutionStrategy
+PipelineStrategy.can_split_pipeline(command: str, analysis: PipelineAnalysis) -> Tuple[bool, List[int]]
+
+# Strategy MICRO
+ExecuteUnixSingleCommand.execute_single(command: str, test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecuteUnixSingleCommand._needs_powershell(command: str) -> bool
+ExecuteUnixSingleCommand._adapt_for_powershell(command: str) -> str
+
+# Translation
+CommandEmulator.emulate_command(unix_command: str) -> str
+CommandEmulator.is_quick_command(cmd_name: str) -> bool
+CommandEmulator._translate_<command>(args: str) -> str  # 73 translators
+
+PathTranslator.to_windows(unix_path: str) -> Path
+PathTranslator.to_unix(windows_path: Path) -> str
+PathTranslator.translate_paths_in_string(text: str, direction: str) -> str
+PathTranslator.get_claude_home_unix() -> str
+PathTranslator.get_tool_scratch_directory(tool_name: str) -> Path
+
+SandboxValidator.validate_command(command: str) -> Tuple[bool, str]
+SandboxValidator._contains_command(command: str, cmd_name: str) -> bool
+SandboxValidator._check_path_boundaries(command: str) -> Tuple[bool, str]
+SandboxValidator._check_drive_access(command: str) -> Tuple[bool, str]
+SandboxValidator._validate_restricted_command(command: str, cmd_name: str) -> Tuple[bool, str]
+
+# Execution
+ExecutionEngine.execute_bash(command: str, test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecutionEngine.execute_native(cmd_name: str, args: List[str], test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecutionEngine.execute_powershell(script: str, test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecutionEngine.execute_cmd(command: str, test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecutionEngine.execute_python(script: str, test_mode_stdout: Optional[str]) -> subprocess.CompletedProcess
+ExecutionEngine.is_available(name: str) -> bool
+ExecutionEngine._detect_available_capabilities() -> Dict[str, bool]
+ExecutionEngine._setup_virtual_env(virtual_env: Optional[Path]) -> Optional[Path]
+ExecutionEngine._setup_environment() -> Dict[str, str]
+
+# Data Structures
+PipelineAnalysis(has_pipeline, has_chain, has_redirection, has_stderr_redir, has_process_subst, matched_pattern, complexity_level, command_count, command_names)
+ExecutionStrategy(strategy_type, can_split, split_points, reason, fallback_strategy)
+ExecutionStrategy.has_fallback() -> bool
+ExecutionStrategy.is_bash_strategy() -> bool
+
+# Abstract Base
+ToolExecutor.execute(tool_input: Dict) -> str  # ABSTRACT
+ToolExecutor.get_definition() -> Dict  # ABSTRACT
+ToolExecutor.enable() -> None
+ToolExecutor.disable() -> None
+
+
+================================================================================
+CALL CHAINS (who calls whom)
+================================================================================
+
+=== BashToolExecutor.execute() ===
+  Input: {"command": str, "description": str}
+  Output: "Exit code: N\n\nstdout\n\n--- stderr ---\nstderr"
+
+  Calls:
+    1. PathTranslator.translate_paths_in_string(command, 'to_windows')
+    2. SandboxValidator.validate_command(command)
+    3. CommandExecutor.execute(command, timeout)
+    4. PathTranslator.translate_paths_in_string(result, 'to_unix')
+    5. self._format_result(result, command, translated_cmd, method)
+
+=== CommandExecutor.execute() ===
+  Input: Unix command string (after path translation, before preprocessing)
+  Output: subprocess.CompletedProcess(returncode, stdout, stderr)
+
+  Preprocessing sequence:
+    1. self._expand_aliases(command)
+    2. self._expand_tilde(command)
+    3. self._expand_variables(command)
+    4. self._process_command_substitution(command)  # RECURSIVE!
+    5. self._expand_braces(command)
+    6. self._expand_arithmetic(command)
+    7. self._process_here_documents(command)
+    8. self._process_here_strings(command)
+
+  Strategy dispatch:
+    9. PipelineStrategy.analyze_pipeline(command)
+   10. PipelineStrategy.decide_execution_strategy(analysis, command)
+
+  Execution:
+   11a. If BASH_REQUIRED/PREFERRED → ExecutionEngine.execute_bash()
+   11b. If SINGLE → ExecuteUnixSingleCommand.execute_single()
+
+=== PipelineStrategy Flow ===
+  analyze_pipeline(command: str) -> PipelineAnalysis
+    Returns: PipelineAnalysis with structural info
+
+  decide_execution_strategy(analysis: PipelineAnalysis, command: str) -> ExecutionStrategy
+    Returns: ExecutionStrategy(strategy_type, reason, fallback_strategy)
+
+    Strategy types:
+      - BASH_REQUIRED: Must use bash.exe
+      - BASH_PREFERRED: bash.exe better (has PowerShell fallback)
+      - POWERSHELL: PowerShell emulation sufficient
+      - SINGLE: Delegate to ExecuteUnixSingleCommand
+      - FAIL: Cannot execute
+
+=== ExecuteUnixSingleCommand.execute_single() ===
+  Input: Full command string (e.g., "grep -r pattern .")
+  Output: subprocess.CompletedProcess
+
+  Priority chain:
+    1. Check: ExecutionEngine.is_available(cmd_name)
+       YES → ExecutionEngine.execute_native(cmd_name, args)
+       NO → Continue
+
+    2. Check: CommandEmulator.is_quick_command(cmd_name) AND not in GITBASH_PASSTHROUGH
+       YES → CommandEmulator.emulate_command(command)
+           → ExecutionEngine.execute_powershell(translated)
+       NO → Continue
+
+    3. Check: bash available AND cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS
+       YES → ExecutionEngine.execute_bash(command)
+       FAIL → Fallback to step 4
+
+    4. CommandEmulator.emulate_command(command)
+       → ExecutionEngine.execute_powershell(translated)
+
+=== CommandEmulator.emulate_command() ===
+  Input: Unix command string
+  Output: PowerShell/Windows command string
+
+  Process:
+    1. Parse command → extract cmd_name
+    2. Lookup self.command_map[cmd_name]
+    3. Call _translate_<command>(args)
+    4. Return translated string
+
+=== ExecutionEngine execution methods ===
+  All methods return: subprocess.CompletedProcess(returncode, stdout, stderr)
+  All methods accept: test_mode_stdout (for testing without execution)
+
+  execute_bash(command, test_mode_stdout):
+    subprocess.run([bash_path, '-c', command])
+
+  execute_native(cmd_name, args, test_mode_stdout):
+    subprocess.run([cmd_name + '.exe'] + args)
+    Special: Detects Python → uses venv environment
+
+  execute_powershell(script, test_mode_stdout):
+    subprocess.run(['powershell', '-Command', script])
+
+  execute_cmd(command, test_mode_stdout):
+    subprocess.run(['cmd', '/c', command])
+
+  execute_python(script, test_mode_stdout):
+    subprocess.run([python_executable, script], env=venv_environment)
+
+
+================================================================================
+KEY CONTRACTS BY USE CASE
+================================================================================
+
+=== Execute Simple Command ===
+  cat file.txt
+
+  BashToolExecutor.execute({"command": "cat file.txt"})
+  └→ PathTranslator.translate_paths_in_string()
+  └→ SandboxValidator.validate_command()
+  └→ CommandExecutor.execute()
+      └→ PipelineStrategy.analyze_pipeline() → SINGLE
+      └→ ExecuteUnixSingleCommand.execute_single()
+          └→ CommandEmulator.emulate_command("cat file.txt") → "Get-Content file.txt"
+          └→ ExecutionEngine.execute_powershell("Get-Content file.txt")
+
+=== Execute Native Binary ===
+  grep -r pattern .
+
+  ExecuteUnixSingleCommand.execute_single("grep -r pattern .")
+  └→ Parse: cmd_name = "grep"
+  └→ ExecutionEngine.is_available('grep') → TRUE
+  └→ ExecutionEngine.execute_native('grep', ['-r', 'pattern', '.'])
+      └→ subprocess.run(['grep.exe', '-r', 'pattern', '.'])
+
+=== Execute Complex Pipeline ===
+  find . -name '*.py' | xargs grep TODO
+
+  CommandExecutor.execute()
+  └→ PipelineStrategy.analyze_pipeline()
+      └→ PipelineAnalysis(has_pipeline=True, matched_pattern=r'find.*\|.*xargs')
+  └→ PipelineStrategy.decide_execution_strategy()
+      └→ ExecutionStrategy(strategy_type='BASH_REQUIRED')
+  └→ ExecutionEngine.execute_bash(bash_path, command)
+
+=== Command Substitution (Recursive) ===
+  echo $(ls -la)
+
+  CommandExecutor.execute("echo $(ls -la)")
+  └→ Preprocessing: _process_command_substitution()
+      └→ Extract: "ls -la"
+      └→ RECURSIVE: CommandExecutor.execute("ls -la")  ← RECURSIVE!
+      └→ Capture result: "file1 file2 file3"
+      └→ Substitute: "echo file1 file2 file3"
+  └→ Continue with substituted command
+
+
+================================================================================
+TYPE CONTRACTS
+================================================================================
+
+subprocess.CompletedProcess attributes:
+  .returncode: int
+  .stdout: str
+  .stderr: str
+  .args: List[str]
+
+PipelineAnalysis fields:
+  .has_pipeline: bool
+  .has_chain: bool
+  .has_redirection: bool
+  .has_stderr_redir: bool
+  .has_process_subst: bool
+  .matched_pattern: Optional[str]
+  .complexity_level: str  # 'HIGH' | 'MEDIUM' | 'LOW'
+  .command_count: int
+  .command_names: List[str]
+
+ExecutionStrategy fields:
+  .strategy_type: str  # 'BASH_REQUIRED' | 'BASH_PREFERRED' | 'POWERSHELL' | 'SINGLE' | 'FAIL'
+  .can_split: bool
+  .split_points: List[int]
+  .reason: str
+  .fallback_strategy: Optional[ExecutionStrategy]
+
+Path translation directions:
+  'to_windows': Unix → Windows
+  'to_unix': Windows → Unix
+
+
+================================================================================
+IMPORTANT INVARIANTS
+================================================================================
+
+1. ALL subprocess calls go through ExecutionEngine (no direct subprocess.run())
+2. Path translation happens BEFORE CommandExecutor (in BashToolExecutor)
+3. Security validation happens BEFORE CommandExecutor (in BashToolExecutor)
+4. Preprocessing happens BEFORE translation (in CommandExecutor)
+5. Command substitution is RECURSIVE (calls CommandExecutor.execute())
+6. Test mode: test_mode_stdout parameter short-circuits execution
+7. ExecutionEngine.capabilities cached at init (don't redetect)
+8. PathTranslator is stateless (can call anytime)
+9. SandboxValidator is stateless (can call anytime)
+10. PipelineAnalysis is immutable (dataclass)
+11. ExecutionStrategy is immutable (dataclass)
+
+
+================================================================================
+QUICK GREP PATTERNS
+================================================================================
+
+# Find all execute methods
+grep "def execute(" METHOD_CONTRACTS.txt
+
+# Find who calls X
+grep "→ X\." METHOD_CONTRACTS.txt
+
+# Find recursion
+grep "RECURSIVE" METHOD_CONTRACTS.txt
+
+# Find method by name
+grep "method_name(" METHOD_CONTRACTS.txt
+
+# Find all subprocess execution points
+grep "subprocess.run" METHOD_CONTRACTS.txt
+
+# Find all translation methods
+grep "_translate_" METHOD_CONTRACTS.txt
+
+# Find strategy types
+grep "strategy_type" METHOD_CONTRACTS.txt
+
+# Find all paths
+grep "Path" METHOD_CONTRACTS.txt
+
+
+================================================================================
+NOTES
+================================================================================
+
+- This file is GENERATED from code inspection (2025-11-19)
+- For detailed docs, see in-code docstrings (source of truth)
+- For architecture overview, see ARCHITECTURE.md
+- Update this file when method signatures change
+- Keep flat list section up-to-date for grep efficiency
+
