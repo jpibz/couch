@@ -83,9 +83,10 @@ import logging
 import shlex
 from typing import Optional
 
-from .constants import BASH_GIT_UNSUPPORTED_COMMANDS
-from .execution_engine import ExecutionEngine
-from .command_emulator import CommandEmulator
+from constants import BASH_GIT_UNSUPPORTED_COMMANDS, GITBASH_PASSTHROUGH_COMMANDS
+from execution_engine import ExecutionEngine
+from command_emulator import CommandEmulator
+
 
 class ExecuteUnixSingleCommand:
     """
@@ -102,7 +103,7 @@ class ExecuteUnixSingleCommand:
     - Complex fallbacks (keep it simple!)
     """
 
-    def __init__(self,
+    def __init__(self, command_preprocessor,
                  logger: logging.Logger = None,
                  test_mode: bool = False):
         """
@@ -120,8 +121,9 @@ class ExecuteUnixSingleCommand:
         self.test_mode = test_mode
         self.engine = ExecutionEngine( self.logger, self.test_mode)
         self.emulator = CommandEmulator()
+        self.command_preprocessor = command_preprocessor
 
-    def execute_single(self, command: str, test_mode_stdout=None) -> subprocess.CompletedProcess:
+    def execute(self, command: str, test_mode_stdout=None) -> subprocess.CompletedProcess:
         """
         Execute single ATOMIC Unix command with optimal strategy.
 
@@ -148,7 +150,7 @@ class ExecuteUnixSingleCommand:
         # ================================================================
         # INTERNAL PARSING - Extract cmd_name to choose strategy
         # ================================================================
-        import shlex
+
         try:
             parts = shlex.split(command) if ' ' in command else [command]
         except ValueError:
@@ -179,7 +181,8 @@ class ExecuteUnixSingleCommand:
         # ================================================================
         if self.emulator.is_quick_command(cmd_name) and cmd_name not in GITBASH_PASSTHROUGH_COMMANDS:
             self.logger.debug(f"Strategy: Quick PowerShell script ({cmd_name})")
-            translated = self.emulator.emulate_command(command)
+            cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
+            translated = self.emulator.emulate_command(cmd_preprocessed)
             if self._needs_powershell(translated):
                 return self.engine.execute_powershell(translated, test_mode_stdout)
             else:
@@ -195,7 +198,8 @@ class ExecuteUnixSingleCommand:
             except Exception:
                 # Fallback to script if bash conversion fails
                 self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
-                translated = self.emulator.emulate_command(command)
+                cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
+                translated = self.emulator.emulate_command(cmd_preprocessed)
                 if self._needs_powershell(translated):
                     return self.engine.execute_powershell(translated, test_mode_stdout)
                 else:
@@ -205,7 +209,8 @@ class ExecuteUnixSingleCommand:
         # PRIORITY 4: CommandEmulator Script (HEAVY EMULATION)
         # ================================================================
         self.logger.debug(f"Strategy: Heavy PowerShell script ({cmd_name})")
-        translated = self.emulator.emulate_command(command)
+        cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
+        translated = self.emulator.emulate_command(cmd_preprocessed)
         return self.engine.execute_powershell(translated, test_mode_stdout)
 
 

@@ -135,12 +135,11 @@ ExecutionEngine scans PATH for native Windows binaries:
 These provide BEST PERFORMANCE (no translation) when available.
 """
 import os
+import re
 import subprocess
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List
-
-from .path_translator import PathTranslator
 
 class ExecutionEngine:
     """
@@ -152,19 +151,19 @@ class ExecutionEngine:
     - Metrics: contare tipi di execution
     - Error handling: gestione errori centralizzata
 
-    ARCHITECTURE:
-    CommandExecutor usa ExecutionEngine, non subprocess direttamente.
-    Questo permette switching test/production in UN punto.
     """
 
     # Native Windows binaries to detect
+    # Format: 'name': ('binary.exe', 'default_path')
+    # default_path = None → solo PATH detection, no fallback
     NATIVE_BINS = {
-        'diff': 'diff.exe',
-        'tar': 'tar.exe',
-        'awk': 'awk.exe',
-        'sed': 'sed.exe',
-        'grep': 'grep.exe',
-        'jq': 'jq.exe',
+        'diff': ('diff.exe', r'C:\Program Files\Git\usr\bin\diff.exe'),
+        'tar': ('tar.exe', r'C:\Program Files\Git\usr\bin\tar.exe'),
+        'awk': ('awk.exe', r'C:\Program Files\Git\usr\bin\awk.exe'),
+        'sed': ('sed.exe', r'C:\Program Files\Git\usr\bin\sed.exe'),
+        'grep': ('grep.exe', r'C:\Program Files\Git\usr\bin\grep.exe'),
+        'jq': ('jq.exe', r'C:\Program Files\Git\usr\bin\jq.exe'),
+        'python': ('python.exe', None),  # Solo PATH detection (no default path)
     }
 
     def __init__(self, working_dir,
@@ -174,70 +173,30 @@ class ExecutionEngine:
         Initialize execution engine.
 
         Args:
+            working_dir: Workspace root directory (for venv setup)
             test_mode: If True, print commands instead of executing
             logger: Logger instance for execution tracking
-            python_executable: Path to Python executable (for venv setup)
-            workspace_root: Workspace root directory (for venv setup)
-            virtual_env: Virtual environment path (optional)
+
         """
         self.working_dir = working_dir
         self.test_mode = test_mode
         self.logger = logger or logging.getLogger('ExecutionEngine')
-        self.path_translator = PathTranslator()
-        # Python and virtual environment setup
-        self.workspace_root = self.path_translator.get_tool_scratch_directory('bash_tool')
-        self.bash_path = None
-        self.python_timeout = 60
-        self.default_timeout = 30
+
+        # Detect bash availability
+        self.bash_available = self._detect_bash()
+        
+        # Detect native bins availability (with default paths)
+        self.available_bins = self._detect_native_bins()
         
         if test_mode:
-            # TEST MODE: Skip detection and setup, assume everything is available
-            self.python_executable = 'python'
-            self.virtual_env = None
-            self.environment = os.environ.copy()
-
-            # Populate availability dict with all capabilities as True
-            self.available = {
-                'python': True,
-                'bash': True,
-            }
-            # Add all native binaries as available
-            for cmd in self.NATIVE_BINS.keys():
-                self.available[cmd] = True
-
-            self.logger.info("[TEST MODE] All capabilities set as available")
+            self.logger.info("[TEST MODE] ExecutionEngine initialized")
+            self._setup_test_environment()
         else:
-            # PRODUCTION MODE: Perform real detection and setup
-            # Detect system Python inline
-            self.python_executable = None
-            for cmd in ['python', 'python.exe']:
-                try:
-                    result = subprocess.run(
-                        [cmd, '--version'],
-                        capture_output=True,
-                        timeout=2,
-                        text=True
-                    )
-                    if result.returncode == 0:
-                        version = result.stdout.strip()
-                        self.logger.info(f"Detected Python: {cmd} ({version})")
-                        self.python_executable = cmd
-                        break
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    continue
-
-            if not self.python_executable:
-                self.logger.critical("CRITICAL: Python not found in system PATH")
-                self.logger.critical("Bash tool requires Python for full functionality")
-
             # Setup virtual environment
             self.virtual_env = self._setup_virtual_env()
     
             # Setup execution environment
             self.environment = self._setup_environment()
-
-            # Detect available binaries and capabilities
-            self.available, self.paths = self._detect_available_capabilities()
 
         # Execution statistics
         self.stats = {
@@ -248,64 +207,203 @@ class ExecutionEngine:
             'total': 0
         }
 
-    def _detect_available_capabilities(self) -> Dict[str, bool]:
+    def _setup_test_environment(self):
+        """Setup mock environment for testing"""
+        import os
+        
+        # Mock environment variables (for testing variable expansion)
+        os.environ['TEST_VAR'] = 'test_value'
+        os.environ['NUM'] = '42'  # For arithmetic tests
+        os.environ['PATH_VAR'] = '/tmp/test'
+        os.environ['EMPTY_VAR'] = ''
+        
+        # Note: available_bins is now populated by _detect_native_bins()
+        
+        self.logger.info(f"[TEST MODE] Mock env vars: {list(os.environ.keys())[-4:]}")
+        self.logger.info(f"[TEST MODE] Mock available bins: {len(self.available_bins)} bins detected")
+    
+    def _detect_bash(self) -> bool:
+        """Quick bash.exe detection"""
+        # In test mode, always return True (mock bash availability)
+        if self.test_mode:
+            return True
+        
+        try:
+            result = subprocess.run(
+                ['bash', '--version'],
+                capture_output=True,
+                timeout=2
+            )
+            return result.returncode == 0
+        except:
+            return False
+    
+    def _detect_native_bins(self) -> dict:
         """
-        Detect all available capabilities at initialization.
-
+        Detect native binaries availability
+        
+        STRATEGY:
+        1. Try shutil.which() first (checks PATH)
+        2. If not found AND default_path exists, try default location
+        3. If found, store full path
+        
+        default_path = None → solo PATH detection (es. python)
+        
         Returns:
-            Dict mapping capability name to availability status
+            Dict mapping bin_name -> full_path (if available)
         """
-        capabilities = {}
-        bin_paths ={}
-        # Python availability
-        capabilities['python'] = bool(self.python_executable)
-        bin_paths['python'] = self.python_executable
+        if self.test_mode:
+            # Test mode: all bins available (mock)
+            return {
+                name: bin_exe 
+                for name, (bin_exe, _) in self.NATIVE_BINS.items()
+            }
+        
+        import shutil
+        available = {}
+        
+        for name, (bin_exe, default_path) in self.NATIVE_BINS.items():
+            # Try PATH first
+            path = shutil.which(bin_exe)
+            
+            if path:
+                available[name] = path
+                self.logger.debug(f"Found {name} in PATH: {path}")
+                continue
+            
+            # Try default location (if specified)
+            if default_path:
+                default = Path(default_path)
+                if default.exists():
+                    available[name] = str(default)
+                    self.logger.debug(f"Found {name} at default: {default}")
+                    continue
+            
+            self.logger.debug(f"Binary {name} not found")
+        
+        self.logger.info(f"Detected {len(available)}/{len(self.NATIVE_BINS)} native bins")
+        return available
 
-        # Git Bash availability - detect inline
-        bash_found = False
-        for path in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"]:
-            if Path(path).exists():
-                self.logger.info(f"Found Git Bash: {path}")
-                bash_found = True
-                break
+    def _windows_to_gitbash_paths(self, cmd: str) -> str:
+        """
+        Convert Windows paths in command to Git Bash format.
+        
+        C:\\path\\to\\file -> /c/path/to/file
+        
+        CRITICAL: bash.exe expects Unix-style paths!
+        
+        Args:
+            cmd: Command string with Windows paths
+            
+        Returns:
+            Command with converted paths
+        """
+        def convert_path(match):
+            path = match.group(0)
+            if ':' in path:
+                # C:\path\to\file -> /c/path/to/file
+                drive = path[0].lower()
+                rest = path[3:].replace('\\', '/')
+                return f'/{drive}/{rest}'
+            # Just convert backslashes
+            return path.replace('\\', '/')
+        
+        # Match Windows absolute paths (C:\path, D:\path, etc)
+        pattern = r'[A-Za-z]:[/\\][^\s;|&<>()]*'
+        return re.sub(pattern, convert_path, cmd)
 
-        if not bash_found:
-            try:
-                result = subprocess.run(
-                    ['where', 'bash.exe'],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if result.returncode == 0:
-                    self.bash_path = result.stdout.strip().split('\n')[0]
-                    if 'Git' in self.bash_path:
-                        self.logger.info(f"Found Git Bash in PATH: {self.bash_path}")
-                        bin_paths['bash'] = self.bash_path
-                        bash_found = True
-            except:
-                pass
+    def _simulate_command_output(self, command: str, stdin: str = None) -> str:
+        """
+        Simulate realistic command output for test mode
+        
+        Args:
+            command: Command string
+            stdin: Optional stdin data
+            
+        Returns:
+            Simulated output
+        """
+        # Parse command
+        parts = command.split()
+        if not parts:
+            return ""
+        
+        cmd = parts[0]
+        args = parts[1:] if len(parts) > 1 else []
+        
+        # Simulate common commands
+        if cmd == 'echo':
+            # Echo just returns the arguments
+            return ' '.join(args) + '\n'
+        
+        elif cmd == 'cat':
+            # Cat returns stdin or file marker
+            if stdin:
+                return stdin
+            elif args:
+                return f"[content of {args[0]}]\n"
+            return ""
+        
+        elif cmd == 'ls':
+            # Ls returns file list + command marker for test verification
+            marker = f"[{command}]\n" if len(command) < 50 else ""
+            return marker + "file1.txt\nfile2.txt\nfile3.txt\n"
+        
+        elif cmd == 'pwd':
+            # Pwd returns current dir
+            return "/home/claude\n"
+        
+        elif cmd == 'test':
+            # Test command returns empty (exit code is what matters)
+            # But for test verification, return simple marker
+            return f"test {' '.join(args)}\n"
+        
+        elif cmd == 'grep':
+            # Grep filters stdin
+            if stdin and args:
+                pattern = args[0]
+                lines = stdin.split('\n')
+                matched = [l for l in lines if pattern in l]
+                return '\n'.join(matched) + '\n' if matched else ""
+            return ""
+        
+        elif cmd == 'wc':
+            # Wc counts lines
+            if stdin:
+                lines = len(stdin.split('\n'))
+                return f"  {lines}\n"
+            return "  0\n"
+        
+        elif cmd == 'head':
+            # Head returns first lines
+            if stdin:
+                lines = stdin.split('\n')[:10]
+                return '\n'.join(lines) + '\n'
+            return ""
+        
+        elif cmd == 'tail':
+            # Tail returns last lines
+            if stdin:
+                lines = stdin.split('\n')[-10:]
+                return '\n'.join(lines) + '\n'
+            return ""
+        
+        elif cmd == 'sort':
+            # Sort sorts lines
+            if stdin:
+                lines = stdin.split('\n')
+                lines.sort()
+                return '\n'.join(lines) + '\n'
+            return ""
+        
+        elif cmd == 'test':
+            # Test returns command marker for verification (exit code is what matters)
+            return f"[{command}]\n"
+        
+        # Default: return simple marker
+        return f"[output of {command}]\n"
 
-        capabilities['bash'] = bash_found
-
-        # Native binaries availability
-        for cmd, binary in self.NATIVE_BINS.items():
-            try:
-                result = subprocess.run(
-                    ['where', binary],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                capabilities[cmd] = (result.returncode == 0)
-                if capabilities[cmd]:
-                    bin_paths[cmd] = binary
-            except Exception:
-                capabilities[cmd] = False
-
-        return capabilities, bin_paths
-
-    def execute_cmd(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
+    def execute_cmd(self, command: str, stdin: str = None, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via cmd.exe
 
@@ -325,7 +423,7 @@ class ExecutionEngine:
             print(f"[TEST MODE] Would execute (CMD): {command}")
 
             # Use AS IF stdout if provided, otherwise echo
-            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] cmd: {command}"
+            stdout = test_mode_stdout if test_mode_stdout is not None else self._simulate_command_output(command, stdin)
 
             return subprocess.CompletedProcess(
                 args=['cmd', '/c', command],
@@ -340,10 +438,11 @@ class ExecutionEngine:
             capture_output=True,
             text=True,
             cwd=str(self.working_dir),
+            timeout=self.default_timeout,
             **kwargs
         )
 
-    def execute_powershell(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
+    def execute_powershell(self, command: str, stdin: str = None, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via PowerShell
 
@@ -363,7 +462,7 @@ class ExecutionEngine:
             print(f"[TEST MODE] Would execute (PowerShell): {command}")
 
             # Use AS IF stdout if provided, otherwise echo
-            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] powershell: {command}"
+            stdout = test_mode_stdout if test_mode_stdout is not None else self._simulate_command_output(command, stdin)
 
             return subprocess.CompletedProcess(
                 args=['powershell', '-Command', command],
@@ -400,7 +499,7 @@ class ExecutionEngine:
 
         return result
     
-    def execute_bash(self, command: str, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
+    def execute_bash(self, command: str, stdin: str = None, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute command via Git Bash
 
@@ -421,7 +520,7 @@ class ExecutionEngine:
             print(f"[TEST MODE] Would execute (Git Bash): {command}")
 
             # Use AS IF stdout if provided, otherwise echo
-            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] bash: {command}"
+            stdout = test_mode_stdout if test_mode_stdout is not None else self._simulate_command_output(command, stdin)
 
             return subprocess.CompletedProcess(
                 args=[self.bash_path, '-c', command],
@@ -433,33 +532,21 @@ class ExecutionEngine:
         # Convert Windows paths to Git Bash format (C:\path -> /c/path)
         git_command = self._windows_to_gitbash_paths(command)
 
+        # CRITICAL: Pass environment explicitly so bash.exe inherits full Windows PATH
+        # This allows bash to call native Windows .exe binaries (python.exe, git.exe, etc)
+        env = os.environ.copy()
+
         self.logger.debug(f"Executing Git Bash: {git_command}")
         return subprocess.run(
             [self.bash_path, '-c', command],
             capture_output=True,
             text=True,
+            cwd=str(self.working_dir),
+            env=env,
             **kwargs
         )
-   
-    def _windows_to_gitbash_paths(self, cmd: str) -> str:
-        """
-        Convert Windows paths in command to Git Bash format.
-        
-        C:\path\to\file -> /c/path/to/file
-        """
-        def convert_path(match):
-            path = match.group(0)
-            if ':' in path:
-                drive = path[0].lower()
-                rest = path[3:].replace('\\', '/')
-                return f'/{drive}/{rest}'
-            return path.replace('\\', '/')
-        
-        # Match Windows absolute paths
-        pattern = r'[A-Za-z]:[/\\][^\s;|&<>()]*'
-        return re.sub(pattern, convert_path, cmd)
 
-    def execute_native(self, bin_name: str, args: List[str], test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
+    def execute_native(self, bin_name: str, args: List[str], stdin: str = None, test_mode_stdout=None, **kwargs) -> subprocess.CompletedProcess:
         """
         Execute native binary directly
 
@@ -475,18 +562,18 @@ class ExecutionEngine:
         self.stats['native'] += 1
         self.stats['total'] += 1
         
-        bin_path = self.bin_paths[bin_name]
-        cmd_str = f"{bin_path} {' '.join(args)}"
+        cmd = [bin_name] + args
+        cmd_str = ' '.join(cmd)
 
         if self.test_mode:
             self.logger.info(f"[TEST-Native] {cmd_str}")
             print(f"[TEST MODE] Would execute (Native): {cmd_str}")
 
             # Use AS IF stdout if provided, otherwise echo
-            stdout = test_mode_stdout if test_mode_stdout is not None else f"[TEST MODE OUTPUT] native: {cmd_str}"
+            stdout = test_mode_stdout if test_mode_stdout is not None else self._simulate_command_output(cmd_str, stdin)
 
             return subprocess.CompletedProcess(
-                args=[bin_path] + args,
+                args=cmd,
                 returncode=0,
                 stdout=stdout,
                 stderr=""
@@ -506,7 +593,7 @@ class ExecutionEngine:
             self.logger.debug(f"Executing Native: {cmd_str}")
 
         return subprocess.run(
-            [bin_path] + args,
+            cmd,
             capture_output=True,
             text=True,
             **kwargs
