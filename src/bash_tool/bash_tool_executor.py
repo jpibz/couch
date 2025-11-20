@@ -60,11 +60,11 @@ The execute() method returns a string formatted as:
 import logging
 from pathlib import Path
 from typing import Optional, Dict
-
-from .tool_executor import ToolExecutor
-from .sandbox_validator import SandboxValidator
-from .command_executor import CommandExecutor
-from .path_translator import PathTranslator
+import subprocess
+from tool_executor import ToolExecutor
+from sandbox_validator import SandboxValidator
+from command_executor import CommandExecutor
+from path_translator import PathTranslator
 
 class BashToolExecutor(ToolExecutor):
     """
@@ -165,13 +165,13 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
             # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
-            result, translated_cmd, method = self.command_executor.execute(
+            result = self.command_executor.execute(
                 command=command_with_win_paths,
                 timeout=timeout
             )
 
             # STEP 4: Format result (with path reverse translation)
-            return self._format_result(result, command, translated_cmd, method)
+            return self._format_result(result, command)
 
         except subprocess.TimeoutExpired:
             return f"Error: Command timed out after {timeout} seconds"
