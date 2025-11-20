@@ -264,6 +264,33 @@ class CommandEmulator:
             'watch': self._translate_watch,       # 58 lines - FALLBACK
         }
 
+        # QUICK commands (string content <= 407 chars median threshold)
+        # Based on analysis of translate method complexity
+        self.QUICK_COMMANDS = {
+            'pwd', 'ps', 'chmod', 'chown', 'df', 'true', 'false', 'whoami', 'hostname',
+            'which', 'sleep', 'cd', 'basename', 'dirname', 'kill', 'mkdir', 'mv', 'yes',
+            'env', 'printenv', 'export', 'realpath', 'readlink', 'rm', 'file', 'cp',
+            'seq', 'ls', 'date', 'uname', 'uptime', 'nproc', 'md', 'rmdir', 'clear',
+            'id', 'groups', 'who', 'getent', 'type', 'ulimit', 'umask'
+        }
+
+    def is_quick_command(self, cmd_name: str) -> bool:
+        """
+        Check if command is "quick" (low complexity, inline execution preferred).
+
+        Quick commands have <= 407 chars of string content (median threshold)
+        and are suitable for inline PowerShell execution.
+
+        Heavy commands (> 407 chars) should prefer bash.exe or native binaries.
+
+        Args:
+            cmd_name: Command name (e.g., "grep", "echo", "ls")
+
+        Returns:
+            True if quick (prefer inline PowerShell), False if heavy (prefer bash/native)
+        """
+        return cmd_name in self.QUICK_COMMANDS
+
     def emulate_command(self, unix_command: str):
         """
         Translate Unix command → Windows with operator support.

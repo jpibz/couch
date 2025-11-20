@@ -182,16 +182,28 @@ class ExecuteUnixSingleCommand:
             return self.engine.execute_native(cmd_name, parts[1:], stdin=stdin, test_mode_stdout=test_mode_stdout)
 
         # ================================================================
-        # PRIORITY 2: Bash Git (if supported)
+        # PRIORITY 2: Quick PowerShell (FAST INLINE for simple commands)
+        # ================================================================
+        if self.emulator.is_quick_command(cmd_name) and cmd_name not in GITBASH_PASSTHROUGH_COMMANDS:
+            self.logger.debug(f"Strategy: Quick PowerShell inline ({cmd_name})")
+            cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
+            translated = self.emulator.emulate_command(cmd_preprocessed)
+            if self._needs_powershell(translated):
+                return self.engine.execute_powershell(translated, stdin=stdin, test_mode_stdout=test_mode_stdout)
+            else:
+                return self.engine.execute_cmd(translated, stdin=stdin, test_mode_stdout=test_mode_stdout)
+
+        # ================================================================
+        # PRIORITY 3: Bash Git (POSIX compatibility for complex commands)
         # ================================================================
         if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.engine.capabilities['bash']:
             self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
             return self.engine.execute_bash(command, stdin=stdin, test_mode_stdout=test_mode_stdout)
 
         # ================================================================
-        # PRIORITY 3: CommandEmulator (PowerShell emulation)
+        # PRIORITY 4: Heavy PowerShell (FALLBACK for heavy emulation)
         # ================================================================
-        self.logger.debug(f"Strategy: PowerShell emulation ({cmd_name})")
+        self.logger.debug(f"Strategy: Heavy PowerShell emulation ({cmd_name})")
         cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
         translated = self.emulator.emulate_command(cmd_preprocessed)
         if self._needs_powershell(translated):
