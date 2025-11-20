@@ -113,14 +113,18 @@ class BashToolExecutor(ToolExecutor):
         # Get claude home directory (needed for preprocessing)
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
+        # Timeouts
+        self.default_timeout = 120  # 2 minutes
+        self.python_timeout = 300   # 5 minutes
+
         # Initialize CommandExecutor (execution strategy layer)
 
         self.command_executor = CommandExecutor(
-            claude_home_unix=self.claude_home_unix,
+            working_dir=self.working_dir,
             logger=self.logger,
             test_mode=self.TESTMODE
         )
-        
+
         self.logger.info(
             "BashToolExecutor initialized"
         )
@@ -166,8 +170,7 @@ class BashToolExecutor(ToolExecutor):
 
             # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
             result = self.command_executor.execute(
-                command=command_with_win_paths,
-                timeout=timeout
+                command=command_with_win_paths
             )
 
             # STEP 4: Format result (with path reverse translation)
@@ -179,10 +182,10 @@ class BashToolExecutor(ToolExecutor):
             self.logger.error(f"Execution error: {e}", exc_info=True)
             return f"Error: {str(e)}"
         finally:
-            # Cleanup temp files
-            self._cleanup_temp_files(temp_files)
+            # Cleanup temp files (if any)
+            pass
     
-    def _format_result(self, result, original_cmd: str, translated_cmd: str, method: str) -> str:
+    def _format_result(self, result, original_cmd: str) -> str:
         """Format result matching bash_tool API"""
         lines = []
         

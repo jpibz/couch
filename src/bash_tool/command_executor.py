@@ -77,12 +77,13 @@ class CommandExecutor:
             test_mode: If True, use ExecutionEngine in test mode
         """
 
+        self.working_dir = working_dir
         self.test_mode = test_mode
         self.logger = logging.getLogger('CommandExecutor')
-        
+
         # Initialize execution components
-        self.engine = ExecutionEngine(test_mode=test_mode)
-        
+        self.engine = ExecutionEngine(working_dir, test_mode=test_mode, logger=self.logger)
+
         # Initialize PREPROCESSOR
         self.pipeline_preprocessor = BashPipelinePreprocessor(
             executor=self,  # Pass self for recursive execution
@@ -91,15 +92,16 @@ class CommandExecutor:
         self.command_preprocessor = BashCommandPreprocessor(
             logger=self.logger
         )
-        
+
         # Initialize ANALYZER (INTELLIGENZA STRATEGICA!)
         self.analyzer = PipelineAnalyzer(
             engine=self.engine,
             logger=self.logger
         )
-        
+
         self.single_executor = ExecuteUnixSingleCommand(
             command_preprocessor=self.command_preprocessor,
+            working_dir=working_dir,
             logger=self.logger,
             test_mode=test_mode
         )

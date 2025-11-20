@@ -182,19 +182,34 @@ class ExecutionEngine:
         self.test_mode = test_mode
         self.logger = logger or logging.getLogger('ExecutionEngine')
 
+        # Timeouts
+        self.default_timeout = 120  # 2 minutes
+        self.python_timeout = 300   # 5 minutes
+
         # Detect bash availability
         self.bash_available = self._detect_bash()
-        
+
         # Detect native bins availability (with default paths)
         self.available_bins = self._detect_native_bins()
-        
+
+        # Build capabilities dict
+        self.capabilities = {
+            'bash': self.bash_available,
+            'python': 'python' in self.available_bins,
+        }
+        # Add native bins to capabilities
+        for bin_name in self.available_bins:
+            self.capabilities[bin_name] = True
+
         if test_mode:
             self.logger.info("[TEST MODE] ExecutionEngine initialized")
             self._setup_test_environment()
+            self.virtual_env = None
+            self.environment = os.environ.copy()
         else:
             # Setup virtual environment
-            self.virtual_env = self._setup_virtual_env()
-    
+            self.virtual_env = self._setup_virtual_env(None)
+
             # Setup execution environment
             self.environment = self._setup_environment()
 
@@ -226,16 +241,17 @@ class ExecutionEngine:
         """Quick bash.exe detection"""
         # In test mode, always return True (mock bash availability)
         if self.test_mode:
+            self.bash_path = 'bash'
             return True
-        
+
         try:
-            result = subprocess.run(
-                ['bash', '--version'],
-                capture_output=True,
-                timeout=2
-            )
-            return result.returncode == 0
+            import shutil
+            self.bash_path = shutil.which('bash')
+            if self.bash_path:
+                return True
+            return False
         except:
+            self.bash_path = None
             return False
     
     def _detect_native_bins(self) -> dict:
@@ -621,7 +637,7 @@ class ExecutionEngine:
         Returns:
             True if available, False otherwise
         """
-        return self.available.get(name.lower(), False)
+        return name.lower() in self.available_bins or self.capabilities.get(name.lower(), False)
 
     # ==================== SETUP/DETECTION METHODS ====================
 

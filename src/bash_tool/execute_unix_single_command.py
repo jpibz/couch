@@ -104,6 +104,7 @@ class ExecuteUnixSingleCommand:
     """
 
     def __init__(self, command_preprocessor,
+                 working_dir,
                  logger: logging.Logger = None,
                  test_mode: bool = False):
         """
@@ -119,7 +120,8 @@ class ExecuteUnixSingleCommand:
         """
         self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
         self.test_mode = test_mode
-        self.engine = ExecutionEngine( self.logger, self.test_mode)
+        self.working_dir = working_dir
+        self.engine = ExecutionEngine(working_dir, test_mode=test_mode, logger=logger)
         self.emulator = CommandEmulator()
         self.command_preprocessor = command_preprocessor
 

@@ -220,7 +220,7 @@ class PipelineAnalyzer:
         
         # Check native binary availability
         # If found → mark as native (bash can call it via PATH)
-        if self.engine.is_bin_available(cmd_name):
+        if self.engine.is_available(cmd_name):
             cmd_info.is_native = True
             return
         
