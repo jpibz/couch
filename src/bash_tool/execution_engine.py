@@ -168,7 +168,8 @@ class ExecutionEngine:
 
     def __init__(self, working_dir,
                  test_mode: bool = False,
-                 logger: logging.Logger = None):
+                 logger: logging.Logger = None,
+                 test_capabilities: Optional[Dict] = None):
         """
         Initialize execution engine.
 
@@ -176,10 +177,20 @@ class ExecutionEngine:
             working_dir: Workspace root directory (for venv setup)
             test_mode: If True, print commands instead of executing
             logger: Logger instance for execution tracking
+            test_capabilities: Dict for TEST MODE ONLY - override availability detection
+                Example: {'bash': False, 'grep': True, 'awk': False}
+                - If None in test mode → all True (default mock behavior)
+                - If dict provided → use those values to force specific test scenarios
 
+        TEST MODE CAPABILITY CONTROL:
+        This allows unit tests to simulate different environments:
+        - {'bash': False} → Force MANUAL execution (test AST walking)
+        - {'bash': True, 'grep': False} → Test bash with missing native bins
+        - {'bash': False, 'grep': True} → Test manual with some native bins
         """
         self.working_dir = working_dir
         self.test_mode = test_mode
+        self.test_capabilities = test_capabilities
         self.logger = logger or logging.getLogger('ExecutionEngine')
 
         # Timeouts
@@ -239,10 +250,17 @@ class ExecutionEngine:
     
     def _detect_bash(self) -> bool:
         """Quick bash.exe detection"""
-        # In test mode, always return True (mock bash availability)
+        # In test mode, use test_capabilities if provided, otherwise default to True
         if self.test_mode:
-            self.bash_path = 'bash'
-            return True
+            if self.test_capabilities is not None:
+                # Use configured test capability
+                bash_available = self.test_capabilities.get('bash', False)
+                self.bash_path = 'bash' if bash_available else None
+                return bash_available
+            else:
+                # Default test mode: all available
+                self.bash_path = 'bash'
+                return True
 
         try:
             import shutil
@@ -269,11 +287,20 @@ class ExecutionEngine:
             Dict mapping bin_name -> full_path (if available)
         """
         if self.test_mode:
-            # Test mode: all bins available (mock)
-            return {
-                name: bin_exe 
-                for name, (bin_exe, _) in self.NATIVE_BINS.items()
-            }
+            # Test mode: use test_capabilities if provided, otherwise all available
+            if self.test_capabilities is not None:
+                # Use configured test capabilities - only include bins marked as True
+                return {
+                    name: bin_exe
+                    for name, (bin_exe, _) in self.NATIVE_BINS.items()
+                    if self.test_capabilities.get(name, False)
+                }
+            else:
+                # Default test mode: all bins available (mock)
+                return {
+                    name: bin_exe
+                    for name, (bin_exe, _) in self.NATIVE_BINS.items()
+                }
         
         import shutil
         available = {}

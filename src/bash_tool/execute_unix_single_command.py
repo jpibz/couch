@@ -106,7 +106,8 @@ class ExecuteUnixSingleCommand:
     def __init__(self, command_preprocessor,
                  working_dir,
                  logger: logging.Logger = None,
-                 test_mode: bool = False):
+                 test_mode: bool = False,
+                 test_capabilities: Optional[dict] = None):
         """
         Initialize ExecuteUnixSingleCommand.
 
@@ -117,15 +118,16 @@ class ExecuteUnixSingleCommand:
             git_bash_converter: Function to convert command to bash format
             logger: Logger instance
             test_mode: If True, log decisions without executing
+            test_capabilities: Dict for TEST MODE ONLY - control availability
         """
         self.logger = logger or logging.getLogger('ExecuteUnixSingleCommand')
         self.test_mode = test_mode
         self.working_dir = working_dir
-        self.engine = ExecutionEngine(working_dir, test_mode=test_mode, logger=logger)
+        self.engine = ExecutionEngine(working_dir, test_mode=test_mode, logger=logger, test_capabilities=test_capabilities)
         self.emulator = CommandEmulator()
         self.command_preprocessor = command_preprocessor
 
-    def execute(self, command: str, test_mode_stdout=None) -> subprocess.CompletedProcess:
+    def execute(self, command: str, stdin: str = None, test_mode_stdout=None) -> subprocess.CompletedProcess:
         """
         Execute single ATOMIC Unix command with optimal strategy.
 
@@ -143,6 +145,7 @@ class ExecuteUnixSingleCommand:
 
         Args:
             command: Full command string (e.g., "grep -r pattern .")
+            stdin: Optional stdin data to pass to command
 
         Returns:
             Tuple[str, bool]: (executable_command, use_powershell)
@@ -176,44 +179,25 @@ class ExecuteUnixSingleCommand:
         # ================================================================
         if self.engine.is_available(cmd_name):
             self.logger.debug(f"Strategy: Native binary ({cmd_name}.exe)")
-            return self.engine.execute_native(cmd_name, parts[1:], test_mode_stdout)
+            return self.engine.execute_native(cmd_name, parts[1:], stdin=stdin, test_mode_stdout=test_mode_stdout)
 
         # ================================================================
-        # PRIORITY 2: CommandEmulator Quick (FAST INLINE)
-        # ================================================================
-        if self.emulator.is_quick_command(cmd_name) and cmd_name not in GITBASH_PASSTHROUGH_COMMANDS:
-            self.logger.debug(f"Strategy: Quick PowerShell script ({cmd_name})")
-            cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
-            translated = self.emulator.emulate_command(cmd_preprocessed)
-            if self._needs_powershell(translated):
-                return self.engine.execute_powershell(translated, test_mode_stdout)
-            else:
-                return self.engine.execute_cmd(translated, test_mode_stdout)
-
-        # ================================================================
-        # PRIORITY 3: Bash Git (if supported) + FALLBACK TO SCRIPT
+        # PRIORITY 2: Bash Git (if supported)
         # ================================================================
         if cmd_name not in BASH_GIT_UNSUPPORTED_COMMANDS and self.engine.capabilities['bash']:
-            try:
-                self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
-                return self.engine.execute_bash(command, test_mode_stdout)
-            except Exception:
-                # Fallback to script if bash conversion fails
-                self.logger.debug(f"Strategy: Bash conversion failed, fallback to script ({cmd_name})")
-                cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
-                translated = self.emulator.emulate_command(cmd_preprocessed)
-                if self._needs_powershell(translated):
-                    return self.engine.execute_powershell(translated, test_mode_stdout)
-                else:
-                    return self.engine.execute_cmd(translated, test_mode_stdout)
+            self.logger.debug(f"Strategy: Bash Git ({cmd_name})")
+            return self.engine.execute_bash(command, stdin=stdin, test_mode_stdout=test_mode_stdout)
 
         # ================================================================
-        # PRIORITY 4: CommandEmulator Script (HEAVY EMULATION)
+        # PRIORITY 3: CommandEmulator (PowerShell emulation)
         # ================================================================
-        self.logger.debug(f"Strategy: Heavy PowerShell script ({cmd_name})")
+        self.logger.debug(f"Strategy: PowerShell emulation ({cmd_name})")
         cmd_preprocessed = self.command_preprocessor.preprocess_for_emulation(command)
         translated = self.emulator.emulate_command(cmd_preprocessed)
-        return self.engine.execute_powershell(translated, test_mode_stdout)
+        if self._needs_powershell(translated):
+            return self.engine.execute_powershell(translated, stdin=stdin, test_mode_stdout=test_mode_stdout)
+        else:
+            return self.engine.execute_cmd(translated, stdin=stdin, test_mode_stdout=test_mode_stdout)
 
 
     def _needs_powershell(self, command: str) -> bool:
