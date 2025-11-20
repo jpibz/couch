@@ -171,9 +171,6 @@ class BashToolExecutor(ToolExecutor):
         except Exception as e:
             self.logger.error(f"Execution error: {e}", exc_info=True)
             return f"Error: {str(e)}"
-        finally:
-            # Cleanup temp files (if any)
-            pass
     
     def _format_result(self, result, original_cmd: str) -> str:
         """Format result matching bash_tool API"""
