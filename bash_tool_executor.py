@@ -1354,12 +1354,17 @@ class CommandExecutor:
         self.logger = logger or logging.getLogger('CommandExecutor')
         self.test_mode = test_mode
 
+        # Detect available tools
+        self.git_bash_available = True  # Simplified for now
+        self.available_bins = {}  # Will be populated if needed
+
         # ====================================================================
         # STRATEGIC LAYER - Delegation to specialized classes
         # ====================================================================
 
         # Pipeline strategic analyzer (MACRO level)
         self.pipeline_strategy = PipelineStrategy(
+            git_bash_available=self.git_bash_available,
             native_bins=self.available_bins,
             logger=self.logger,
             test_mode=test_mode
@@ -2453,6 +2458,10 @@ class BashToolExecutor(ToolExecutor):
 
         self.working_dir = Path(working_dir)
 
+        # Timeouts
+        self.default_timeout = 120  # 2 minutes
+        self.python_timeout = 300   # 5 minutes for Python commands
+
         # Initialize components
         self.path_translator = PathTranslator()
         self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
@@ -2467,7 +2476,7 @@ class BashToolExecutor(ToolExecutor):
         # Initialize CommandExecutor (execution strategy layer)
 
         self.command_executor = CommandExecutor(
-            claude_home_unix=self.claude_home_unix,
+            working_dir=str(self.working_dir),
             logger=self.logger,
             test_mode=self.TESTMODE
         )
