@@ -162,6 +162,7 @@ Additional commands can be added by:
 3. Follow existing patterns for flag parsing and output formatting
 """
 import re
+from pathlib import Path
 import logging
 import shlex
 from typing import Optional, List, Tuple
@@ -264,6 +265,33 @@ class CommandEmulator:
             'watch': self._translate_watch,       # 58 lines - FALLBACK
         }
 
+        # QUICK commands (string content <= 407 chars median threshold)
+        # Based on analysis of translate method complexity
+        self.QUICK_COMMANDS = {
+            'pwd', 'ps', 'chmod', 'chown', 'df', 'true', 'false', 'whoami', 'hostname',
+            'which', 'sleep', 'cd', 'basename', 'dirname', 'kill', 'mkdir', 'mv', 'yes',
+            'env', 'printenv', 'export', 'realpath', 'readlink', 'rm', 'file', 'cp',
+            'seq', 'ls', 'date', 'uname', 'uptime', 'nproc', 'md', 'rmdir', 'clear',
+            'id', 'groups', 'who', 'getent', 'type', 'ulimit', 'umask'
+        }
+
+    def is_quick_command(self, cmd_name: str) -> bool:
+        """
+        Check if command is "quick" (low complexity, inline execution preferred).
+
+        Quick commands have <= 407 chars of string content (median threshold)
+        and are suitable for inline PowerShell execution.
+
+        Heavy commands (> 407 chars) should prefer bash.exe or native binaries.
+
+        Args:
+            cmd_name: Command name (e.g., "grep", "echo", "ls")
+
+        Returns:
+            True if quick (prefer inline PowerShell), False if heavy (prefer bash/native)
+        """
+        return cmd_name in self.QUICK_COMMANDS
+
     def emulate_command(self, unix_command: str):
         """
         Translate Unix command → Windows with operator support.
@@ -287,7 +315,7 @@ class CommandEmulator:
         if base_cmd in self.command_map:
             translator = self.command_map[base_cmd]
             try:
-                translated, _ = translator(unix_command, parts)
+                translated = translator(unix_command, parts)
                 return translated
             except Exception:
                 pass
@@ -344,7 +372,7 @@ class CommandEmulator:
         
         # Special handling for directory-only mode
         if directory_only and paths:
-            return f'dir /a:d {flag_str} {path_str}'.strip(), True
+            return f'dir /a:d {flag_str} {path_str}'.strip()
         
         # Use PowerShell for advanced formatting (long_format, human_readable, classify)
         if long_format or human_readable or classify:
@@ -364,7 +392,7 @@ class CommandEmulator:
                 # Add classifier (/ for dirs, * for executable, @ for symlinks)
                 ps_cmd += ' | ForEach-Object { if($_.PSIsContainer) {$_.Name + "/"} else {$_.Name} }'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
         # Standard dir command
         cmd_result = f'dir {flag_str} {path_str}'.strip()
@@ -373,7 +401,7 @@ class CommandEmulator:
         if one_per_line:
             cmd_result += ' /b'
         
-        return cmd_result, True
+        return cmd_result
     
     def _translate_cat(self, cmd: str, parts):
         """
@@ -421,11 +449,11 @@ class CommandEmulator:
                         $lineNum++
                     }
                 '''
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
             else:
                 # Just pass through stdin
                 # In PowerShell pipeline, this is implicit
-                return '$input', True
+                return '$input'
 
         # ================================================================
         # ARTIGIANO: Glob Pattern Expansion
@@ -565,7 +593,7 @@ class CommandEmulator:
                         }}
                     '''.format(','.join(f'"{f}"' for f in files))
 
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_echo(self, cmd: str, parts):
         """
@@ -589,43 +617,43 @@ class CommandEmulator:
             text = text.replace('\\n', '`n').replace('\\t', '`t').replace('\\r', '`r')
             
             if no_newline:
-                return f'powershell -Command "Write-Host -NoNewline \\"{text}\\""', True
+                return f'powershell -Command "Write-Host -NoNewline \\"{text}\\""'
             else:
-                return f'powershell -Command "Write-Host \\"{text}\\""', True
+                return f'powershell -Command "Write-Host \\"{text}\\""'
         else:
             # Standard cmd.exe echo
             if no_newline:
                 # cmd.exe doesn't support no-newline, use PowerShell
-                return f'powershell -Command "Write-Host -NoNewline \\"{text}\\""', True
+                return f'powershell -Command "Write-Host -NoNewline \\"{text}\\""'
             else:
                 # Escape special characters for cmd
                 if text:
-                    return f'echo {text}', True
+                    return f'echo {text}'
                 else:
-                    return 'echo.', True
+                    return 'echo.'
     
     def _translate_pwd(self, cmd: str, parts):
-        return 'cd', True
+        return 'cd'
     
     def _translate_cd(self, cmd: str, parts):
         if len(parts) < 2:
-            return 'cd', True
+            return 'cd'
         win_path = parts[1]  # Already translated
-        return f'cd /d "{win_path}"', True
+        return f'cd /d "{win_path}"'
     
     def _translate_mkdir(self, cmd: str, parts):
         if len(parts) < 2:
-            return 'echo Error: mkdir requires directory name', True
+            return 'echo Error: mkdir requires directory name'
         # Paths already translated, use directly
         dirs = [p for p in parts[1:] if p != '-p' and not p.startswith('-')]
         if not dirs:
-            return 'echo Error: mkdir requires directory name', True
-        return f'mkdir {" ".join(dirs)}', True
+            return 'echo Error: mkdir requires directory name'
+        return f'mkdir {" ".join(dirs)}'
     
     def _translate_rm(self, cmd: str, parts):
         """Translate rm with FULL flag support - verbose implemented"""
         if len(parts) < 2:
-            return 'echo Error: rm requires filename', True
+            return 'echo Error: rm requires filename'
         
         recursive = '-r' in parts or '-R' in parts
         force = '-f' in parts
@@ -641,7 +669,7 @@ class CommandEmulator:
         
         paths = [p for p in parts[1:] if not p.startswith('-')]
         if not paths:
-            return 'echo Error: rm requires filename', True
+            return 'echo Error: rm requires filename'
         
         # Paths already translated by translate_paths_in_string
         win_paths = paths
@@ -678,12 +706,12 @@ class CommandEmulator:
                 
                 commands.append(f'del {flag_str} "{win_path}"')
         
-        return ' && '.join(commands), True
+        return ' && '.join(commands)
     
     def _translate_cp(self, cmd: str, parts):
         """Translate cp with FULL flag support - preserve and force implemented"""
         if len(parts) < 3:
-            return 'echo Error: cp requires source and destination', True
+            return 'echo Error: cp requires source and destination'
         
         recursive = '-r' in parts or '-R' in parts or '-a' in parts
         preserve = '-p' in parts or '-a' in parts
@@ -695,7 +723,7 @@ class CommandEmulator:
         
         paths = [p for p in parts[1:] if not p.startswith('-')]
         if len(paths) < 2:
-            return 'echo Error: cp requires source and destination', True
+            return 'echo Error: cp requires source and destination'
         
         if len(paths) > 2:
             # Multiple sources → destination must be directory
@@ -719,7 +747,7 @@ class CommandEmulator:
                     if force or (not interactive and not no_clobber):
                         copy_flags.append('/y')
                     commands.append(f'copy {" ".join(copy_flags)} "{src}" "{dst}"')
-            return ' && '.join(commands), True
+            return ' && '.join(commands)
         else:
             # Single source - paths already translated
             src = paths[0]
@@ -736,7 +764,7 @@ class CommandEmulator:
                 if verbose:
                     flags.append('/f')
                 
-                return f'xcopy {" ".join(flags)} "{src}" "{dst}"', True
+                return f'xcopy {" ".join(flags)} "{src}" "{dst}"'
             else:
                 flags = []
                 if force or (not interactive and not no_clobber):
@@ -748,20 +776,20 @@ class CommandEmulator:
                 
                 # Use robocopy for preserve mode (preserves timestamps, attributes)
                 if preserve:
-                    return f'robocopy /copy:DAT /np "{Path(src).parent}" "{Path(dst).parent}" "{Path(src).name}"', True
+                    return f'robocopy /copy:DAT /np "{Path(src).parent}" "{Path(dst).parent}" "{Path(src).name}"'
                 
-                return f'copy {flag_str} "{src}" "{dst}"', True
+                return f'copy {flag_str} "{src}" "{dst}"'
     
     def _translate_mv(self, cmd: str, parts):
         if len(parts) < 3:
-            return 'echo Error: mv requires source and destination', True
+            return 'echo Error: mv requires source and destination'
         paths = [p for p in parts[1:] if not p.startswith('-')]
         if len(paths) < 2:
-            return 'echo Error: mv requires source and destination', True
+            return 'echo Error: mv requires source and destination'
         # Paths already translated
         src = paths[-2]
         dst = paths[-1]
-        return f'move /y "{src}" "{dst}"', True
+        return f'move /y "{src}" "{dst}"'
     
     def _translate_touch(self, cmd: str, parts):
         """Translate touch with proper timestamp update
@@ -769,7 +797,7 @@ class CommandEmulator:
         Creates file if doesn't exist, updates timestamp if exists
         """
         if len(parts) < 2:
-            return 'echo Error: touch requires filename', True
+            return 'echo Error: touch requires filename'
         
         files = [p for p in parts[1:] if not p.startswith('-')]
         # Paths already translated
@@ -787,7 +815,7 @@ class CommandEmulator:
             )
             commands.append(f'powershell -Command "{ps_cmd}"')
         
-        return ' && '.join(commands), True
+        return ' && '.join(commands)
     
     def _translate_ln(self, cmd: str, parts):
         """
@@ -810,7 +838,7 @@ class CommandEmulator:
         - -n, --no-dereference: Treat link destination as normal file
         """
         if len(parts) < 3:
-            return 'echo Error: ln requires target and link_name', True
+            return 'echo Error: ln requires target and link_name'
         
         # Parse flags (including combined flags like -sf)
         symbolic = False
@@ -831,7 +859,7 @@ class CommandEmulator:
         # Extract target and link_name
         non_flags = [p for p in parts[1:] if not p.startswith('-')]
         if len(non_flags) < 2:
-            return 'echo Error: ln requires target and link_name', True
+            return 'echo Error: ln requires target and link_name'
         
         target = non_flags[0]  # Already translated path
         link_name = non_flags[1]  # Already translated path
@@ -901,7 +929,7 @@ class CommandEmulator:
                 }}
             '''
             
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
         
         else:
             # HARD LINK (no admin required!)
@@ -911,12 +939,12 @@ class CommandEmulator:
             force_cmd = f'if exist "{link_name}" del /f "{link_name}" && ' if force else ''
             
             # mklink /H for hard links (files only, not directories)
-            return f'{force_cmd}mklink /H "{link_name}" "{target}"', True
+            return f'{force_cmd}mklink /H "{link_name}" "{target}"'
     
     def _translate_grep(self, cmd: str, parts):
         """Translate grep with FULL flag support - ALL flags implemented"""
         if len(parts) < 2:
-            return 'echo Error: grep requires pattern', True
+            return 'echo Error: grep requires pattern'
         
         case_insensitive = '-i' in parts
         invert = '-v' in parts
@@ -964,7 +992,7 @@ class CommandEmulator:
                 files.append(f'"{win_path}"')
         
         if pattern is None:
-            return 'echo Error: grep requires pattern', True
+            return 'echo Error: grep requires pattern'
         
         # Use PowerShell for full feature support
         ps_flags = []
@@ -975,7 +1003,7 @@ class CommandEmulator:
         if quiet:
             # Quiet mode: just exit code, no output
             ps_cmd = f'if (Select-String -Pattern "{pattern}" -Path {files[0] if files else "*"} -Quiet) {{ exit 0 }} else {{ exit 1 }}'
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
         if line_numbers:
             # Select-String includes line numbers by default in output
@@ -1014,7 +1042,7 @@ class CommandEmulator:
         if files_without_matches:
             # Invert the logic
             ps_cmd = f'$allFiles = Get-ChildItem {file_arg}; $matchFiles = {ps_cmd} | Select-Object -Unique Path; $allFiles | Where-Object {{ $matchFiles.Path -notcontains $_.FullName }} | ForEach-Object {{ $_.Name }}'
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
         if count:
             post_process.append('Measure-Object')
@@ -1035,7 +1063,7 @@ class CommandEmulator:
         if post_process:
             ps_cmd += ' | ' + ' | '.join(post_process)
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_find(self, cmd: str, parts):
         """
@@ -1109,7 +1137,7 @@ class CommandEmulator:
                         return bash_cmd, False
                 else:
                     self.logger.error("Complex find -exec requires bash.exe (not available)")
-                    return 'echo "ERROR: Complex find -exec requires bash.exe"', True
+                    return 'echo "ERROR: Complex find -exec requires bash.exe"'
 
         # Advanced find features not supported in PowerShell emulation
         unsupported_flags = ['-printf', '-execdir', '-ok', '-okdir', '-prune', '-quit',
@@ -1152,7 +1180,7 @@ class CommandEmulator:
                 i += 2
             elif test == '-iname' and i + 1 < len(parts):
                 pattern = parts[i + 1].strip('"\'')
-                tests.append(('name', pattern, True))  # case-insensitive
+                tests.append(('name', pattern))  # case-insensitive
                 i += 2
             elif test == '-type' and i + 1 < len(parts):
                 ftype = parts[i + 1]
@@ -1242,7 +1270,7 @@ class CommandEmulator:
             else:
                 ps_cmd = f'{get_cmd} | ForEach-Object {{ $_.FullName }}'
 
-            return ps_cmd, True
+            return ps_cmd
 
         # Complex case: Build full PowerShell script
         ps_script = f'''
@@ -1431,7 +1459,7 @@ class CommandEmulator:
             }
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _parse_find_size(self, size_spec: str) -> int:
         """
@@ -1461,8 +1489,8 @@ class CommandEmulator:
     
     def _translate_which(self, cmd: str, parts):
         if len(parts) < 2:
-            return 'echo Error: which requires command name', True
-        return f'where {parts[1]}', True
+            return 'echo Error: which requires command name'
+        return f'where {parts[1]}'
     
     def _translate_head(self, cmd: str, parts):
         """
@@ -1508,7 +1536,7 @@ class CommandEmulator:
         if not files:
             # Reading from stdin (pipeline)
             # PowerShell: Select-Object -First N
-            return f'Select-Object -First {line_count}', True
+            return f'Select-Object -First {line_count}'
 
         # ARTIGIANO: Glob Pattern Expansion (same as cat)
         has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
@@ -1579,7 +1607,7 @@ class CommandEmulator:
                     }}
                 '''.format(','.join(f'"{f}"' for f in files), line_count)
 
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_tail(self, cmd: str, parts):
         """
@@ -1631,7 +1659,7 @@ class CommandEmulator:
         if not files:
             # Reading from stdin (pipeline)
             # PowerShell: Select-Object -Last N
-            return f'Select-Object -Last {line_count}', True
+            return f'Select-Object -Last {line_count}'
 
         # ARTIGIANO: Glob Pattern Expansion (same as cat/head)
         has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
@@ -1643,7 +1671,7 @@ class CommandEmulator:
                 if self.git_bash_exe:
                     return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
                 else:
-                    return 'echo "tail -f with globs requires bash.exe"', True
+                    return 'echo "tail -f with globs requires bash.exe"'
 
             files_patterns = ','.join(f'"{f}"' for f in files)
             ps_script = f'''
@@ -1713,7 +1741,7 @@ class CommandEmulator:
                     if self.git_bash_exe:
                         return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
                     else:
-                        return 'echo "tail -f with multiple files requires bash.exe"', True
+                        return 'echo "tail -f with multiple files requires bash.exe"'
 
                 # Normal mode with multiple files
                 ps_script = '''
@@ -1731,7 +1759,7 @@ class CommandEmulator:
                     }}
                 '''.format(','.join(f'"{f}"' for f in files), line_count)
 
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_wc(self, cmd: str, parts):
         """
@@ -1806,7 +1834,7 @@ class CommandEmulator:
 
             ps_script += '\nWrite-Output ($output -join "  ")'
 
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
 
         # ARTIGIANO: Glob Pattern Expansion (same as cat/head/tail)
         has_glob = any(c in ''.join(files) for c in ['*', '?', '[', ']'])
@@ -1892,7 +1920,7 @@ class CommandEmulator:
             ps_script += '\n                    Write-Output ($output -join "  ")'
             ps_script += '\n                }'
 
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
 
         # No globs - direct file access
         # Files specified
@@ -1983,7 +2011,7 @@ class CommandEmulator:
                     ps_script += '\n$output += $totalChars'
                 ps_script += '\n$output += "total"\nWrite-Output ($output -join "  ")'
 
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_sort(self, cmd: str, parts):
         """
@@ -2048,14 +2076,14 @@ class CommandEmulator:
                     cmd += ' /r'
                 if unique:
                     cmd += ' /unique'
-                return cmd, True
+                return cmd
             else:
                 cmd = 'sort'
                 if reverse:
                     cmd += ' /r'
                 if unique:
                     cmd += ' /unique'
-                return cmd, True
+                return cmd
         
         # Complex sort - PowerShell script
         # Default separator is whitespace
@@ -2173,7 +2201,7 @@ class CommandEmulator:
         
         ps_script += ' | ForEach-Object { $_.Line }'
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_uniq(self, cmd: str, parts):
         """
@@ -2334,18 +2362,18 @@ class CommandEmulator:
             }
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_ps(self, cmd: str, parts):
-        return 'tasklist', True
+        return 'tasklist'
     
     def _translate_kill(self, cmd: str, parts):
         force = '-9' in parts or '-KILL' in parts
         pids = [p for p in parts[1:] if not p.startswith('-') and p.isdigit()]
         if pids:
             flag = '/f' if force else ''
-            return f'taskkill {flag} /pid {" /pid ".join(pids)}', True
-        return 'echo Error: kill requires PID', True
+            return f'taskkill {flag} /pid {" /pid ".join(pids)}'
+        return 'echo Error: kill requires PID'
     
     def _translate_env(self, cmd: str, parts):
         """
@@ -2357,10 +2385,10 @@ class CommandEmulator:
         if len(parts) > 1:
             # Show specific variable
             var_name = parts[1]
-            return f'echo %{var_name}%', True
+            return f'echo %{var_name}%'
         else:
             # Show all variables
-            return 'set', True
+            return 'set'
     
     def _translate_printenv(self, cmd: str, parts):
         """
@@ -2372,10 +2400,10 @@ class CommandEmulator:
         if len(parts) > 1:
             # Show specific variable
             var_name = parts[1]
-            return f'echo %{var_name}%', True
+            return f'echo %{var_name}%'
         else:
             # Show all variables
-            return 'set', True
+            return 'set'
     
     def _translate_export(self, cmd: str, parts):
         """
@@ -2385,16 +2413,16 @@ class CommandEmulator:
         export VAR → (no-op, just mark as exported)
         """
         if len(parts) < 2:
-            return 'echo Error: export requires variable', True
+            return 'echo Error: export requires variable'
         
         var_expr = parts[1]
         
         if '=' in var_expr:
             # VAR=value format
-            return f'set {var_expr}', True
+            return f'set {var_expr}'
         else:
             # Just VAR (mark as exported - no-op on Windows)
-            return f'echo exported {var_expr}', True
+            return f'echo exported {var_expr}'
     
     def _translate_wget(self, cmd: str, parts):
         """
@@ -2414,7 +2442,7 @@ class CommandEmulator:
           wget -O output.html http://example.com
         """
         if len(parts) < 2:
-            return 'echo Error: wget requires URL', True
+            return 'echo Error: wget requires URL'
 
         # Extract URL and output filename
         urls = [p for p in parts[1:] if 'http://' in p or 'https://' in p]
@@ -2429,7 +2457,7 @@ class CommandEmulator:
                 i += 1
 
         if not urls:
-            return 'echo Error: wget requires URL', True
+            return 'echo Error: wget requires URL'
 
         # Convert to curl command
         if output:
@@ -2468,7 +2496,7 @@ class CommandEmulator:
         - -F file=@path: multipart form upload
         """
         if len(parts) < 2:
-            return 'echo Error: curl requires URL', True
+            return 'echo Error: curl requires URL'
         
         method = None
         headers = []
@@ -2559,7 +2587,7 @@ class CommandEmulator:
                 i += 1
         
         if not url:
-            return 'echo Error: curl requires URL', True
+            return 'echo Error: curl requires URL'
         
         # Build PowerShell Invoke-WebRequest command
         ps_parts = []
@@ -2680,13 +2708,13 @@ class CommandEmulator:
         if fail_silent and not silent:
             ps_cmd = f'try {{ {ps_cmd} }} catch {{ exit 22 }}'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_chmod(self, cmd: str, parts):
-        return 'echo chmod: operation completed (no-op on Windows)', True
+        return 'echo chmod: operation completed (no-op on Windows)'
     
     def _translate_chown(self, cmd: str, parts):
-        return 'echo chown: operation completed (no-op on Windows)', True
+        return 'echo chown: operation completed (no-op on Windows)'
     
     def _translate_du(self, cmd: str, parts):
         """
@@ -2711,7 +2739,7 @@ class CommandEmulator:
             else:
                 ps_cmd = f'Get-ChildItem -Path \\"{path}\\" -Recurse -File | Measure-Object -Property Length -Sum | Select-Object -ExpandProperty Sum'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         elif all_files:
             # All files with sizes
             if human_readable:
@@ -2719,13 +2747,13 @@ class CommandEmulator:
             else:
                 ps_cmd = f'Get-ChildItem -Path \\"{path}\\" -Recurse | Select-Object FullName, Length'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         else:
             # Directory sizes (default)
-            return f'dir /s "{path}"', True
+            return f'dir /s "{path}"'
     
     def _translate_df(self, cmd: str, parts):
-        return 'wmic logicaldisk get size,freespace,caption', True
+        return 'wmic logicaldisk get size,freespace,caption'
     
     def _translate_date(self, cmd: str, parts):
         """
@@ -2741,7 +2769,7 @@ class CommandEmulator:
         """
         if len(parts) == 1:
             # Simple date
-            return 'echo %date% %time%', True
+            return 'echo %date% %time%'
         
         format_str = parts[1] if len(parts) > 1 else None
         
@@ -2767,28 +2795,28 @@ class CommandEmulator:
             # Special cases
             if '%s' in fmt:
                 # Unix timestamp
-                return 'powershell -Command "[int](Get-Date -UFormat %s)"', True
+                return 'powershell -Command "[int](Get-Date -UFormat %s)"'
             
-            return f'powershell -Command "Get-Date -Format \\"{ps_fmt}\\""', True
+            return f'powershell -Command "Get-Date -Format \\"{ps_fmt}\\""'
         
-        return 'echo %date% %time%', True
+        return 'echo %date% %time%'
     
     def _translate_sleep(self, cmd: str, parts):
         if len(parts) > 1 and parts[1].isdigit():
-            return f'timeout /t {parts[1]} /nobreak', True
-        return 'echo Error: sleep requires seconds', True
+            return f'timeout /t {parts[1]} /nobreak'
+        return 'echo Error: sleep requires seconds'
     
     def _translate_basename(self, cmd: str, parts):
         if len(parts) > 1:
             filename = parts[1].split('/')[-1].split('\\')[-1]
-            return f'echo {filename}', True
-        return 'echo Error: basename requires path', True
+            return f'echo {filename}'
+        return 'echo Error: basename requires path'
     
     def _translate_dirname(self, cmd: str, parts):
         if len(parts) > 1:
             win_path = parts[1]  # Already translated
-            return f'powershell -Command "(Get-Item \\"{win_path}\\").Directory.FullName"', True
-        return 'echo Error: dirname requires path', True
+            return f'powershell -Command "(Get-Item \\"{win_path}\\").Directory.FullName"'
+        return 'echo Error: dirname requires path'
     
     def _translate_tar(self, cmd: str, parts):
         """
@@ -2811,7 +2839,7 @@ class CommandEmulator:
         tar -xjf archive.tar.bz2 → extract bzip2
         """
         if len(parts) < 2:
-            return 'echo Error: tar requires arguments', True
+            return 'echo Error: tar requires arguments'
         
         # Parse operation from flags
         flags = parts[1]
@@ -2844,7 +2872,7 @@ class CommandEmulator:
                 i += 1
         
         if not archive:
-            return 'echo Error: tar requires archive name (-f)', True
+            return 'echo Error: tar requires archive name (-f)'
         
         # Build tar command for native tar.exe
         tar_parts = [parts[0]]  # 'tar'
@@ -2863,7 +2891,7 @@ class CommandEmulator:
         
         if create:
             if not paths:
-                return 'echo Error: tar -c requires source path(s)', True
+                return 'echo Error: tar -c requires source path(s)'
             
             paths_str = ','.join([f'\\"{p}\\"' for p in paths])
             ps_fallback = f'Compress-Archive -Path {paths_str} -DestinationPath \\"{zip_archive}\\" -Force'
@@ -2882,7 +2910,7 @@ class CommandEmulator:
             ps_fallback = f'Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::OpenRead(\\"{zip_archive}\\").Entries | Select-Object FullName'
         
         else:
-            return 'echo Error: tar requires operation flag (c, x, or t)', True
+            return 'echo Error: tar requires operation flag (c, x, or t)'
         
         # Build PowerShell script with fallback chain
         ps_script = f'''
@@ -2898,7 +2926,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_zip(self, cmd: str, parts):
         """
@@ -2936,10 +2964,10 @@ class CommandEmulator:
                 i += 1
         
         if not archive:
-            return 'echo Error: zip requires archive name', True
+            return 'echo Error: zip requires archive name'
         
         if not items:
-            return 'echo Error: zip requires items to compress', True
+            return 'echo Error: zip requires items to compress'
         
         # Ensure .zip extension
         if not archive.endswith('.zip'):
@@ -2967,7 +2995,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_unzip(self, cmd: str, parts):
         """
@@ -3006,7 +3034,7 @@ class CommandEmulator:
                 i += 1
         
         if not archive:
-            return 'echo Error: unzip requires archive', True
+            return 'echo Error: unzip requires archive'
         
         if list_contents:
             # List contents
@@ -3055,7 +3083,7 @@ class CommandEmulator:
                 }}
             '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_sed(self, cmd: str, parts):
         """
@@ -3074,7 +3102,7 @@ class CommandEmulator:
         Complex sed scripts work better with native sed.
         """
         if len(parts) < 2:
-            return 'echo Error: sed requires expression', True
+            return 'echo Error: sed requires expression'
         
         # Build command for native sed
         sed_cmd_parts = []
@@ -3131,11 +3159,11 @@ class CommandEmulator:
                 i += 1
         
         if not expressions:
-            return 'echo Error: sed requires expression', True
+            return 'echo Error: sed requires expression'
         
         # Build PowerShell sed emulation
         if not files:
-            return 'echo Error: sed requires file argument (stdin not yet supported)', True
+            return 'echo Error: sed requires file argument (stdin not yet supported)'
         
         file_arg = f'\\"{files[0]}\\"'
         
@@ -3273,7 +3301,7 @@ class CommandEmulator:
         # Complete script with fallback chain
         ps_complete = ps_script_start + ps_script
         
-        return f'powershell -Command "{ps_complete}"', True
+        return f'powershell -Command "{ps_complete}"'
     
     def _translate_awk(self, cmd: str, parts):
         """
@@ -3305,54 +3333,7 @@ class CommandEmulator:
         3. Fallback PowerShell custom for common patterns
         """
         if len(parts) < 2:
-            return 'echo Error: awk requires program', True
-
-        # ================================================================
-        # ARTIGIANO: Detect CRITICAL complexity
-        # ================================================================
-
-        def is_critical_awk(program):
-            """Detect if awk uses features that REQUIRE native awk"""
-            # Array operations
-            if '[' in program and ']' in program:
-                # Likely array: a[$1]++, array[key]=value
-                return True
-
-            # Built-in functions (not exhaustive, but common ones)
-            critical_functions = [
-                'gsub', 'sub', 'substr', 'split', 'match', 'sprintf',
-                'strftime', 'systime', 'tolower', 'toupper', 'length',
-                'index', 'getline', 'system', 'close', 'fflush'
-            ]
-            for func in critical_functions:
-                if func + '(' in program:
-                    return True
-
-            # User-defined functions (function name() {...})
-            if re.search(r'\bfunction\s+\w+\s*\(', program):
-                return True
-
-            # Pattern ranges (/start/,/end/)
-            if re.search(r'/[^/]+/\s*,\s*/[^/]+/', program):
-                return True
-
-            # Multiple files with FILENAME or FNR
-            if 'FILENAME' in program or 'FNR' in program:
-                return True
-
-            # Complex printf (more than simple %s or %d)
-            if 'printf' in program:
-                # Check for complex format strings
-                printf_match = re.search(r'printf\s*\(["\']([^"\']+)', program)
-                if printf_match:
-                    format_str = printf_match.group(1)
-                    # Complex formats: %10s, %.2f, %-5d, etc.
-                    if re.search(r'%[-+0-9.]*[a-z]', format_str):
-                        complex_formats = re.findall(r'%[-+0-9.]+[a-z]', format_str)
-                        if complex_formats:
-                            return True
-
-            return False
+            return 'echo Error: awk requires program'
 
         # Extract program for analysis
         program_str = None
@@ -3361,25 +3342,6 @@ class CommandEmulator:
                 if parts[i-1] not in ['-F', '-v']:  # Not an option argument
                     program_str = part
                     break
-
-        if program_str and is_critical_awk(program_str):
-            # CRITICAL awk -> native awk.exe or bash.exe REQUIRED
-            # First try will be awk.exe in the fallback chain
-            # But if that fails and we have bash.exe, use it
-            if not self.git_bash_exe:
-                self.logger.warning("Critical awk features detected - requires awk.exe or bash.exe")
-            else:
-                # Check if awk.exe available
-                try:
-                    result = subprocess.run(['where', 'awk.exe'], capture_output=True, timeout=2)
-                    if result.returncode != 0:
-                        # No awk.exe, use bash.exe
-                        self.logger.debug("Critical awk features + no awk.exe -> using bash.exe")
-                        bash_cmd = self._execute_with_gitbash(cmd)
-                        if bash_cmd:
-                            return bash_cmd, False
-                except:
-                    pass
 
         # ================================================================
         # Standard awk execution with native awk.exe preference
@@ -3397,22 +3359,7 @@ class CommandEmulator:
         awk_full_cmd = ' '.join(awk_cmd_parts)
         
         # PowerShell script with fallback chain
-        ps_script = f'''
-            # Try native awk/gawk (Git for Windows)
-            $awkExe = Get-Command awk.exe -ErrorAction SilentlyContinue
-            if (-not $awkExe) {{
-                $awkExe = Get-Command gawk.exe -ErrorAction SilentlyContinue
-            }}
-            
-            if ($awkExe) {{
-                # Native awk - 100% GNU compatible
-                & $awkExe.Source {awk_full_cmd}
-                exit $LASTEXITCODE
-            }}
-            
-            # Fallback: PowerShell custom implementation
-            # (Common patterns only - complex awk requires native binary)
-        '''
+        ps_script = ""
         
         # Extract awk components for PowerShell fallback
         field_separator = None
@@ -3439,7 +3386,7 @@ class CommandEmulator:
                 i += 1
         
         if not program:
-            return 'echo Error: awk requires program', True
+            return 'echo Error: awk requires program'
         
         # Default field separator
         if not field_separator:
@@ -3526,14 +3473,9 @@ class CommandEmulator:
             ps_end = self._awk_to_ps_statement(end_block)
             ps_main.append(ps_end)
         
-        ps_fallback = '; '.join(ps_lines + ps_main)
+        ps_script = '; '.join(ps_lines + ps_main)
         
-        # Complete script with fallback
-        ps_script += f'''
-            {ps_fallback}
-        '''
-        
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _awk_to_ps_statement(self, awk_stmt: str) -> str:
         """Convert awk statement to PowerShell"""
@@ -3577,7 +3519,7 @@ class CommandEmulator:
     def _translate_cut(self, cmd: str, parts):
         """Translate cut with FULL options - bytes and complement implemented"""
         if len(parts) < 2:
-            return 'echo Error: cut requires options', True
+            return 'echo Error: cut requires options'
         
         delimiter = None
         fields = None
@@ -3635,7 +3577,7 @@ class CommandEmulator:
             else:
                 ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ $F = $_ -split \\"{delimiter}\\"; ($F[{field_list}]) -join \\"{delimiter}\\" }}'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
         # Character extraction
         elif characters:
@@ -3646,7 +3588,7 @@ class CommandEmulator:
             else:
                 ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ -join $_.ToCharArray()[{char_list}] }}'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
         # Byte extraction (similar to character but works on bytes)
         elif bytes_range:
@@ -3657,9 +3599,9 @@ class CommandEmulator:
             else:
                 ps_cmd = f'Get-Content {file_arg} -Encoding Byte | ForEach-Object {{ $_[{byte_list}] }}'
             
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
         
-        return 'echo Error: cut requires -f (with -d), -c, or -b', True
+        return 'echo Error: cut requires -f (with -d), -c, or -b'
 
     def _parse_cut_range(self, range_spec: str) -> str:
         """Parse cut range specification (N, N-M, N-, -M, N,M,...)"""
@@ -3682,10 +3624,10 @@ class CommandEmulator:
         return ','.join(ranges)
     
     def _translate_true(self, cmd: str, parts):
-        return 'exit /b 0', True
+        return 'exit /b 0'
     
     def _translate_false(self, cmd: str, parts):
-        return 'exit /b 1', True
+        return 'exit /b 1'
     
     # ========================================================================
     # NEW CRITICAL COMMANDS
@@ -3729,7 +3671,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         if parts[1] == '-d' and len(parts) >= 3:
             dir_path = parts[2]
@@ -3740,7 +3682,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         if parts[1] == '-e' and len(parts) >= 3:
             path = parts[2]
@@ -3751,7 +3693,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         # String tests
         if parts[1] == '-z' and len(parts) >= 3:
@@ -3764,7 +3706,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         if parts[1] == '-n' and len(parts) >= 3:
             # String is NOT empty
@@ -3776,7 +3718,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         # Numeric comparisons (3 args: val1 op val2)
         if len(parts) >= 4:
@@ -3806,7 +3748,7 @@ class CommandEmulator:
                         exit 1
                     }}
                 '''
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
             elif op == '!=':
                 # String inequality
                 ps_cmd = f'''
@@ -3816,7 +3758,7 @@ class CommandEmulator:
                         exit 1
                     }}
                 '''
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
             else:
                 # Unknown operator - fail
                 return 'exit 1', False
@@ -3835,7 +3777,7 @@ class CommandEmulator:
                     exit 1
                 }}
             '''
-            return f'powershell -Command "{ps_cmd}"', True
+            return f'powershell -Command "{ps_cmd}"'
 
         # Unknown test format - fail
         return 'exit 1', False
@@ -3848,7 +3790,7 @@ class CommandEmulator:
         Flags: -d (delete), -s (squeeze), -c (complement)
         """
         if len(parts) < 2:
-            return 'echo Error: tr requires arguments', True
+            return 'echo Error: tr requires arguments'
         
         delete_mode = '-d' in parts
         squeeze = '-s' in parts
@@ -3858,7 +3800,7 @@ class CommandEmulator:
         sets = [p for p in parts[1:] if not p.startswith('-')]
         
         if not sets:
-            return 'echo Error: tr requires character sets', True
+            return 'echo Error: tr requires character sets'
         
         set1 = sets[0]
         set2 = sets[1] if len(sets) > 1 else ''
@@ -3906,7 +3848,7 @@ class CommandEmulator:
                     # No set2: delete
                     ps_cmd = f'$input | ForEach-Object {{ $_ -replace "[{set1}]", "" }}'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_diff(self, cmd: str, parts):
         """
@@ -3931,7 +3873,7 @@ class CommandEmulator:
         - -q, --brief: Just report if different
         """
         if len(parts) < 3:
-            return 'echo Error: diff requires two files', True
+            return 'echo Error: diff requires two files'
         
         unified = '-u' in parts or '--unified' in parts
         brief = '-q' in parts or '--brief' in parts
@@ -3950,18 +3892,18 @@ class CommandEmulator:
         files = [p for p in parts[1:] if not p.startswith('-') and not p.isdigit()]
         
         if len(files) < 2:
-            return 'echo Error: diff requires two files', True
+            return 'echo Error: diff requires two files'
         
         file1 = files[0]
         file2 = files[1]
         
         if brief:
             # Just check if different
-            return f'fc /b "{file1}" "{file2}" >nul 2>&1 && echo Files are identical || echo Files differ', True
+            return f'fc /b "{file1}" "{file2}" >nul 2>&1 && echo Files are identical || echo Files differ'
         
         if not unified:
             # Standard diff (use fc)
-            return f'fc /n "{file1}" "{file2}"', True
+            return f'fc /n "{file1}" "{file2}"'
         
         # UNIFIED DIFF - Try diff.exe first, fallback to PowerShell
         fallback_ps = f'''
@@ -4118,7 +4060,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{fallback_ps}"', True
+        return f'powershell -Command "{fallback_ps}"'
     
     def _translate_tee(self, cmd: str, parts):
         """
@@ -4130,7 +4072,7 @@ class CommandEmulator:
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return 'echo Error: tee requires filename', True
+            return 'echo Error: tee requires filename'
         
         file_path = files[0]
         
@@ -4141,7 +4083,7 @@ class CommandEmulator:
             # Overwrite mode
             ps_cmd = f'$input | Tee-Object -FilePath \\"{file_path}\\"'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_seq(self, cmd: str, parts):
         """
@@ -4152,7 +4094,7 @@ class CommandEmulator:
                seq FIRST INCREMENT LAST
         """
         if len(parts) < 2:
-            return 'echo Error: seq requires arguments', True
+            return 'echo Error: seq requires arguments'
         
         nums = [p for p in parts[1:] if not p.startswith('-')]
         
@@ -4172,9 +4114,9 @@ class CommandEmulator:
             last = nums[2]
             ps_cmd = f'{first}..{last} | Where-Object {{ ($_ - {first}) % {incr} -eq 0 }}'
         else:
-            return 'echo Error: seq requires numbers', True
+            return 'echo Error: seq requires numbers'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_yes(self, cmd: str, parts):
         """
@@ -4187,15 +4129,15 @@ class CommandEmulator:
         # Use PowerShell infinite loop
         ps_cmd = f'while($true) {{ Write-Output "{text}" }}'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_whoami(self, cmd: str, parts):
         """Translate whoami (current user)."""
-        return 'echo %USERNAME%', True
+        return 'echo %USERNAME%'
     
     def _translate_hostname(self, cmd: str, parts):
         """Translate hostname (computer name)."""
-        return 'hostname', True
+        return 'hostname'
     
     def _translate_file(self, cmd: str, parts):
         """
@@ -4204,19 +4146,19 @@ class CommandEmulator:
         Windows equivalent uses file extension + properties.
         """
         if len(parts) < 2:
-            return 'echo Error: file requires filename', True
+            return 'echo Error: file requires filename'
         
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return 'echo Error: file requires filename', True
+            return 'echo Error: file requires filename'
         
         file_path = files[0]
         
         # Use PowerShell to get file info
         ps_cmd = f'Get-Item \\"{file_path}\\" | Select-Object Name, Extension, Length, LastWriteTime | Format-List'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_stat(self, cmd: str, parts):
         """
@@ -4225,19 +4167,19 @@ class CommandEmulator:
         Shows detailed file information.
         """
         if len(parts) < 2:
-            return 'echo Error: stat requires filename', True
+            return 'echo Error: stat requires filename'
         
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return 'echo Error: stat requires filename', True
+            return 'echo Error: stat requires filename'
         
         file_path = files[0]
         
         # Use PowerShell Get-Item with full properties
         ps_cmd = f'Get-Item \\"{file_path}\\" | Format-List *'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_readlink(self, cmd: str, parts):
         """
@@ -4246,13 +4188,13 @@ class CommandEmulator:
         Windows uses junctions/symlinks differently.
         """
         if len(parts) < 2:
-            return 'echo Error: readlink requires filename', True
+            return 'echo Error: readlink requires filename'
         
         follow_all = '-f' in parts
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return 'echo Error: readlink requires filename', True
+            return 'echo Error: readlink requires filename'
         
         file_path = files[0]
         
@@ -4263,7 +4205,7 @@ class CommandEmulator:
             # Just show link target
             ps_cmd = f'(Get-Item \\"{file_path}\\").Target'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
     
     def _translate_realpath(self, cmd: str, parts):
         """
@@ -4272,19 +4214,19 @@ class CommandEmulator:
         Resolves . and .. references.
         """
         if len(parts) < 2:
-            return 'echo Error: realpath requires path', True
+            return 'echo Error: realpath requires path'
         
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return 'echo Error: realpath requires path', True
+            return 'echo Error: realpath requires path'
         
         file_path = files[0]
         
         # Use PowerShell Resolve-Path
         ps_cmd = f'Resolve-Path \\"{file_path}\\" | Select-Object -ExpandProperty Path'
         
-        return f'powershell -Command "{ps_cmd}"', True
+        return f'powershell -Command "{ps_cmd}"'
 
     def _checksum_generic(self, algorithm: str, cmd_name: str, parts):
         """
@@ -4300,7 +4242,7 @@ class CommandEmulator:
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if not files:
-            return f'echo Error: {cmd_name} requires filename', True
+            return f'echo Error: {cmd_name} requires filename'
         
         if check_mode:
             # Check mode: verify checksums from file
@@ -4342,7 +4284,7 @@ class CommandEmulator:
                 }}
             '''
             
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
         
         # Hash files
         commands = []
@@ -4353,7 +4295,7 @@ class CommandEmulator:
             )
             commands.append(f'powershell -Command "{ps_cmd}"')
         
-        return ' && '.join(commands), True
+        return ' && '.join(commands)
     
     def _translate_sha256sum(self, cmd: str, parts):
         """
@@ -4414,7 +4356,7 @@ class CommandEmulator:
                 i += 1
         
         if not file_path:
-            return 'echo Error: hexdump requires filename', True
+            return 'echo Error: hexdump requires filename'
         
         if canonical:
             # Canonical format: offset + hex + ASCII
@@ -4482,7 +4424,7 @@ class CommandEmulator:
                 }}
             '''
             
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
         else:
             # Non-canonical format - just hex
             ps_script = f'''
@@ -4502,7 +4444,7 @@ class CommandEmulator:
                 $bytes | ForEach-Object {{ "{{0:x2}}" -f $_ }} | Write-Output
             '''
             
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
     
     def _translate_strings(self, cmd: str, parts):
         """
@@ -4537,7 +4479,7 @@ class CommandEmulator:
                 i += 1
         
         if not file_path:
-            return 'echo Error: strings requires filename', True
+            return 'echo Error: strings requires filename'
         
         ps_script = f'''
             $file = "{file_path}"
@@ -4570,7 +4512,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_column(self, cmd: str, parts):
         """
@@ -4617,7 +4559,7 @@ class CommandEmulator:
             if file_path:
                 return f'type "{file_path}"', False
             else:
-                return 'echo Error: column requires -t flag or file', True
+                return 'echo Error: column requires -t flag or file'
         
         # Table mode: read file, parse columns, align
         if file_path:
@@ -4665,7 +4607,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_watch(self, cmd: str, parts):
         """
@@ -4701,7 +4643,7 @@ class CommandEmulator:
                 i += 1
         
         if not command:
-            return 'echo Error: watch requires command', True
+            return 'echo Error: watch requires command'
         
         # Translate Unix command to Windows if needed
         # For now, assume command is already valid for Windows
@@ -4723,7 +4665,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_paste(self, cmd: str, parts):
         """
@@ -4759,7 +4701,7 @@ class CommandEmulator:
                 i += 1
         
         if not files:
-            return 'echo Error: paste requires files', True
+            return 'echo Error: paste requires files'
         
         if serial:
             # Serial mode: join all lines of each file
@@ -4811,7 +4753,7 @@ class CommandEmulator:
                 }}
             '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_comm(self, cmd: str, parts):
         """
@@ -4851,7 +4793,7 @@ class CommandEmulator:
         files = [p for p in parts[1:] if not p.startswith('-')]
         
         if len(files) < 2:
-            return 'echo Error: comm requires two files', True
+            return 'echo Error: comm requires two files'
         
         file1, file2 = files[0], files[1]
         
@@ -4899,7 +4841,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_join(self, cmd: str, parts):
         """
@@ -4955,7 +4897,7 @@ class CommandEmulator:
                 i += 1
         
         if len(files) < 2:
-            return 'echo Error: join requires two files', True
+            return 'echo Error: join requires two files'
         
         file1_path, file2_path = files[0], files[1]
         
@@ -5039,7 +4981,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_base64(self, cmd: str, parts):
         """
@@ -5070,7 +5012,7 @@ class CommandEmulator:
                     f'$bytes = [Convert]::FromBase64String($content); '
                     f'[System.Text.Encoding]::UTF8.GetString($bytes)'
                 )
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
             else:
                 # Decode from stdin (pipe)
                 ps_cmd = (
@@ -5078,7 +5020,7 @@ class CommandEmulator:
                     f'$bytes = [Convert]::FromBase64String($content); '
                     f'[System.Text.Encoding]::UTF8.GetString($bytes)'
                 )
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
         
         else:
             # ENCODE mode
@@ -5089,7 +5031,7 @@ class CommandEmulator:
                     f'$bytes = [System.IO.File]::ReadAllBytes(\\"{file_path}\\"); '
                     f'[Convert]::ToBase64String($bytes)'
                 )
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
             else:
                 # Encode from stdin (pipe)
                 ps_cmd = (
@@ -5097,7 +5039,7 @@ class CommandEmulator:
                     f'$bytes = [System.Text.Encoding]::UTF8.GetBytes($content); '
                     f'[Convert]::ToBase64String($bytes)'
                 )
-                return f'powershell -Command "{ps_cmd}"', True
+                return f'powershell -Command "{ps_cmd}"'
     
     def _translate_timeout(self, cmd: str, parts):
         """
@@ -5121,7 +5063,7 @@ class CommandEmulator:
           Else: Receive-Job, exit with command exit code
         """
         if len(parts) < 3:
-            return 'echo Error: timeout requires duration and command', True
+            return 'echo Error: timeout requires duration and command'
         
         # Parse --kill-after flag (optional)
         kill_after = None
@@ -5144,7 +5086,7 @@ class CommandEmulator:
                     break
         
         if not duration_str or command_start_idx is None:
-            return 'echo Error: timeout requires duration and command', True
+            return 'echo Error: timeout requires duration and command'
         
         # Parse duration to seconds
         timeout_seconds = self._parse_duration(duration_str)
@@ -5185,7 +5127,7 @@ class CommandEmulator:
             }}
         '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _parse_duration(self, duration_str: str) -> int:
         """
@@ -5379,7 +5321,7 @@ class CommandEmulator:
             '''
         
         # Silent output (like Unix split)
-        return f'powershell -Command "{ps_script}" >$null 2>&1', True
+        return f'powershell -Command "{ps_script}" >$null 2>&1'
     
     def _parse_size(self, size_str: str) -> int:
         """
@@ -5466,7 +5408,7 @@ class CommandEmulator:
                     $inputFile.Close()
                     Remove-Item temp
                 '''
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
         
         file_path = files[0]
         
@@ -5520,7 +5462,7 @@ class CommandEmulator:
                 Remove-Item "{file_path}"
                 '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_gunzip(self, cmd: str, parts):
         """
@@ -5557,7 +5499,7 @@ class CommandEmulator:
                 $gzip.Close()
                 $ms.Close()
             '''
-            return f'powershell -Command "{ps_script}"', True
+            return f'powershell -Command "{ps_script}"'
         
         file_path = files[0]
         
@@ -5568,7 +5510,7 @@ class CommandEmulator:
             output_file = file_path[:-4] + '.tar'
         else:
             # No .gz extension - error
-            return f'echo gzip: {file_path}: unknown suffix -- ignored', True
+            return f'echo gzip: {file_path}: unknown suffix -- ignored'
         
         if stdout_mode:
             # Output to stdout, keep original
@@ -5612,7 +5554,7 @@ class CommandEmulator:
                 Remove-Item "{file_path}"
                 '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _translate_jq(self, cmd: str, parts):
         """
@@ -5723,7 +5665,7 @@ class CommandEmulator:
                 }}
             '''
         
-        return f'powershell -Command "{ps_script}"', True
+        return f'powershell -Command "{ps_script}"'
     
     def _is_simple_jq_pattern(self, pattern: str) -> bool:
         """
