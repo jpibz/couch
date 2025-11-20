@@ -20,10 +20,10 @@ Organization:
 import sys
 import os
 
-# Add parent directory to path to import from root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add src directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from bash_tool_executor import BashToolExecutor
+from bash_tool.bash_tool_executor import BashToolExecutor
 
 executor = BashToolExecutor(working_dir='/home/user/couch')
 
