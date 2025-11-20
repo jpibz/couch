@@ -165,10 +165,7 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
             # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
-            result = self.command_executor.execute(
-                command=command_with_win_paths,
-                timeout=timeout
-            )
+            result = self.command_executor.execute(command=command_with_win_paths)
 
             # STEP 4: Format result (with path reverse translation)
             return self._format_result(result, command)
@@ -178,9 +175,6 @@ class BashToolExecutor(ToolExecutor):
         except Exception as e:
             self.logger.error(f"Execution error: {e}", exc_info=True)
             return f"Error: {str(e)}"
-        finally:
-            # Cleanup temp files
-            self._cleanup_temp_files(temp_files)
     
     def _format_result(self, result, original_cmd: str, translated_cmd: str, method: str) -> str:
         """Format result matching bash_tool API"""
