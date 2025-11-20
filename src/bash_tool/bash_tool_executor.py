@@ -113,12 +113,7 @@ class BashToolExecutor(ToolExecutor):
         # Get claude home directory (needed for preprocessing)
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
-        # Timeouts
-        self.default_timeout = 120  # 2 minutes
-        self.python_timeout = 300   # 5 minutes
-
         # Initialize CommandExecutor (execution strategy layer)
-
         self.command_executor = CommandExecutor(
             working_dir=self.working_dir,
             logger=self.logger,
@@ -143,9 +138,6 @@ class BashToolExecutor(ToolExecutor):
 
         if not command:
             return "Error: command parameter is required"
-
-        # Determine timeout
-        timeout = self.python_timeout if 'python' in command.lower() else self.default_timeout
 
         self.logger.info(f"Executing: {command[:100]}")
 
@@ -176,8 +168,6 @@ class BashToolExecutor(ToolExecutor):
             # STEP 4: Format result (with path reverse translation)
             return self._format_result(result, command)
 
-        except subprocess.TimeoutExpired:
-            return f"Error: Command timed out after {timeout} seconds"
         except Exception as e:
             self.logger.error(f"Execution error: {e}", exc_info=True)
             return f"Error: {str(e)}"
