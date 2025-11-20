@@ -164,6 +164,7 @@ Additional commands can be added by:
 import re
 import logging
 import shlex
+from pathlib import Path
 from typing import Optional, List, Tuple
 
 class CommandEmulator:
