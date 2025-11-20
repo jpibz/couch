@@ -1135,7 +1135,7 @@ class CommandEmulator:
                     self.logger.debug("find with complex -exec -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
-                        return bash_cmd, False
+                        return bash_cmd
                 else:
                     self.logger.error("Complex find -exec requires bash.exe (not available)")
                     return 'echo "ERROR: Complex find -exec requires bash.exe"'
@@ -1149,7 +1149,7 @@ class CommandEmulator:
                     self.logger.debug(f"find with {flag} -> using bash.exe")
                     bash_cmd = self._execute_with_gitbash(cmd)
                     if bash_cmd:
-                        return bash_cmd, False
+                        return bash_cmd
                 else:
                     self.logger.warning(f"find flag {flag} not supported in emulation")
 
@@ -1670,7 +1670,7 @@ class CommandEmulator:
             if follow:
                 # Follow mode with globs - use bash.exe (complex)
                 if self.git_bash_exe:
-                    return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
+                    return bash_cmd
                 else:
                     return 'echo "tail -f with globs requires bash.exe"'
 
@@ -1740,7 +1740,7 @@ class CommandEmulator:
                 if follow:
                     # Follow mode with multiple files - complex, use bash.exe if available
                     if self.git_bash_exe:
-                        return f'"{self.git_bash_exe}" -c "tail {cmd[5:]}"', False
+                        return bash_cmd
                     else:
                         return 'echo "tail -f with multiple files requires bash.exe"'
 
@@ -3660,7 +3660,7 @@ class CommandEmulator:
         """
         if len(parts) < 2:
             # Empty test is false
-            return 'exit 1', False
+            return 'exit 1'
 
         # File/directory tests
         if parts[1] == '-f' and len(parts) >= 3:
@@ -3762,7 +3762,7 @@ class CommandEmulator:
                 return f'powershell -Command "{ps_cmd}"'
             else:
                 # Unknown operator - fail
-                return 'exit 1', False
+                return 'exit 1'
 
             # Numeric comparison
             ps_cmd = f'''
@@ -3781,7 +3781,7 @@ class CommandEmulator:
             return f'powershell -Command "{ps_cmd}"'
 
         # Unknown test format - fail
-        return 'exit 1', False
+        return 'exit 1'
     
     def _translate_tr(self, cmd: str, parts):
         """
@@ -4302,19 +4302,19 @@ class CommandEmulator:
         """
         Translate sha256sum with check mode support
         """
-        return self._checksum_generic('SHA256', 'sha256sum', parts), False
-    
+        return self._checksum_generic('SHA256', 'sha256sum', parts)
+
     def _translate_sha1sum(self, cmd: str, parts):
         """
         Translate sha1sum with check mode support
         """
-        return self._checksum_generic('SHA1', 'sha1sum', parts), False
-    
+        return self._checksum_generic('SHA1', 'sha1sum', parts)
+
     def _translate_md5sum(self, cmd: str, parts):
         """
         Translate md5sum with check mode support
         """
-        return self._checksum_generic('MD5', 'md5sum', parts), False
+        return self._checksum_generic('MD5', 'md5sum', parts)
     
     def _translate_hexdump(self, cmd: str, parts):
         """
@@ -4558,7 +4558,7 @@ class CommandEmulator:
         if not table_mode:
             # Non-table mode not commonly used, fallback to cat
             if file_path:
-                return f'type "{file_path}"', False
+                return bash_cmd
             else:
                 return 'echo Error: column requires -t flag or file'
         
