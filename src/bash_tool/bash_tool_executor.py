@@ -114,13 +114,12 @@ class BashToolExecutor(ToolExecutor):
         self.claude_home_unix = self.path_translator.get_claude_home_unix()
 
         # Initialize CommandExecutor (execution strategy layer)
-
         self.command_executor = CommandExecutor(
-            claude_home_unix=self.claude_home_unix,
+            working_dir=self.working_dir,
             logger=self.logger,
             test_mode=self.TESTMODE
         )
-        
+
         self.logger.info(
             "BashToolExecutor initialized"
         )
@@ -139,9 +138,6 @@ class BashToolExecutor(ToolExecutor):
 
         if not command:
             return "Error: command parameter is required"
-
-        # Determine timeout
-        timeout = self.python_timeout if 'python' in command.lower() else self.default_timeout
 
         self.logger.info(f"Executing: {command[:100]}")
 
@@ -165,18 +161,18 @@ class BashToolExecutor(ToolExecutor):
                 self.logger.debug("TEST MODE: Skipping sandbox validation")
 
             # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
-            result = self.command_executor.execute(command=command_with_win_paths)
+            result = self.command_executor.execute(
+                command=command_with_win_paths
+            )
 
             # STEP 4: Format result (with path reverse translation)
             return self._format_result(result, command)
 
-        except subprocess.TimeoutExpired:
-            return f"Error: Command timed out after {timeout} seconds"
         except Exception as e:
             self.logger.error(f"Execution error: {e}", exc_info=True)
             return f"Error: {str(e)}"
     
-    def _format_result(self, result, original_cmd: str, translated_cmd: str, method: str) -> str:
+    def _format_result(self, result, original_cmd: str) -> str:
         """Format result matching bash_tool API"""
         lines = []
         
