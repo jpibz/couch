@@ -83,9 +83,9 @@ import logging
 import shlex
 from typing import Optional
 
-from constants import BASH_GIT_UNSUPPORTED_COMMANDS, GITBASH_PASSTHROUGH_COMMANDS
-from execution_engine import ExecutionEngine
-from command_emulator import CommandEmulator
+from .constants import BASH_GIT_UNSUPPORTED_COMMANDS, GITBASH_PASSTHROUGH_COMMANDS
+from .execution_engine import ExecutionEngine
+from .command_emulator import CommandEmulator
 
 
 class ExecuteUnixSingleCommand:

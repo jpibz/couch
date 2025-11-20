@@ -37,16 +37,16 @@ import threading
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from bash_pipeline_parser import (
+from .bash_pipeline_parser import (
     parse_bash_command,
     SimpleCommand, Pipeline, AndList, OrList, Sequence,
     Subshell, CommandGroup, Background, ProcessSubstitution
 )
-from execution_engine import ExecutionEngine
-from pipeline_analyzer import PipelineAnalyzer
-from execute_unix_single_command import ExecuteUnixSingleCommand
-from bash_pipeline_preprocessor import BashPipelinePreprocessor
-from bash_command_preprocessor import BashCommandPreprocessor
+from .execution_engine import ExecutionEngine
+from .pipeline_analyzer import PipelineAnalyzer
+from .execute_unix_single_command import ExecuteUnixSingleCommand
+from .bash_pipeline_preprocessor import BashPipelinePreprocessor
+from .bash_command_preprocessor import BashCommandPreprocessor
 
 
 class ExecutionStrategy:

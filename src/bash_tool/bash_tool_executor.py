@@ -61,10 +61,10 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict
 import subprocess
-from tool_executor import ToolExecutor
-from sandbox_validator import SandboxValidator
-from command_executor import CommandExecutor
-from path_translator import PathTranslator
+from .tool_executor import ToolExecutor
+from .sandbox_validator import SandboxValidator
+from .command_executor import CommandExecutor
+from .path_translator import PathTranslator
 
 class BashToolExecutor(ToolExecutor):
     """

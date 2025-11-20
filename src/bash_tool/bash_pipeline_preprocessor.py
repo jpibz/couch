@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Tuple, List, Any
 
 # Will need to import AST node types from parser
-from bash_pipeline_parser import (
+from .bash_pipeline_parser import (
     SimpleCommand, Pipeline, AndList, OrList, Sequence,
     Subshell, CommandGroup, Background, ProcessSubstitution,
     Redirect
