@@ -21,25 +21,28 @@ import os
 import re
 import logging
 from typing import Optional
+from .bash_variable_context import BashVariableContext
 
 
 class BashCommandPreprocessor:
     """
     Command level preprocessor - handles variable/brace expansion and emulation adaptation
-    
+
     Two preprocessing categories:
     1. SAFE expansion (always) - expands shortcuts to explicit form
     2. DANGEROUS translation (only for emulation) - translates syntax
     """
-    
-    def __init__(self, logger=None):
+
+    def __init__(self, logger=None, context: Optional[BashVariableContext] = None):
         """
         Initialize preprocessor
-        
+
         Args:
             logger: Logger instance
+            context: Bash variable context for local variables
         """
         self.logger = logger or logging.getLogger('BashCommandPreprocessor')
+        self.context = context or BashVariableContext()
     
     # ========================================================================
     # CATEGORIA 1: SAFE EXPANSION (SEMPRE!)
@@ -206,12 +209,16 @@ class BashCommandPreprocessor:
         return command
     
     def _expand_variable_length(self, command: str) -> str:
-        """${#VAR} → length"""
+        """${#VAR} → length - Check bash context first"""
         pattern = r'\$\{#(\w+)\}'
 
         def replace(match):
             var_name = match.group(1)
-            value = os.environ.get(var_name, None)
+
+            # Check bash context first
+            value = self.context.get(var_name)
+            if value is None:
+                value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
             if value is None:
@@ -229,7 +236,11 @@ class BashCommandPreprocessor:
             var_name = match.group(1)
             op = match.group(2)
             glob_pattern = match.group(3)
-            value = os.environ.get(var_name, None)
+
+            # Check bash context first
+            value = self.context.get(var_name)
+            if value is None:
+                value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
             if value is None:
@@ -265,7 +276,11 @@ class BashCommandPreprocessor:
             var_name = match.group(1)
             op = match.group(2)
             glob_pattern = match.group(3)
-            value = os.environ.get(var_name, None)
+
+            # Check bash context first
+            value = self.context.get(var_name)
+            if value is None:
+                value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
             if value is None:
@@ -301,7 +316,11 @@ class BashCommandPreprocessor:
             op = match.group(2)
             glob_pattern = match.group(3)
             replacement = match.group(4)
-            value = os.environ.get(var_name, None)
+
+            # Check bash context first
+            value = self.context.get(var_name)
+            if value is None:
+                value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
             if value is None:
@@ -321,13 +340,17 @@ class BashCommandPreprocessor:
         return re.sub(pattern, replace, command)
     
     def _expand_case(self, command: str) -> str:
-        """${VAR^^}, ${VAR,,}, ${VAR^}, ${VAR,}"""
+        """${VAR^^}, ${VAR,,}, ${VAR^}, ${VAR,} - Check bash context first"""
         pattern = r'\$\{(\w+)(\^{1,2}|,{1,2})\}'
 
         def replace(match):
             var_name = match.group(1)
             op = match.group(2)
-            value = os.environ.get(var_name, None)
+
+            # Check bash context first
+            value = self.context.get(var_name)
+            if value is None:
+                value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
             if value is None:
@@ -347,28 +370,39 @@ class BashCommandPreprocessor:
         return re.sub(pattern, replace, command)
     
     def _expand_default(self, command: str) -> str:
-        """${VAR:-default}"""
+        """${VAR:-default} - Check bash context first"""
         pattern = r'\$\{(\w+):-([^}]+)\}'
 
         def replace(match):
             var_name = match.group(1)
             default = match.group(2)
-            value = os.environ.get(var_name, None)
 
-            # If variable doesn't exist, leave it for bash to handle
+            # Check bash context first
+            value = self.context.get(var_name)
             if value is None:
-                return match.group(0)
+                value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, use default
+            if value is None:
+                return default
 
             return value if value else default
 
         return re.sub(pattern, replace, command)
     
     def _expand_simple_brace(self, command: str) -> str:
-        """${VAR}"""
+        """${VAR} - Check bash context first, then environment"""
         pattern = r'\$\{(\w+)\}'
 
         def replace(match):
             var_name = match.group(1)
+
+            # First check bash context (local variables)
+            value = self.context.get(var_name)
+            if value is not None:
+                return value
+
+            # Then check environment variables
             value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
@@ -378,13 +412,20 @@ class BashCommandPreprocessor:
             return value
 
         return re.sub(pattern, replace, command)
-    
+
     def _expand_simple_var(self, command: str) -> str:
-        """$VAR"""
+        """$VAR - Check bash context first, then environment"""
         pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
 
         def replace(match):
             var_name = match.group(1)
+
+            # First check bash context (local variables)
+            value = self.context.get(var_name)
+            if value is not None:
+                return value
+
+            # Then check environment variables
             value = os.environ.get(var_name, None)
 
             # If variable doesn't exist, leave it for bash to handle
