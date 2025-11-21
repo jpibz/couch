@@ -618,7 +618,7 @@ class ExecutionEngine:
 
         self.logger.debug(f"Executing Git Bash: {git_command}")
         return subprocess.run(
-            [self.bash_path, '-c', command],
+            [self.bash_path, '-c', git_command],  # CRITICAL: Use git_command NOT command!
             capture_output=True,
             text=True,
             cwd=str(self.working_dir),
