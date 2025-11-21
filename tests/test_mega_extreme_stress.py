@@ -14,8 +14,8 @@ print("MEGA EXTREME STRESS TEST - Real Claude Usage Patterns")
 print("=" * 120)
 print()
 
-# Windows paths
-workspace = Path(r'C:\Users\Test\workspace')
+# Use REAL workspace that EXISTS on this system!
+workspace = Path('/home/user/couch')  # Linux system path
 # NO test_mode - TESTMODE is hardcoded in BashToolExecutor!
 executor = BashToolExecutor(working_dir=workspace)
 

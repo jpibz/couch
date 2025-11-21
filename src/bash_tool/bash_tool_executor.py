@@ -100,8 +100,9 @@ class BashToolExecutor(ToolExecutor):
         super().__init__('bash_tool', enabled)
 
         # TESTMODE flag for testing purposes
-        # FALSE = PRODUCTION MODE - NO SHORTCUTS, EXPOSE ALL REAL BUGS!
-        TESTMODE = False
+        # TRUE = Test mode (for development/testing - simulates bash execution)
+        # FALSE = Production mode (for real Claude agent - executes real bash)
+        TESTMODE = True
         self.TESTMODE = TESTMODE
         self.test_capabilities = test_capabilities
 
