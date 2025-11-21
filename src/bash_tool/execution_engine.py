@@ -355,6 +355,81 @@ class ExecutionEngine:
         pattern = r'[A-Za-z]:[/\\][^\s;|&<>()]*'
         return re.sub(pattern, convert_path, cmd)
 
+    def _build_bash_environment(self) -> dict:
+        """
+        Build clean environment for Git Bash with Unix-style paths.
+
+        CRITICAL: Git Bash needs Unix-style PATH (/c/path NOT C:\\path)!
+
+        Process:
+        1. Take available bins (self.available_bins: {'python': 'C:\\Python\\python.exe'})
+        2. Convert Windows paths → Git Bash format (/c/Python)
+        3. Extract unique directories (not .exe files)
+        4. Build PATH with : separator (Unix-style)
+        5. Add essential environment variables
+
+        Returns:
+            Environment dict with Unix-style PATH for Git Bash
+        """
+        import os
+
+        # Start with minimal clean environment
+        env = {}
+
+        # Essential variables from current environment
+        essential_vars = ['HOME', 'USER', 'USERNAME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT']
+        for var in essential_vars:
+            if var in os.environ:
+                env[var] = os.environ[var]
+
+        # Build PATH from available bins (convert Windows → Git Bash format)
+        unix_paths = []
+
+        for bin_name, bin_path_str in self.available_bins.items():
+            # bin_path_str is like: C:\Python311\python.exe
+            # We need directory: C:\Python311
+            bin_path = Path(bin_path_str)
+            bin_dir = bin_path.parent
+
+            # Convert Windows path → Git Bash format
+            # C:\Python311 → /c/Python311
+            bin_dir_str = str(bin_dir)
+
+            if ':' in bin_dir_str:
+                # C:\path\to\dir → /c/path/to/dir
+                drive = bin_dir_str[0].lower()
+                rest = bin_dir_str[3:].replace('\\', '/')
+                unix_path = f'/{drive}/{rest}'
+            else:
+                # Just convert backslashes
+                unix_path = bin_dir_str.replace('\\', '/')
+
+            # Add to paths (avoid duplicates)
+            if unix_path not in unix_paths:
+                unix_paths.append(unix_path)
+                self.logger.debug(f"Added to PATH: {unix_path} (from {bin_name})")
+
+        # Add Git Bash's own bin directories (if bash_path is known)
+        if self.bash_path:
+            bash_bin_dir = Path(self.bash_path).parent
+            bash_dir_str = str(bash_bin_dir)
+
+            if ':' in bash_dir_str:
+                drive = bash_dir_str[0].lower()
+                rest = bash_dir_str[3:].replace('\\', '/')
+                bash_unix_path = f'/{drive}/{rest}'
+
+                if bash_unix_path not in unix_paths:
+                    unix_paths.append(bash_unix_path)
+                    self.logger.debug(f"Added Git Bash bin to PATH: {bash_unix_path}")
+
+        # Join with : (Unix-style PATH separator)
+        env['PATH'] = ':'.join(unix_paths)
+
+        self.logger.debug(f"Built Unix PATH for Git Bash: {env['PATH']}")
+
+        return env
+
     def _simulate_command_output(self, command: str, stdin: str = None) -> str:
         """
         Simulate realistic command output for test mode
@@ -612,9 +687,9 @@ class ExecutionEngine:
         # Convert Windows paths to Git Bash format (C:\path -> /c/path)
         git_command = self._windows_to_gitbash_paths(command)
 
-        # CRITICAL: Pass environment explicitly so bash.exe inherits full Windows PATH
-        # This allows bash to call native Windows .exe binaries (python.exe, git.exe, etc)
-        env = os.environ.copy()
+        # CRITICAL: Build clean environment for Git Bash with Unix-style PATH
+        # Git Bash needs /c/path NOT C:\path in PATH variable!
+        env = self._build_bash_environment()
 
         self.logger.debug(f"Executing Git Bash: {git_command}")
         return subprocess.run(
