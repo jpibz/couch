@@ -3223,18 +3223,29 @@ class CommandEmulator:
         
         if not expressions:
             return 'echo Error: sed requires expression'
-        
+
         # Build PowerShell sed emulation
-        if not files:
-            return 'echo Error: sed requires file argument (stdin not yet supported)'
-        
-        file_arg = f'\\"{files[0]}\\"'
-        
+        # Support both file and stdin input
+        using_stdin = not files
+        if files:
+            file_arg = f'\\"{files[0]}\\"'
+        else:
+            file_arg = None  # Using stdin
+
         # Build PowerShell sed emulation with line number tracking
         ps_script_parts = []
         ps_script_parts.append('$LineNum = 0')
         ps_script_parts.append('$output = @()')
-        ps_script_parts.append(f'Get-Content {file_arg} | ForEach-Object {{')
+
+        if using_stdin:
+            # For stdin, buffer all input first (needed for 'last_line' address)
+            ps_script_parts.append('$lines = @($input)')
+            ps_script_parts.append('$totalLines = $lines.Count')
+            ps_script_parts.append('$lines | ForEach-Object {')
+        else:
+            # For file, stream directly
+            ps_script_parts.append(f'Get-Content {file_arg} | ForEach-Object {{')
+
         ps_script_parts.append('  $LineNum++')
         ps_script_parts.append('  $line = $_')
         ps_script_parts.append('  $print = ' + ('$false' if quiet else '$true'))
@@ -3285,7 +3296,10 @@ class CommandEmulator:
                     pattern_escaped = address[1].replace('\\', '\\\\').replace('"', '\\"')
                     condition = f'($line -match "{pattern_escaped}")'
                 elif address[0] == 'last_line':
-                    condition = '($LineNum -eq (Get-Content ' + file_arg + ' | Measure-Object -Line).Lines)'
+                    if using_stdin:
+                        condition = '($LineNum -eq $totalLines)'
+                    else:
+                        condition = '($LineNum -eq (Get-Content ' + file_arg + ' | Measure-Object -Line).Lines)'
             
             # Parse command type
             if command.startswith('s/') or command.startswith('s|') or command.startswith('s#'):
