@@ -84,7 +84,7 @@ class BashToolExecutor(ToolExecutor):
     - CommandExecutor: Command execution strategy
     """
 
-    def __init__(self, working_dir: str, enabled: bool = False,
+    def __init__(self, working_dir: Path, enabled: bool = False,
                  test_capabilities: dict = None,
                  **kwargs):
         """
@@ -104,11 +104,11 @@ class BashToolExecutor(ToolExecutor):
         self.TESTMODE = TESTMODE
         self.test_capabilities = test_capabilities
 
-        self.working_dir = Path(working_dir)
+        self.working_dir = working_dir
 
         # Initialize components
         self.path_translator = PathTranslator()
-        self.sandbox_validator = SandboxValidator(self.path_translator.workspace_root)
+        self.sandbox_validator = SandboxValidator(self.working_dir)
 
         # Create tool-specific scratch directory
         self.scratch_dir = self.path_translator.get_tool_scratch_directory('bash_tool')
