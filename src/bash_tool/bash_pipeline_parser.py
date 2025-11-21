@@ -149,6 +149,8 @@ class TokenType(Enum):
     # Redirects
     REDIRECT_OUT = auto()       # > or >>
     REDIRECT_IN = auto()        # <
+    HEREDOC = auto()            # <<
+    HERE_STRING = auto()        # <<<
     REDIRECT_ERR = auto()       # 2> or 2>>
     REDIRECT_ERR_OUT = auto()   # 2>&1 or &>
     
@@ -493,10 +495,21 @@ class BashLexer:
         if char == '>':
             self.pos += 1
             return Token(TokenType.REDIRECT_OUT, '>', pos)
-        
+
         if char == '<':
-            self.pos += 1
-            return Token(TokenType.REDIRECT_IN, '<', pos)
+            # Look ahead for <<< (here-string) or << (heredoc)
+            if self._peek(1) == '<' and self._peek(2) == '<':
+                # <<<
+                self.pos += 3
+                return Token(TokenType.HERE_STRING, '<<<', pos)
+            elif self._peek(1) == '<':
+                # <<
+                self.pos += 2
+                return Token(TokenType.HEREDOC, '<<', pos)
+            else:
+                # <
+                self.pos += 1
+                return Token(TokenType.REDIRECT_IN, '<', pos)
         
         if char == '(':
             self.pos += 1
@@ -847,6 +860,8 @@ class BashParser:
         return self._current().type in (
             TokenType.REDIRECT_OUT,
             TokenType.REDIRECT_IN,
+            TokenType.HEREDOC,
+            TokenType.HERE_STRING,
             TokenType.REDIRECT_ERR,
             TokenType.REDIRECT_ERR_OUT
         )
@@ -865,17 +880,22 @@ class BashParser:
             < <(generator)
         """
         redir_token = self._consume()
-        
+
         # 2>&1 doesn't need file target (redirects fd 2 to fd 1)
         if redir_token.value == '2>&1':
             return Redirect(redir_token.value, '&1')
-        
+
+        # Heredoc and Here-string: target is always a WORD
+        if redir_token.type in (TokenType.HEREDOC, TokenType.HERE_STRING):
+            target = self._consume(TokenType.WORD).value
+            return Redirect(redir_token.value, target)
+
         # Target can be WORD or process substitution
         if self._current().type in (TokenType.PROC_SUB_IN, TokenType.PROC_SUB_OUT):
             target = self._parse_process_substitution()
         else:
             target = self._consume(TokenType.WORD).value
-        
+
         return Redirect(redir_token.value, target)
 
 
