@@ -32,6 +32,17 @@ from .bash_pipeline_parser import (
 )
 
 
+class TempFilesList(list):
+    """
+    List subclass that supports post_commands attribute.
+
+    Used for process substitution >(cmd) which needs deferred execution.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.post_commands = []
+
+
 class BashPipelinePreprocessor:
     """
     Pipeline level preprocessor - handles command/process substitution and heredocs
@@ -115,18 +126,24 @@ class BashPipelinePreprocessor:
         # Process from END to START (stable indices)
         for start, end, content in reversed(substitutions):
             try:
+                # Check if this is arithmetic expansion $((...))
+                # If content starts with '(', it's $((arithmetic)) - leave for bash
+                if content.strip().startswith('('):
+                    self.logger.debug(f"Skipping arithmetic expansion: $((...))")
+                    continue
+
                 # EXECUTE command recursively (with our strategy!)
                 self.logger.debug(f"Executing command substitution: {content[:50]}...")
                 result = self.executor.execute(content, nesting_level + 1)
-                
+
                 # Get output
                 output = result.stdout.strip()
-                
+
                 # SUBSTITUTE in command
                 command = command[:start] + output + command[end:]
-                
+
                 self.logger.debug(f"Command substitution result: {output[:50]}...")
-            
+
             except Exception as e:
                 self.logger.error(f"Command substitution failed: {e}")
                 # Keep original on error
@@ -146,23 +163,44 @@ class BashPipelinePreprocessor:
         
         while i < len(text):
             if i < len(text) - 1 and text[i:i+2] == '$(':
-                # Check if arithmetic $((
-                if i < len(text) - 2 and text[i+2] == '(':
-                    # This is $((arithmetic)), skip
-                    i += 3
-                    continue
-                
-                # Found command substitution
+                # Found command substitution (including $((arithmetic)))
+                # NOTE: $((arithmetic)) is handled by NOT executing it - bash will handle
+                # But we still need to parse nested $(cmd) inside arithmetic!
                 start = i
                 i += 2
                 depth = 1
-                
-                # Find matching closing paren
+                in_string = False
+                escape_next = False
+
+                # Find matching closing paren (handle strings and escapes)
                 while i < len(text) and depth > 0:
-                    if text[i] == '(':
-                        depth += 1
-                    elif text[i] == ')':
-                        depth -= 1
+                    char = text[i]
+
+                    # Handle escapes
+                    if escape_next:
+                        escape_next = False
+                        i += 1
+                        continue
+
+                    if char == '\\':
+                        escape_next = True
+                        i += 1
+                        continue
+
+                    # Handle strings (skip paren counting inside strings)
+                    if char in ('"', "'"):
+                        if not in_string:
+                            in_string = char
+                        elif in_string == char:
+                            in_string = False
+
+                    # Count parens only outside strings
+                    if not in_string:
+                        if char == '(':
+                            depth += 1
+                        elif char == ')':
+                            depth -= 1
+
                     i += 1
                 
                 if depth == 0:
@@ -271,12 +309,12 @@ class BashPipelinePreprocessor:
     def _process_substitution(self, command: str, nesting_level: int) -> Tuple[str, List[Path]]:
         """
         Process substitution: <(cmd), >(cmd)
-        
+
         Creates temp files, executes commands, replaces with temp paths.
-        
+
         WINDOWS PATHS!
         """
-        temp_files = []
+        temp_files = TempFilesList()
         
         # Patterns
         input_pattern = r'<\(([^)]+)\)'
