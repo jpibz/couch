@@ -205,24 +205,33 @@ class BashCommandPreprocessor:
     def _expand_variable_length(self, command: str) -> str:
         """${#VAR} → length"""
         pattern = r'\$\{#(\w+)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
-            value = os.environ.get(var_name, '')
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             return str(len(value))
-        
+
         return re.sub(pattern, replace, command)
     
     def _expand_remove_prefix(self, command: str) -> str:
         """${VAR#pattern} and ${VAR##pattern}"""
         pattern = r'\$\{(\w+)(#{1,2})([^}]+)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
             op = match.group(2)
             glob_pattern = match.group(3)
-            value = os.environ.get(var_name, '')
-            
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             if not value:
                 return ''
             
@@ -248,13 +257,17 @@ class BashCommandPreprocessor:
     def _expand_remove_suffix(self, command: str) -> str:
         """${VAR%pattern} and ${VAR%%pattern}"""
         pattern = r'\$\{(\w+)(%{1,2})([^}]+)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
             op = match.group(2)
             glob_pattern = match.group(3)
-            value = os.environ.get(var_name, '')
-            
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             if not value:
                 return ''
             
@@ -279,14 +292,18 @@ class BashCommandPreprocessor:
     def _expand_substitution(self, command: str) -> str:
         """${VAR/old/new} and ${VAR//old/new}"""
         pattern = r'\$\{(\w+)(/{1,2})([^/}]+)/([^}]*)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
             op = match.group(2)
             glob_pattern = match.group(3)
             replacement = match.group(4)
-            value = os.environ.get(var_name, '')
-            
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             if not value:
                 return ''
             
@@ -303,12 +320,16 @@ class BashCommandPreprocessor:
     def _expand_case(self, command: str) -> str:
         """${VAR^^}, ${VAR,,}, ${VAR^}, ${VAR,}"""
         pattern = r'\$\{(\w+)(\^{1,2}|,{1,2})\}'
-        
+
         def replace(match):
             var_name = match.group(1)
             op = match.group(2)
-            value = os.environ.get(var_name, '')
-            
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             if op == '^^':
                 return value.upper()
             elif op == ',,':
@@ -325,33 +346,50 @@ class BashCommandPreprocessor:
     def _expand_default(self, command: str) -> str:
         """${VAR:-default}"""
         pattern = r'\$\{(\w+):-([^}]+)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
             default = match.group(2)
-            value = os.environ.get(var_name)
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
             return value if value else default
-        
+
         return re.sub(pattern, replace, command)
     
     def _expand_simple_brace(self, command: str) -> str:
         """${VAR}"""
         pattern = r'\$\{(\w+)\}'
-        
+
         def replace(match):
             var_name = match.group(1)
-            return os.environ.get(var_name, '')
-        
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
+            return value
+
         return re.sub(pattern, replace, command)
     
     def _expand_simple_var(self, command: str) -> str:
         """$VAR"""
         pattern = r'\$([A-Za-z_][A-Za-z0-9_]*)'
-        
+
         def replace(match):
             var_name = match.group(1)
-            return os.environ.get(var_name, '')
-        
+            value = os.environ.get(var_name, None)
+
+            # If variable doesn't exist, leave it for bash to handle
+            if value is None:
+                return match.group(0)
+
+            return value
+
         return re.sub(pattern, replace, command)
     
     def _expand_braces(self, command: str) -> str:
@@ -505,21 +543,35 @@ class BashCommandPreprocessor:
             prefix_start = start - 1
             while prefix_start >= 0 and command[prefix_start] not in ',{ \t\n;|&':
                 prefix_start -= 1
-            
-            # Check what delimiter we hit
-            if prefix_start < 0 or command[prefix_start] in ' \t\n;|&{':
-                # Hit beginning, space, or opening brace → no prefix → TOP-LEVEL brace
+
+            # Determine if this is a nested brace or top-level
+            # NESTED if: there's a prefix (even if preceded by { or ,)
+            # TOP-LEVEL if: no prefix (directly after space/beginning/{ with no chars between)
+
+            if prefix_start < 0:
+                # At beginning of string
+                prefix = command[0:start]
+            elif command[prefix_start] in ',{':
+                # After comma or opening brace
+                prefix = command[prefix_start+1:start]
+            else:
+                # After space/delimiter - top-level
+                prefix = ''
+
+            if not prefix:
+                # No prefix → TOP-LEVEL brace
                 # Leave it for Pass 2!
                 break
             else:
-                # Hit comma → there's a prefix → NESTED brace → expand it!
-                prefix_start += 1
-                prefix = command[prefix_start:start]
-                
+                # Has prefix → NESTED brace → expand it!
+                # Calculate actual prefix_start (after the delimiter)
+                if prefix_start >= 0 and command[prefix_start] in ',{':
+                    prefix_start += 1
+
                 # Expand with prefix: b{1,2} → b1,b2
                 expanded_items = [prefix + item for item in items]
                 replacement = ','.join(expanded_items)
-                
+
                 # Replace from prefix_start (include prefix in replacement)
                 command = command[:prefix_start] + replacement + command[end:]
         

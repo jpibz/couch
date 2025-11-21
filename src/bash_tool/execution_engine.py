@@ -358,16 +358,22 @@ class ExecutionEngine:
     def _simulate_command_output(self, command: str, stdin: str = None) -> str:
         """
         Simulate realistic command output for test mode
-        
+
         Args:
             command: Command string
             stdin: Optional stdin data
-            
+
         Returns:
             Simulated output
         """
-        # Parse command
-        parts = command.split()
+        # Parse command respecting quotes
+        import shlex
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            # Fallback to simple split if shlex fails
+            parts = command.split()
+
         if not parts:
             return ""
         
@@ -376,7 +382,7 @@ class ExecutionEngine:
         
         # Simulate common commands
         if cmd == 'echo':
-            # Echo just returns the arguments
+            # Echo returns the arguments (shlex already removed quotes)
             return ' '.join(args) + '\n'
         
         elif cmd == 'cat':
