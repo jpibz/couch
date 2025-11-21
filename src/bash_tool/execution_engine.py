@@ -156,8 +156,7 @@ class PersistentBashSession:
         
         # ===== DIAGNOSTIC HEADER =====
         # Add diagnostic info BEFORE the actual command
-        init_command = f"""
-    export PATH='$PATH:{env['PATH']}';\n
+        init_command = """
     echo "====== BASH DIAGNOSTIC INFO ======" >&2
     echo "PATH: $PATH" >&2
     echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
@@ -169,7 +168,7 @@ class PersistentBashSession:
         
         """Initialize persistent bash session"""
         self.process = subprocess.Popen(
-            [bash_path, '--norc', '--noprofile'],
+            [bash_path, '--noprofile'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr → stdout
@@ -231,7 +230,7 @@ class PersistentBashSession:
                     except (IndexError, ValueError):
                         exitcode = -1
                 break
-            
+
             output_lines.append(line)
         
         return ''.join(output_lines), exitcode
@@ -489,75 +488,38 @@ class ExecutionEngine:
 
     def _build_bash_environment(self) -> dict:
         """
-        Build clean environment for Git Bash with Unix-style paths.
-
-        CRITICAL: Git Bash needs Unix-style PATH (/c/path NOT C:\\path)!
-
+        Build environment for Git Bash 
+        
         Process:
-        1. Take available bins (self.available_bins: {'python': 'C:\\Python\\python.exe'})
-        2. Convert Windows paths → Git Bash format (/c/Python)
-        3. Extract unique directories (not .exe files)
-        4. Build PATH with : separator (Unix-style)
-        5. Add essential environment variables
+            Take available bins (self.available_bins: {'python': 'C:\\Python\\python.exe'})
+  
 
         Returns:
-            Environment dict with Unix-style PATH for Git Bash
+            Environment dict with PATH for Git Bash
         """
         import os
 
-        # Start with minimal clean environment
-        env = {}
-
-        # Essential variables from current environment
-        essential_vars = ['HOME', 'USER', 'USERNAME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT']
-        for var in essential_vars:
-            if var in os.environ:
-                env[var] = os.environ[var]
-
+        # Inhert environment
+        env = os.environ.copy()
+ 
         # Build PATH from available bins (convert Windows → Git Bash format)
-        unix_paths = []
+        paths = []
 
         for bin_name, bin_path_str in self.available_bins.items():
             # bin_path_str is like: C:\Python311\python.exe
             # We need directory: C:\Python311
             bin_path = Path(bin_path_str)
-            bin_dir = bin_path.parent
-
-            # Convert Windows path → Git Bash format
-            # C:\Python311 → /c/Python311
-            bin_dir_str = str(bin_dir)
-
-            if ':' in bin_dir_str:
-                # C:\path\to\dir → /c/path/to/dir
-                drive = bin_dir_str[0].lower()
-                rest = bin_dir_str[3:].replace('\\', '/')
-                unix_path = f'/{drive}/{rest}'
-            else:
-                # Just convert backslashes
-                unix_path = bin_dir_str.replace('\\', '/')
+            bin_dir = str(bin_path.parent)
 
             # Add to paths (avoid duplicates)
-            if unix_path not in unix_paths:
-                unix_paths.append(unix_path)
-                self.logger.debug(f"Added to PATH: {unix_path} (from {bin_name})")
+            if bin_dir not in paths:
+                paths.append(bin_dir)
+                self.logger.debug(f"Added to PATH: {bin_dir} (from {bin_name})")
 
-        # Add Git Bash's own bin directories (if bash_path is known)
-        if self.bash_path:
-            bash_bin_dir = Path(self.bash_path).parent
-            bash_dir_str = str(bash_bin_dir)
-
-            if ':' in bash_dir_str:
-                drive = bash_dir_str[0].lower()
-                rest = bash_dir_str[3:].replace('\\', '/')
-                bash_unix_path = f'/{drive}/{rest}'
-
-                if bash_unix_path not in unix_paths:
-                    unix_paths.append(bash_unix_path)
-                    self.logger.debug(f"Added Git Bash bin to PATH: {bash_unix_path}")
-
-        # Join with : (Unix-style PATH separator)
-        env['PATH'] = ':'.join(unix_paths)
-
+        # Join with ; 
+        env['PATH'] = ';'.join(paths)
+        env['MSYS2_PATH_TYPE'] = 'inherit'
+        
         self.logger.debug(f"Built Unix PATH for Git Bash: {env['PATH']}")
 
         return env
@@ -778,27 +740,17 @@ class ExecutionEngine:
                 stdout=stdout,
                 stderr=""
             )
-
+        
         # Convert Windows paths to Git Bash format (C:\path -> /c/path)
         git_command = self._windows_to_gitbash_paths(command)
 
-        # CRITICAL: Build clean environment for Git Bash with Unix-style PATH
-        # Git Bash needs /c/path NOT C:\path in PATH variable!
         env = self._build_bash_environment()
-
-        # ===== FIXED HEADER: PREPEND our paths to existing PATH =====
-        # Bash loads .bashrc which sets PATH, we APPEND our bins to it!
-        path_prepend = f"export PATH='$PATH:{env['PATH']}';\n"
-
-        # Prepend diagnostic to actual command
-        full_command = path_prepend + git_command
-        # =============================
         
         # ===== USE PERSISTENT SESSION =====
         if self.bash_session:
             try:
-                self.logger.debug(f"Executing via persistent session: {full_command}")
-                output, exitcode = self.bash_session.execute(full_command)
+                self.logger.debug(f"Executing via persistent session: {git_command}")
+                output, exitcode = self.bash_session.execute(git_command)
                 
                 return subprocess.CompletedProcess(
                     args=[self.bash_path, '-c', git_command],
@@ -818,7 +770,7 @@ class ExecutionEngine:
                     )
                     self.logger.info("Recreated persistent bash session")
                     # Retry command
-                    output, exitcode = self.bash_session.execute(full_command)
+                    output, exitcode = self.bash_session.execute(git_command)
                     return subprocess.CompletedProcess(
                         args=[self.bash_path, '-c', git_command],
                         returncode=exitcode,
@@ -831,24 +783,10 @@ class ExecutionEngine:
         # ==================================
 
         # Fallback: old method (shouldn't happen)
-    
-        '''
-        # ===== DIAGNOSTIC HEADER =====
-        # Add diagnostic info BEFORE the actual command
-        diagnostic_header = """
-    echo "====== BASH DIAGNOSTIC INFO ======" >&2
-    echo "PATH: $PATH" >&2
-    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Working dir: $(pwd)" >&2
-    echo "Environment vars: HOME=$HOME USER=$USER" >&2
-    echo "===================================" >&2
-    """
-        '''
-    
-        self.logger.debug(f"Executing Git Bash: {git_command}")
+        
+        self.logger.debug(f"Executing NEW Git Bash: {git_command}")
         return subprocess.run(
-            [self.bash_path, '-c', full_command],
+            [self.bash_path, '-c', git_command],
             capture_output=True,
             text=True,
             cwd=str(self.working_dir),
