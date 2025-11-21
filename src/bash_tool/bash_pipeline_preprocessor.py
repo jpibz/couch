@@ -358,10 +358,11 @@ class BashPipelinePreprocessor:
             temp_files.append(temp_file)
             
             # Store command for post-processing
-            # TODO: Implement post-processing queue
+            # Post-commands are executed AFTER main command completes
+            # (implemented in command_executor.py STEP 6)
             if not hasattr(temp_files, 'post_commands'):
                 temp_files.post_commands = []
-            
+
             temp_files.post_commands.append((temp_file, cmd))
             
             # Return Windows path

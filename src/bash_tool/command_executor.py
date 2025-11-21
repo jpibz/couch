@@ -183,16 +183,41 @@ class CommandExecutor:
             if strategy == ExecutionStrategy.BASH_FULL:
                 # Execute entire command via bash.exe
                 # NO more preprocessing! Already done!
-                return self._execute_via_bash(command)
-            
+                result = self._execute_via_bash(command)
+
             elif strategy == ExecutionStrategy.MANUAL:
                 # Walk AST and execute manually
                 # NO more comando preprocessing! Already done before parse!
-                return self._walk_ast(ast)
-            
+                result = self._walk_ast(ast)
+
             else:
                 # Fallback to bash
-                return self._execute_via_bash(command)
+                result = self._execute_via_bash(command)
+
+            # STEP 6: Process post-commands (output process substitution >(cmd))
+            # These commands consume the temp files created by >(cmd) syntax
+            if hasattr(temp_files, 'post_commands') and temp_files.post_commands:
+                self.logger.debug(f"Processing {len(temp_files.post_commands)} post-commands")
+                for temp_file, cmd in temp_files.post_commands:
+                    try:
+                        # Execute cmd with temp_file as stdin via redirection
+                        # The main command wrote to temp_file, now cmd reads from it
+                        self.logger.debug(f"Post-command: {cmd} < {temp_file}")
+
+                        # Build command with stdin redirection
+                        post_cmd = f"{cmd} < {temp_file}"
+
+                        # Execute the post-command
+                        post_result = self.execute(post_cmd, nesting_level + 1)
+
+                        # If post-command fails, log but don't fail main command
+                        if post_result.returncode != 0:
+                            self.logger.warning(f"Post-command failed: {cmd}, exit={post_result.returncode}")
+
+                    except Exception as e:
+                        self.logger.error(f"Post-command execution failed: {e}")
+
+            return result
         
         except Exception as e:
             self.logger.error(f"Execution error: {e}", exc_info=True)
