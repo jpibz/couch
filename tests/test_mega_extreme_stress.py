@@ -16,10 +16,8 @@ print()
 
 # Windows paths
 workspace = Path(r'C:\Users\Test\workspace')
-executor = BashToolExecutor(
-    working_dir=workspace,
-    test_mode=True
-)
+# NO test_mode - TESTMODE is hardcoded in BashToolExecutor!
+executor = BashToolExecutor(working_dir=workspace)
 
 def test(name, cmd):
     """Run test and show OUTPUT"""

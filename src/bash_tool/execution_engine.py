@@ -382,8 +382,39 @@ class ExecutionEngine:
         
         # Simulate common commands
         if cmd == 'echo':
-            # Echo returns the arguments (shlex already removed quotes)
-            return ' '.join(args) + '\n'
+            # Handle echo flags: -e (enable escapes), -n (no newline)
+            interpret_escapes = False
+            no_newline = False
+            output_args = []
+
+            for arg in args:
+                if arg == '-e':
+                    interpret_escapes = True
+                elif arg == '-n':
+                    no_newline = True
+                elif arg == '-ne' or arg == '-en':
+                    interpret_escapes = True
+                    no_newline = True
+                elif arg.startswith('-'):
+                    # Unknown flag, treat as literal
+                    output_args.append(arg)
+                else:
+                    output_args.append(arg)
+
+            output = ' '.join(output_args)
+
+            # Interpret escape sequences if -e flag
+            if interpret_escapes:
+                output = output.replace('\\n', '\n')
+                output = output.replace('\\t', '\t')
+                output = output.replace('\\r', '\r')
+                output = output.replace('\\\\', '\\')
+
+            # Add newline unless -n flag
+            if not no_newline:
+                output += '\n'
+
+            return output
         
         elif cmd == 'cat':
             # Cat returns stdin or file marker

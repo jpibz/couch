@@ -153,7 +153,8 @@ class TokenType(Enum):
     HERE_STRING = auto()        # <<<
     REDIRECT_ERR = auto()       # 2> or 2>>
     REDIRECT_ERR_OUT = auto()   # 2>&1 or &>
-    
+    REDIRECT_FD = auto()        # >&N (redirect fd to fd)
+
     # Process substitution
     PROC_SUB_IN = auto()        # <(
     PROC_SUB_OUT = auto()       # >(
@@ -478,7 +479,18 @@ class BashLexer:
         if char == '&' and next_char == '>':
             self.pos += 2
             return Token(TokenType.REDIRECT_ERR_OUT, '&>', pos)
-        
+
+        # Check for >&N (redirect fd 1 to fd N)
+        if char == '>' and next_char == '&':
+            # Check if followed by digit (>&1, >&2, etc.)
+            digit_char = self._peek(2)
+            if digit_char and digit_char.isdigit():
+                self.pos += 3
+                return Token(TokenType.REDIRECT_FD, f'>&{digit_char}', pos)
+            # Just >& without digit (redirect to fd)
+            self.pos += 2
+            return Token(TokenType.REDIRECT_FD, '>&', pos)
+
         # Single-char operators
         if char == '|':
             self.pos += 1
@@ -863,7 +875,8 @@ class BashParser:
             TokenType.HEREDOC,
             TokenType.HERE_STRING,
             TokenType.REDIRECT_ERR,
-            TokenType.REDIRECT_ERR_OUT
+            TokenType.REDIRECT_ERR_OUT,
+            TokenType.REDIRECT_FD
         )
     
     def _parse_redirect(self) -> Redirect:
@@ -881,9 +894,15 @@ class BashParser:
         """
         redir_token = self._consume()
 
-        # 2>&1 doesn't need file target (redirects fd 2 to fd 1)
+        # 2>&1 and >&N don't need file target (redirect fd to fd)
         if redir_token.value == '2>&1':
             return Redirect(redir_token.value, '&1')
+
+        # >&N (redirect stdout to fd N) - e.g., >&2
+        if redir_token.type == TokenType.REDIRECT_FD:
+            # Extract fd number from token value (e.g., ">&2" -> "&2")
+            target = redir_token.value[1:]  # Skip '>'
+            return Redirect(redir_token.value, target)
 
         # Heredoc and Here-string: target is always a WORD
         if redir_token.type in (TokenType.HEREDOC, TokenType.HERE_STRING):
