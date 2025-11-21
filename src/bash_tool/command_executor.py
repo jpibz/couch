@@ -67,7 +67,7 @@ class CommandExecutor:
     """
 
 
-    def __init__(self, working_dir="\\", logger=None, test_mode=False, test_capabilities=None):
+    def __init__(self, working_dir: Path, logger=None, test_mode=False, test_capabilities=None):
         """
         Initialize CommandExecutor.
 
@@ -90,7 +90,8 @@ class CommandExecutor:
         # Initialize PREPROCESSOR
         self.pipeline_preprocessor = BashPipelinePreprocessor(
             executor=self,  # Pass self for recursive execution
-            logger=self.logger
+            logger=self.logger,
+            temp_dir= self.working_dir / 'tmp'
         )
         self.command_preprocessor = BashCommandPreprocessor(
             logger=self.logger
