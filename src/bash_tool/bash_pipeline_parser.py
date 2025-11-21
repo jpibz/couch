@@ -841,8 +841,7 @@ class BashParser:
         direction = '<' if token.type == TokenType.PROC_SUB_IN else '>'
         
         # Read command until matching )
-        # For now, simple approach: read until ) at same nesting level
-        # TODO: Handle nested parens properly
+        # Track depth to handle nested parens correctly
         cmd_tokens = []
         depth = 1  # We consumed <( or >(, so depth starts at 1
         
