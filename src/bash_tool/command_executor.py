@@ -47,6 +47,7 @@ from .pipeline_analyzer import PipelineAnalyzer
 from .execute_unix_single_command import ExecuteUnixSingleCommand
 from .bash_pipeline_preprocessor import BashPipelinePreprocessor
 from .bash_command_preprocessor import BashCommandPreprocessor
+from .bash_variable_context import BashVariableContext
 
 
 class ExecutionStrategy:
@@ -84,16 +85,20 @@ class CommandExecutor:
         self.test_capabilities = test_capabilities
         self.logger = logging.getLogger('CommandExecutor')
 
+        # Initialize bash variable context (persists across command sequences)
+        self.bash_context = BashVariableContext()
+
         # Initialize execution components
         self.engine = ExecutionEngine(working_dir, test_mode=test_mode, logger=self.logger, test_capabilities=test_capabilities)
 
-        # Initialize PREPROCESSOR
+        # Initialize PREPROCESSOR with context
         self.pipeline_preprocessor = BashPipelinePreprocessor(
             executor=self,  # Pass self for recursive execution
             logger=self.logger
         )
         self.command_preprocessor = BashCommandPreprocessor(
-            logger=self.logger
+            logger=self.logger,
+            context=self.bash_context  # Pass context for variable tracking
         )
 
         # Initialize ANALYZER (INTELLIGENZA STRATEGICA!)
@@ -119,31 +124,42 @@ class CommandExecutor:
     def execute(self, command: str, nesting_level: int = 0) -> subprocess.CompletedProcess:
         """
         Execute bash command - WITH PARSER + PREPROCESSOR INTEGRATION
-        
+
         Flow:
-        1. Parse → AST
-        2. PIPELINE PREPROCESSING (command subst, process subst, heredocs)
-        3. Analyze → Strategy
-        4. Execute → Based on strategy
-        
+        1. Parse (MINIMAL) → Detect Sequence
+        2. If Sequence: Process each command separately with context
+        3. Else: Normal flow (preprocess → parse → execute)
+
         Args:
             command: Bash command string (WINDOWS PATHS!)
             nesting_level: Recursion depth (for command substitution)
-            
+
         Returns:
             CompletedProcess result
         """
         self.logger.info(f"Executing: {command[:100]}")
-        
+
         temp_files = []
-        
+
         try:
-            # STEP 1: COMANDO PREPROCESSING CATEGORIA 1 (BEFORE parsing!)
+            # STEP 0: Parse MINIMALLY to detect structure (WITHOUT preprocessing!)
+            # This allows us to detect sequences and handle them specially
+            try:
+                preliminary_ast = parse_bash_command(command)
+                if isinstance(preliminary_ast, Sequence):
+                    # Special handling for sequences to support bash variable tracking
+                    self.logger.debug("Detected sequence - using per-command preprocessing")
+                    return self._execute_sequence_with_context(preliminary_ast, command, nesting_level, temp_files)
+            except Exception as e:
+                self.logger.debug(f"Preliminary parse failed (expected for some commands): {e}")
+                # Continue with normal flow
+
+            # NORMAL FLOW: STEP 1: COMANDO PREPROCESSING CATEGORIA 1 (BEFORE parsing!)
             # This MUST happen BEFORE parse because parser destroys ${VAR} and {1..3} syntax!
             # Variables, braces, arithmetic, tilde, aliases - all SAFE expansions
             command = self.command_preprocessor.preprocess_always(command)
             self.logger.debug(f"After comando preprocessing: {command[:100]}")
-            
+
             # STEP 2: Parse command into AST (now with expanded variables/braces)
             ast = parse_bash_command(command)
             self.logger.debug(f"AST: {ast}")
@@ -196,9 +212,163 @@ class CommandExecutor:
                     self.logger.warning(f"Failed to cleanup {temp_file}: {e}")
     
     # ========================================================================
+    # SEQUENCE WITH CONTEXT - Special handling for bash variable tracking
+    # ========================================================================
+
+    def _execute_sequence_with_context(self, seq_ast: Sequence, original_command: str, nesting_level: int, temp_files: list) -> subprocess.CompletedProcess:
+        """
+        Execute sequence with bash variable context tracking
+
+        This method processes each command in the sequence individually,
+        allowing bash variable assignments to be tracked and used in subsequent commands.
+
+        Example: file='test.txt'; echo ${file%.txt}.log
+        - First command sets 'file' variable in context
+        - Second command uses 'file' from context
+
+        Args:
+            seq_ast: Sequence AST node (for structure)
+            original_command: Original command string (unparsed)
+            nesting_level: Recursion depth
+            temp_files: List of temp files to cleanup
+
+        Returns:
+            CompletedProcess result (last command)
+        """
+        self.logger.debug(f"Executing sequence with context tracking: {len(seq_ast.commands)} commands")
+
+        # Split original command on ';' (simple split, we already know it's a sequence)
+        commands = self._split_sequence_commands(original_command)
+        self.logger.debug(f"Split into {len(commands)} commands: {commands}")
+
+        result = None
+
+        for cmd_str in commands:
+            cmd_str = cmd_str.strip()
+            if not cmd_str:
+                continue
+
+            self.logger.debug(f"Processing sequence command: {cmd_str}")
+
+            # Check if this is a bash variable assignment (var=value)
+            assignment_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', cmd_str)
+            if assignment_match:
+                var_name = assignment_match.group(1)
+                var_value = assignment_match.group(2).strip()
+
+                # Remove quotes if present
+                if (var_value.startswith("'") and var_value.endswith("'")) or \
+                   (var_value.startswith('"') and var_value.endswith('"')):
+                    var_value = var_value[1:-1]
+
+                # Store in context
+                self.bash_context.set(var_name, var_value)
+                self.logger.debug(f"Set bash variable: {var_name}={var_value}")
+
+                # Create a successful result
+                result = subprocess.CompletedProcess(
+                    args=['bash', '-c', cmd_str],
+                    returncode=0,
+                    stdout="",
+                    stderr=""
+                )
+            else:
+                # Normal command - preprocess and execute
+                preprocessed = self.command_preprocessor.preprocess_always(cmd_str)
+                self.logger.debug(f"Preprocessed: {preprocessed}")
+
+                # Execute the command (recursively, without detecting sequences again)
+                result = self._execute_non_sequence(preprocessed, nesting_level, temp_files)
+
+        return result if result else subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    def _split_sequence_commands(self, command: str) -> List[str]:
+        """
+        Split command string on ';' respecting quotes and escapes
+
+        Args:
+            command: Command string with semicolons
+
+        Returns:
+            List of individual commands
+        """
+        commands = []
+        current = []
+        in_single_quote = False
+        in_double_quote = False
+        escape_next = False
+
+        for char in command:
+            if escape_next:
+                current.append(char)
+                escape_next = False
+                continue
+
+            if char == '\\':
+                current.append(char)
+                escape_next = True
+                continue
+
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+                current.append(char)
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+                current.append(char)
+            elif char == ';' and not in_single_quote and not in_double_quote:
+                # Found a command separator
+                commands.append(''.join(current))
+                current = []
+            else:
+                current.append(char)
+
+        # Add last command
+        if current:
+            commands.append(''.join(current))
+
+        return commands
+
+    def _execute_non_sequence(self, command: str, nesting_level: int, temp_files: list) -> subprocess.CompletedProcess:
+        """
+        Execute a single (non-sequence) command
+
+        This is the normal execution flow, extracted to avoid infinite recursion
+        when processing sequences.
+
+        Args:
+            command: Preprocessed command string
+            nesting_level: Recursion depth
+            temp_files: List of temp files
+
+        Returns:
+            CompletedProcess result
+        """
+        # Parse
+        ast = parse_bash_command(command)
+
+        # Pipeline preprocessing
+        command, new_temp_files = self.pipeline_preprocessor.preprocess(command, nesting_level)
+        temp_files.extend(new_temp_files)
+
+        # Re-parse after pipeline preprocessing
+        ast = parse_bash_command(command)
+
+        # Analyze strategy
+        strategy = self._analyze_strategy(ast)
+        self.logger.debug(f"Strategy: {strategy}")
+
+        # Execute
+        if strategy == ExecutionStrategy.BASH_FULL:
+            return self._execute_via_bash(command)
+        elif strategy == ExecutionStrategy.MANUAL:
+            return self._walk_ast(ast)
+        else:
+            return self._execute_via_bash(command)
+
+    # ========================================================================
     # STRATEGY ANALYSIS
     # ========================================================================
-    
+
     def _analyze_strategy(self, ast) -> str:
         """
         Analyze AST and decide execution strategy
