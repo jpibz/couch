@@ -202,6 +202,16 @@ class SandboxValidator:
 
     def _check_unix_system_directories(self, command: str) -> tuple[bool, str]:
         """Check that command doesn't access protected Unix system directories"""
+        # SAFE exceptions: commonly used in bash commands
+        safe_system_files = [
+            '/dev/null',      # Discard output
+            '/dev/zero',      # Zero bytes source
+            '/dev/urandom',   # Random bytes
+            '/dev/stdin',     # Standard input
+            '/dev/stdout',    # Standard output
+            '/dev/stderr',    # Standard error
+        ]
+
         # Check for any protected path in command
         for protected_path in self.protected_unix_paths:
             # Match protected path as:
@@ -210,7 +220,15 @@ class SandboxValidator:
             # - With trailing slash: /etc/
             pattern = re.escape(protected_path) + r'(?:/|[\s"\']|$)'
 
-            if re.search(pattern, command):
+            matches = re.finditer(pattern, command)
+            for match in matches:
+                full_match = command[match.start():min(match.end() + 20, len(command))]
+
+                # Check if this is a safe exception
+                is_safe_exception = any(safe_file in full_match for safe_file in safe_system_files)
+                if is_safe_exception:
+                    continue
+
                 return False, f"Access to system directory blocked: {protected_path}"
 
         return True, "OK"
@@ -226,6 +244,14 @@ class SandboxValidator:
 
         for match in matches:
             unix_path = match.group(1)
+
+            # SKIP sed/awk patterns and regex - NOT real paths!
+            if self._is_sed_awk_pattern(unix_path):
+                continue
+
+            # SKIP bash variables - NOT real paths!
+            if self._is_bash_variable_path(unix_path):
+                continue
 
             # Special case: /tmp and /var/tmp are always allowed (temp files)
             if unix_path.startswith(('/tmp/', '/var/tmp/')):
@@ -333,3 +359,55 @@ class SandboxValidator:
         # Allow restricted commands with workspace paths
         # Additional granular checks can be added here in future
         return True, "OK"
+
+    def _is_sed_awk_pattern(self, path: str) -> bool:
+        """
+        Check if this is a sed/awk pattern, NOT a real path.
+
+        Sed/awk patterns:
+        - /pattern/replacement/ (has multiple /)
+        - /^regex/ (starts with regex chars)
+        - /pattern/flags (ends with flags like g, i)
+        - Contains regex metacharacters: ^, $, [, ], *, +, ?, |, \
+        """
+        # Has multiple / → likely s/pattern/replacement/
+        if path.count('/') >= 2:
+            return True
+
+        # Starts with regex metacharacters
+        if len(path) > 1 and path[1] in ('^', '$', '[', '.', '*', '+', '?', '|', '\\'):
+            return True
+
+        # Contains typical sed/awk patterns
+        if any(char in path for char in ('^', '$', '[', ']', '*', '+', '?', '|', '&')):
+            return True
+
+        # Ends with ) → likely awk variable like /count)
+        if path.endswith(')'):
+            return True
+
+        return False
+
+    def _is_bash_variable_path(self, path: str) -> bool:
+        """
+        Check if this contains bash variables, NOT a real path.
+
+        Examples:
+        - /$var
+        - /${var}
+        - /$env/$svc
+        - /}:
+        """
+        # Contains $ → bash variable
+        if '$' in path:
+            return True
+
+        # Contains {, } → bash expansion
+        if '{' in path or '}' in path:
+            return True
+
+        # Very short with special chars → likely not a real path
+        if len(path) <= 3 and any(c in path for c in ('$', '{', '}', ')')):
+            return True
+
+        return False
