@@ -692,14 +692,15 @@ class ExecutionEngine:
                 raise RuntimeError(f"Virtual environment not found: {venv_path}")
         
         # Check default BASH_TOOL_ENV
-        default_venv =  self.working_dir + f'{os.pathsep}BASH_TOOL_ENV'
-        
+        default_venv = self.working_dir / 'BASH_TOOL_ENV'
+
         if default_venv.exists():
             self.logger.info(f"Using default venv: {default_venv}")
             return default_venv
 
         # Create default venv - BLOCKING but only at initialization
-        if not self.python_executable:
+        python_exe = self.available_bins.get('python')
+        if not python_exe:
             self.logger.warning("No Python executable configured, cannot create virtual environment")
             return None
 
@@ -708,7 +709,7 @@ class ExecutionEngine:
             self.logger.warning("This is a ONE-TIME operation that may take up to 60 seconds...")
 
             subprocess.run(
-                [self.python_executable, '-m', 'venv', str(default_venv)],
+                [python_exe, '-m', 'venv', str(default_venv)],
                 check=True,
                 timeout=60,
                 capture_output=True
@@ -737,14 +738,15 @@ class ExecutionEngine:
         
         # Virtual environment
         if self.virtual_env:
-            env['PATH'] = f"{self.virtual_env + os.pathsep}Scripts{os.pathsep}{env.get('PATH', '')}"
+            venv_scripts = str(self.virtual_env / 'Scripts')
+            env['PATH'] = f"{venv_scripts}{os.pathsep}{env.get('PATH', '')}"
             env['VIRTUAL_ENV'] = str(self.virtual_env)
-        
+
         # Python executable directory
         if self.is_available('python'):
             python_dir = Path(self.available_bins['python']).parent if '/' in self.available_bins['python'] or '\\' in self.available_bins['python'] else None
             if python_dir:
-                env['PATH'] = f"{python_dir}{os.pathsep}{env.get('PATH', '')}"
+                env['PATH'] = f"{str(python_dir)}{os.pathsep}{env.get('PATH', '')}"
         
         return env
 
