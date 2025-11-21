@@ -153,26 +153,43 @@ class PersistentBashSession:
     MARKER = "<<<__EOF_b4sh_x9z_cmd_DONE_f7e3a2__>>>"
     
     def __init__(self, bash_path: str, env: dict, working_dir: Path):
-        
-        # ===== DIAGNOSTIC HEADER =====
-        # Add diagnostic info BEFORE the actual command
-        init_command = f"""
-    export PATH='$PATH:{env['PATH']}';\n
-    echo "====== BASH DIAGNOSTIC INFO ======" >&2
-    echo "PATH: $PATH" >&2
-    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Working dir: $(pwd)" >&2
-    echo "Environment vars: HOME=$HOME USER=$USER" >&2
-    echo "===================================" >&2
-    """
-        
+
         """Initialize persistent bash session"""
-        # NOTE: Do NOT use --norc or --noprofile!
-        # Git Bash needs .bashrc to setup MSYS mount points (C: -> /c)
-        # and path conversion. Without it, filesystem access breaks.
+        # STRATEGY: Use custom rcfile that loads ONLY essentials, no interactive output
+        # This avoids --norc --noprofile issues while maintaining control
+
+        import tempfile
+        import os
+
+        # Create minimal custom .bashrc that loads system essentials
+        # Source /etc/bash.bashrc (system-wide init) if exists
+        # Then add our custom PATH
+        custom_bashrc_content = f"""
+# Minimal bashrc for PersistentBashSession
+# Load system-wide bash initialization if it exists (contains essential inits)
+if [ -f /etc/bash.bashrc ]; then
+    . /etc/bash.bashrc
+fi
+if [ -f /etc/bashrc ]; then
+    . /etc/bashrc
+fi
+
+# Add custom PATH
+export PATH='$PATH:{env.get('PATH', '')}'
+
+# Disable interactive features
+unset PROMPT_COMMAND
+PS1='$ '
+"""
+
+        # Write custom bashrc to temp file
+        self.custom_bashrc_fd, self.custom_bashrc_path = tempfile.mkstemp(suffix='.bashrc', text=True)
+        os.write(self.custom_bashrc_fd, custom_bashrc_content.encode('utf-8'))
+        os.close(self.custom_bashrc_fd)
+
+        # Use --rcfile to load our custom bashrc instead of user's ~/.bashrc
         self.process = subprocess.Popen(
-            [bash_path],  # Let bash load .bashrc for MSYS init
+            [bash_path, '--rcfile', self.custom_bashrc_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr → stdout
@@ -182,12 +199,8 @@ class PersistentBashSession:
             cwd=str(working_dir),
             env=env
         )
-        
-        # Setup PATH once
-        self.process.stdin.write(init_command)  
-        self.process.stdin.flush()
-        
-        # Eat initial output until ready
+
+        # Eat initial output (from custom bashrc) until ready
         self._eat_until_ready()
     
     def _eat_until_ready(self):
@@ -252,6 +265,14 @@ class PersistentBashSession:
                     self.process.wait(timeout=2)
                 except:
                     self.process.kill()
+
+        # Cleanup temp bashrc file
+        if hasattr(self, 'custom_bashrc_path'):
+            try:
+                import os
+                os.unlink(self.custom_bashrc_path)
+            except:
+                pass
     
     def __del__(self):
         """Cleanup on garbage collection"""
