@@ -153,20 +153,21 @@ class PersistentBashSession:
     MARKER = "<<<__EOF_b4sh_x9z_cmd_DONE_f7e3a2__>>>"
     
     def __init__(self, bash_path: str, env: dict, working_dir: Path):
-        
-        # ===== DIAGNOSTIC HEADER =====
-        # Add diagnostic info BEFORE the actual command
-        init_command = """
-    echo "====== BASH DIAGNOSTIC INFO ======" >&2
-    echo "PATH: $PATH" >&2
-    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Working dir: $(pwd)" >&2
-    echo "Environment vars: HOME=$HOME USER=$USER" >&2
-    echo "===================================" >&2
-    """
-        
         """Initialize persistent bash session"""
+        
+        # 🔥 SINGLE LINE con && - evita problemi CRLF!
+        # Diagnostica va in stdout (non stderr), con MARKER finale
+        init_command = (
+            'echo "====== BASH DIAGNOSTIC INFO ======" &&' 
+            'echo "PATH: $PATH" && '
+            'echo "Python location: $(which python 2>&1 || echo NOT FOUND)" && '
+            'echo "Python3 location: $(which python3 2>&1 || echo NOT FOUND)" && '
+            'echo "Working dir: $(pwd)" && '
+            'echo "Environment vars: HOME=$HOME USER=$USER" && '
+            'echo "===================================" && '
+            f'echo "{self.MARKER}"\n'
+        )
+        
         self.process = subprocess.Popen(
             [bash_path, '--noprofile'],
             stdin=subprocess.PIPE,
@@ -179,7 +180,7 @@ class PersistentBashSession:
             env=env
         )
         
-        # Setup PATH once
+        # Scrivi init command (UN SOLO \n alla fine!)
         self.process.stdin.write(init_command)  
         self.process.stdin.flush()
         
@@ -187,25 +188,24 @@ class PersistentBashSession:
         self._eat_until_ready()
     
     def _eat_until_ready(self):
-        """Wait for bash to be ready"""
-        self.process.stdin.write(f"echo '{self.MARKER}'\n")
-        self.process.stdin.flush()
-        
+        """Wait for bash to be ready - eat all output until marker"""
         while True:
             line = self.process.stdout.readline()
             if not line:
                 raise RuntimeError("Bash process died during initialization")
             if self.MARKER in line:
                 break
+            print(line)
     
     def execute(self, command: str) -> tuple[str, int]:
-        """Execute command and return (stdout, exitcode)"""
-        full_cmd = (
-            f"{command}\n"
-            f"__EXITCODE=$?\n"
-            f"echo '{self.MARKER}'\n"
-            f"echo 'EXITCODE:'$__EXITCODE\n"
-        )
+        """Execute command - single line to avoid CRLF issues"""
+        
+        # 🔥 UNA SOLA RIGA con && - UN SOLO \n alla fine!
+        full_cmd = f"{command} && __EXITCODE=$? && echo \"{self.MARKER}\" && echo \"EXITCODE:$__EXITCODE\"\n"
+        
+        # Anche se Python converte in \r\n, il \r è SOLO alla fine!
+        # Bash riceve: "cat /tmp/file.tmp && ... && echo MARKER\r\n"
+        # Il \r\n è DOPO tutto - NON dentro il path!
         
         self.process.stdin.write(full_cmd)
         self.process.stdin.flush()
@@ -217,20 +217,17 @@ class PersistentBashSession:
             line = self.process.stdout.readline()
             
             if not line:
-                raise RuntimeError("Bash process died during command execution")
+                raise RuntimeError("Bash process died")
             
             if self.MARKER in line:
                 exitcode_line = self.process.stdout.readline()
-                if not exitcode_line:
-                    raise RuntimeError("Missing exitcode line after marker")
-                    
-                if exitcode_line.startswith("EXITCODE:"):
+                if exitcode_line and exitcode_line.startswith("EXITCODE:"):
                     try:
                         exitcode = int(exitcode_line.split(":")[1].strip())
                     except (IndexError, ValueError):
                         exitcode = -1
                 break
-
+            print(line)
             output_lines.append(line)
         
         return ''.join(output_lines), exitcode
@@ -337,7 +334,9 @@ class ExecutionEngine:
 
             # Setup execution environment
             self.environment = self._setup_environment()
-
+        
+        self.bash_session = None
+        
         # ===== CREATE PERSISTENT BASH SESSION =====
         if self.bash_available:
             try:
