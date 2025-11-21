@@ -264,6 +264,9 @@ class CommandEmulator:
 
             # Monitoring - FALLBACK
             'watch': self._translate_watch,       # 58 lines - FALLBACK
+
+            # Control structures
+            'for': self._translate_for,           # for loops
         }
 
         # QUICK commands (string content <= 407 chars median threshold)
@@ -6003,3 +6006,77 @@ class CommandEmulator:
                 ps_code += f'.{part}'
         
         return ps_code + '\n'
+
+    def _translate_for(self, cmd: str, parts):
+        """
+        Translate bash for loop to PowerShell foreach.
+
+        Bash syntax:
+          for var in item1 item2 item3; do
+            command $var
+          done
+
+        PowerShell equivalent:
+          foreach($var in @('item1', 'item2', 'item3')) {
+            command $var
+          }
+
+        Args:
+            cmd: Full for loop command string
+            parts: Command split by spaces (not reliable for multiline)
+
+        Returns:
+            PowerShell foreach loop string
+        """
+        import re
+
+        # Parse: for VAR in ITEMS; do BODY done
+        # Handle both ; and newline as separators
+        pattern = r'for\s+(\w+)\s+in\s+([^;]+?)(?:;|\s+)do\s+(.+?)\s+done'
+        match = re.search(pattern, cmd, re.DOTALL | re.MULTILINE)
+
+        if not match:
+            return f'echo Error: invalid for loop syntax'
+
+        var_name = match.group(1)
+        items_str = match.group(2).strip()
+        body = match.group(3).strip()
+
+        # Parse items - can be space-separated or newline-separated
+        items = items_str.split()
+
+        # Build PowerShell array
+        # Quote items to preserve as strings
+        ps_items = ', '.join(f"'{item}'" for item in items)
+
+        # Translate body recursively (may contain bash commands)
+        # Replace $var with PowerShell $var
+        translated_body = body.replace(f'${var_name}', f'${var_name}')
+
+        # Try to translate inner commands
+        # Split body by newlines or semicolons
+        body_lines = re.split(r'[;\n]+', body)
+        translated_lines = []
+        for line in body_lines:
+            line = line.strip()
+            if line:
+                # Replace bash variable syntax with PowerShell
+                line = line.replace(f'${var_name}', f'${var_name}')
+                # Try to translate the command
+                try:
+                    translated = self.emulate_command(line)
+                    translated_lines.append(translated)
+                except:
+                    # If translation fails, use as-is
+                    translated_lines.append(line)
+
+        translated_body = '; '.join(translated_lines)
+
+        # Build PowerShell foreach
+        ps_script = f'''
+foreach(${var_name} in @({ps_items})) {{
+    {translated_body}
+}}
+        '''.strip()
+
+        return f'powershell -Command "{ps_script}"'

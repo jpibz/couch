@@ -474,17 +474,73 @@ class PipelineStrategy:
         """
         Determine if pipeline can be split into parts for hybrid execution.
 
-        This is for FUTURE optimization - not implemented in first iteration.
+        Splitting allows each pipeline segment to use its optimal execution strategy.
+        Example: "cat file.txt | grep pattern | wc -l" can split into 3 parts.
 
         Args:
             command: Command string
             analysis: PipelineAnalysis
 
         Returns:
-            (can_split, split_points)
+            (can_split, split_points) where split_points are pipe character positions
         """
-        # TODO: Implement intelligent pipeline splitting
-        # For now, always return False (execute as whole)
-        return False, []
+        # Can't split if not a pipeline or only one command
+        if not analysis.has_pipeline or analysis.command_count < 2:
+            return False, []
+
+        # Can't split if complex features that require unified bash execution
+        if analysis.has_process_subst:  # <(...) or >(...) require bash context
+            return False, []
+
+        if analysis.has_stderr_redir:  # 2>, 2>&1, |& have complex semantics
+            return False, []
+
+        if analysis.has_chain:  # &&, ||, ; have semantic dependencies
+            return False, []
+
+        # For simple pipelines, split at pipe boundaries
+        # Find all pipe positions (outside quotes)
+        split_positions = []
+        i = 0
+        in_single_quote = False
+        in_double_quote = False
+        escaped = False
+
+        while i < len(command):
+            char = command[i]
+
+            # Handle escape sequences
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+
+            if char == '\\':
+                escaped = True
+                i += 1
+                continue
+
+            # Track quote context
+            if char == "'" and not in_double_quote:
+                in_single_quote = not in_single_quote
+            elif char == '"' and not in_single_quote:
+                in_double_quote = not in_double_quote
+            # Find pipe outside quotes
+            elif char == '|' and not in_single_quote and not in_double_quote:
+                # Check it's not |& or ||
+                if i + 1 < len(command):
+                    next_char = command[i + 1]
+                    if next_char not in ['&', '|']:
+                        split_positions.append(i)
+                else:
+                    split_positions.append(i)
+
+            i += 1
+
+        # Need at least one split position for splitting to be useful
+        if not split_positions:
+            return False, []
+
+        return True, split_positions
 
 
