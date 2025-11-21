@@ -35,9 +35,9 @@ def test_native_bins_detection():
         print(f"  - {name}: {path}")
     
     # Check specific bins
-    assert engine.is_bin_available('grep'), "grep should be available"
-    assert engine.is_bin_available('python'), "python should be available"
-    assert not engine.is_bin_available('nonexistent'), "nonexistent should not be available"
+    assert engine.is_available('grep'), "grep should be available"
+    assert engine.is_available('python'), "python should be available"
+    assert not engine.is_available('nonexistent'), "nonexistent should not be available"
     
     print("\nâœ… PASS - Native bins detection works!")
 
