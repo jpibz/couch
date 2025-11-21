@@ -168,8 +168,11 @@ class PersistentBashSession:
     """
         
         """Initialize persistent bash session"""
+        # NOTE: Do NOT use --norc or --noprofile!
+        # Git Bash needs .bashrc to setup MSYS mount points (C: -> /c)
+        # and path conversion. Without it, filesystem access breaks.
         self.process = subprocess.Popen(
-            [bash_path, '--norc', '--noprofile'],
+            [bash_path],  # Let bash load .bashrc for MSYS init
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr → stdout
