@@ -3439,6 +3439,10 @@ class CommandEmulator:
                 field_separator = parts[i][2:]
                 i += 1
             elif not parts[i].startswith('-'):
+                # Check if this looks like part of awk program (not a file)
+                is_awk_keyword = parts[i] in ['BEGIN', 'END']
+                is_awk_syntax = any(c in parts[i] for c in ['{', '}', '$', 'print', 'sum', 'NR', 'NF'])
+
                 if program is None:
                     # Start building program - may span multiple parts if split incorrectly
                     program = parts[i]
@@ -3449,7 +3453,11 @@ class CommandEmulator:
                             program += ' ' + parts[i]
                             i += 1
                         i -= 1  # Back up one since we'll increment at end
+                elif is_awk_keyword or is_awk_syntax:
+                    # This is part of the program, not a file
+                    program += ' ' + parts[i]
                 else:
+                    # This is a file
                     win_path = parts[i]  # Already translated
                     files.append(win_path)
                 i += 1
@@ -3516,11 +3524,15 @@ class CommandEmulator:
 
         # Main processing
         ps_main = []
+        # Initialize AWK variables before loop
+        ps_main.append('$NR = 0')  # AWK line number counter
+
         # Handle stdin vs file differently
         if files:
             ps_main.append(f'Get-Content "{files[0]}" | ForEach-Object {{')
         else:
             ps_main.append('$input | ForEach-Object {')
+        ps_main.append('  $NR++')  # Increment line number
         ps_main.append(f'  $F = $_ -split "{field_separator}"')
         ps_main.append('  $NF = $F.Length')
         
@@ -3561,10 +3573,24 @@ class CommandEmulator:
             print_match = re.search(r'print\s+(.+)', awk_stmt)
             if print_match:
                 expr = print_match.group(1).strip()
-                # Convert field references
-                expr = re.sub(r'\$(\d+)', r'$F[\1-1]', expr)
+
+                # Convert special AWK variables first
+                # $0 = entire line (use $_ in PowerShell)
+                expr = expr.replace('$0', '$_')
+
+                # NR = line number (need to track in PowerShell)
+                expr = expr.replace('NR', '$NR')
+
+                # Convert field references ($1, $2, etc.) - but NOT $0 (already handled)
+                expr = re.sub(r'\$([1-9]\d*)', r'$F[\1-1]', expr)
                 expr = expr.replace('$NF', '$F[$NF-1]')
                 expr = expr.replace('$(NF-1)', '$F[$NF-2]')
+
+                # Convert AWK variables to PowerShell variables
+                # If expr is a simple identifier (variable name), add $
+                if expr and not expr.startswith('$') and not expr.startswith('"') and not expr.startswith("'") and expr.replace('_', '').isalnum():
+                    expr = '$' + expr
+
                 return f'Write-Output {expr}'
         
         # Handle variable assignments
@@ -3644,7 +3670,10 @@ class CommandEmulator:
         input_src = f'Get-Content \\"{files[0]}\\"' if files else '$input'
 
         # Field extraction with delimiter
-        if fields and delimiter:
+        # Default delimiter is TAB if -f is used without -d
+        if fields:
+            if not delimiter:
+                delimiter = '\\t'  # TAB is default delimiter for cut -f
             # Parse field spec
             field_list = self._parse_cut_range(fields)
 
@@ -3863,12 +3892,38 @@ class CommandEmulator:
         """
         Expand character ranges in tr set (e.g., 'a-z' -> 'abcd...xyz').
         Handles ranges like a-z, A-Z, 0-9, etc.
+        Handles escape sequences like \n, \t, \\, etc.
         """
         result = []
         i = 0
         while i < len(char_set):
+            # Check for escape sequences
+            if char_set[i] == '\\' and i + 1 < len(char_set):
+                next_char = char_set[i + 1]
+                # Handle common escape sequences
+                escape_map = {
+                    'n': '\n',
+                    't': '\t',
+                    'r': '\r',
+                    '\\': '\\',
+                    '0': '\0',
+                    'a': '\a',
+                    'b': '\b',
+                    'f': '\f',
+                    'v': '\v',
+                }
+                if next_char in escape_map:
+                    result.append(escape_map[next_char])
+                    i += 2
+                    continue
+                else:
+                    # Unknown escape, keep backslash
+                    result.append('\\')
+                    i += 1
+                    continue
+
             # Check for range pattern: X-Y
-            if i + 2 < len(char_set) and char_set[i + 1] == '-':
+            if i + 2 < len(char_set) and char_set[i + 1] == '-' and char_set[i] != '\\':
                 start_char = char_set[i]
                 end_char = char_set[i + 2]
                 # Expand range
@@ -3930,11 +3985,32 @@ class CommandEmulator:
                 # Build PowerShell translation
                 replacements = []
                 for i in range(len(set1)):
-                    # Escape special regex chars
-                    from_char = set1[i].replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
-                    to_char = set2[i].replace('\\', '\\\\').replace('$', '$$')
+                    # Escape special chars for regex and PowerShell
+                    from_char = set1[i]
+                    to_char = set2[i]
+
+                    # Convert special characters to PowerShell escapes
+                    ps_escape_map = {
+                        '\n': '`n',
+                        '\t': '`t',
+                        '\r': '`r',
+                        '\0': '`0',
+                    }
+
+                    # For regex pattern (from_char)
+                    if from_char in ps_escape_map:
+                        from_char = '\\' + from_char.encode('unicode_escape').decode('ascii')[-1]  # \n for regex
+                    else:
+                        from_char = from_char.replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
+
+                    # For replacement (to_char) - use PowerShell escape
+                    if to_char in ps_escape_map:
+                        to_char = ps_escape_map[to_char]
+                    else:
+                        to_char = to_char.replace('\\', '\\\\').replace('$', '$$')
+
                     replacements.append(f'$line = $line -replace "{from_char}", "{to_char}"')
-                
+
                 ps_operations = '; '.join(replacements)
                 ps_cmd = f'$input | ForEach-Object {{ $line = $_; {ps_operations}; $line }}'
             else:
