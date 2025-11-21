@@ -4833,23 +4833,31 @@ class CommandEmulator:
         
         if not command:
             return 'echo Error: watch requires command'
-        
-        # Translate Unix command to Windows if needed
-        # For now, assume command is already valid for Windows
-        # TODO: Could recursively translate the watched command
-        
+
+        # Translate Unix command to Windows recursively
+        # Strip quotes if command is quoted
+        if (command.startswith('"') and command.endswith('"')) or \
+           (command.startswith("'") and command.endswith("'")):
+            command = command[1:-1]
+
+        # Recursively translate the watched command
+        translated_command = self.emulate_command(command)
+
+        # Escape quotes for PowerShell
+        translated_command = translated_command.replace('"', '`"')
+
         ps_script = f'''
             while ($true) {{
                 Clear-Host
                 Write-Host "Every {interval}s: {command}"
                 Write-Host ""
-                
+
                 try {{
-                    Invoke-Expression "{command}"
+                    Invoke-Expression "{translated_command}"
                 }} catch {{
                     Write-Error $_.Exception.Message
                 }}
-                
+
                 Start-Sleep -Seconds {interval}
             }}
         '''

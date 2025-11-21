@@ -99,7 +99,8 @@ class CommandExecutor:
         )
         self.command_preprocessor = BashCommandPreprocessor(
             logger=self.logger,
-            context=self.bash_context  # Pass context for variable tracking
+            context=self.bash_context,  # Pass context for variable tracking
+            working_dir=self.working_dir  # Pass working dir for tilde expansion
         )
 
         # Initialize ANALYZER (INTELLIGENZA STRATEGICA!)
