@@ -543,21 +543,35 @@ class BashCommandPreprocessor:
             prefix_start = start - 1
             while prefix_start >= 0 and command[prefix_start] not in ',{ \t\n;|&':
                 prefix_start -= 1
-            
-            # Check what delimiter we hit
-            if prefix_start < 0 or command[prefix_start] in ' \t\n;|&{':
-                # Hit beginning, space, or opening brace → no prefix → TOP-LEVEL brace
+
+            # Determine if this is a nested brace or top-level
+            # NESTED if: there's a prefix (even if preceded by { or ,)
+            # TOP-LEVEL if: no prefix (directly after space/beginning/{ with no chars between)
+
+            if prefix_start < 0:
+                # At beginning of string
+                prefix = command[0:start]
+            elif command[prefix_start] in ',{':
+                # After comma or opening brace
+                prefix = command[prefix_start+1:start]
+            else:
+                # After space/delimiter - top-level
+                prefix = ''
+
+            if not prefix:
+                # No prefix → TOP-LEVEL brace
                 # Leave it for Pass 2!
                 break
             else:
-                # Hit comma → there's a prefix → NESTED brace → expand it!
-                prefix_start += 1
-                prefix = command[prefix_start:start]
-                
+                # Has prefix → NESTED brace → expand it!
+                # Calculate actual prefix_start (after the delimiter)
+                if prefix_start >= 0 and command[prefix_start] in ',{':
+                    prefix_start += 1
+
                 # Expand with prefix: b{1,2} → b1,b2
                 expanded_items = [prefix + item for item in items]
                 replacement = ','.join(expanded_items)
-                
+
                 # Replace from prefix_start (include prefix in replacement)
                 command = command[:prefix_start] + replacement + command[end:]
         

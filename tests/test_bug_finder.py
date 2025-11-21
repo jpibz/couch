@@ -23,10 +23,17 @@ def run_test_and_find_bugs():
     output = result.stdout + result.stderr
 
     # BUG 1: Brace expansion duplicates
-    if 'staging2c/api3/config.json' in output:
-        count = output.count('staging2c/api3/config.json')
-        if count > 1:
-            bugs_found.append(f"BUG: Brace expansion duplicates - staging2c/api3/config.json appears {count} times")
+    # Check by parsing the actual command output
+    import re
+    match = re.search(r'\[TEST-Git Bash\] echo (prod/api1.*staging2c.*)', output, re.DOTALL)
+    if match:
+        brace_output = match.group(1).split('\n')[0]  # First line only
+        words = brace_output.split()
+        from collections import Counter
+        counts = Counter(words)
+        duplicates = {word: count for word, count in counts.items() if count > 1}
+        if duplicates:
+            bugs_found.append(f"BUG: Brace expansion duplicates - {len(duplicates)} words duplicated: {list(duplicates.items())[:3]}")
 
     # BUG 2: Quote handling in command substitution
     if '"Level2: "Level3:' in output:
