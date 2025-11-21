@@ -149,21 +149,21 @@ class BashToolExecutor(ToolExecutor):
         temp_files = []
 
         try:
-            # STEP 1: Translate Unix paths -> Windows paths
+            # STEP 1: Security validation
+            if not self.TESTMODE:
+                is_safe, reason = self.sandbox_validator.validate_command(command)
+                if not is_safe:
+                    return f"Error: Security - {reason}"
+            else:
+                self.logger.debug("TEST MODE: Skipping sandbox validation")
+                
+            # STEP 2: Translate Unix paths -> Windows paths
             if not self.TESTMODE:
                 command_with_win_paths = self.path_translator.translate_paths_in_string(command, 'to_windows')
             else:
                 # TEST MODE: Skip path translation
                 command_with_win_paths = command
                 self.logger.debug("TEST MODE: Skipping path translation")
-
-            # STEP 2: Security validation
-            if not self.TESTMODE:
-                is_safe, reason = self.sandbox_validator.validate_command(command_with_win_paths)
-                if not is_safe:
-                    return f"Error: Security - {reason}"
-            else:
-                self.logger.debug("TEST MODE: Skipping sandbox validation")
 
             # STEP 3: Execute via CommandExecutor (preprocessing + translation + execution)
             result = self.command_executor.execute(
