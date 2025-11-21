@@ -664,11 +664,12 @@ class ExecutionEngine:
         Returns:
             True if available, False otherwise
         """
-        return name.lower() in self.available_bins or self.capabilities.get(name.lower(), False)
+        is_available = self.available_bins.get(name.lower(), None)
+        return True if is_available else False
 
     # ==================== SETUP/DETECTION METHODS ====================
 
-    def _setup_virtual_env(self, virtual_env: Optional[str]) -> Optional[Path]:
+    def _setup_virtual_env(self, virtual_env: Optional[str] = None) -> Optional[Path]:
         """Setup virtual environment - BLOCKING at initialization is acceptable.
 
         Creates venv at initialization if missing. System blocks once at startup,
@@ -691,7 +692,7 @@ class ExecutionEngine:
                 raise RuntimeError(f"Virtual environment not found: {venv_path}")
         
         # Check default BASH_TOOL_ENV
-        default_venv =  self.path_translator.get_workspace_root() / 'BASH_TOOL_ENV'
+        default_venv =  self.working_dir + f'{os.pathsep}BASH_TOOL_ENV'
         
         if default_venv.exists():
             self.logger.info(f"Using default venv: {default_venv}")
@@ -736,19 +737,14 @@ class ExecutionEngine:
         
         # Virtual environment
         if self.virtual_env:
-            env['PATH'] = f"{self.virtual_env / 'Scripts'}{os.pathsep}{env.get('PATH', '')}"
+            env['PATH'] = f"{self.virtual_env + os.pathsep}Scripts{os.pathsep}{env.get('PATH', '')}"
             env['VIRTUAL_ENV'] = str(self.virtual_env)
         
         # Python executable directory
-        if self.python_executable:
-            python_dir = Path(self.python_executable).parent if '/' in self.python_executable or '\\' in self.python_executable else None
+        if self.is_available('python'):
+            python_dir = Path(self.available_bins['python']).parent if '/' in self.available_bins['python'] or '\\' in self.available_bins['python'] else None
             if python_dir:
                 env['PATH'] = f"{python_dir}{os.pathsep}{env.get('PATH', '')}"
         
         return env
-
-
-# ============================================================================
-# STRATEGIC ANALYSIS LAYER - Pipeline & Command Strategy
-# ============================================================================
 
