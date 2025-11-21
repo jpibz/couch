@@ -164,6 +164,9 @@ class PersistentBashSession:
         # Create minimal custom .bashrc that loads system essentials
         # Source /etc/bash.bashrc (system-wide init) if exists
         # Then add our custom PATH
+        # Build custom PATH - our bins first, then system PATH
+        custom_path = env.get('PATH', '')
+
         custom_bashrc_content = f"""
 # Minimal bashrc for PersistentBashSession
 # Load system-wide bash initialization if it exists (contains essential inits)
@@ -174,8 +177,18 @@ if [ -f /etc/bashrc ]; then
     . /etc/bashrc
 fi
 
-# Add custom PATH
-export PATH='$PATH:{env.get('PATH', '')}'
+# Add custom PATH (our bins have priority)
+# IMPORTANT: Use double quotes to allow $PATH expansion!
+export PATH="{custom_path}:$PATH"
+
+# Diagnostic info
+echo "====== BASH SESSION INIT ======" >&2
+echo "Custom PATH added: {custom_path}" >&2
+echo "Final PATH: $PATH" >&2
+echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
+echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
+echo "Working dir: $(pwd)" >&2
+echo "===============================" >&2
 
 # Disable interactive features
 unset PROMPT_COMMAND
@@ -810,19 +823,12 @@ class ExecutionEngine:
         # Git Bash needs /c/path NOT C:\path in PATH variable!
         env = self._build_bash_environment()
 
-        # ===== FIXED HEADER: PREPEND our paths to existing PATH =====
-        # Bash loads .bashrc which sets PATH, we APPEND our bins to it!
-        path_prepend = f"export PATH='$PATH:{env['PATH']}';\n"
-
-        # Prepend diagnostic to actual command
-        full_command = path_prepend + git_command
-        # =============================
-        
         # ===== USE PERSISTENT SESSION =====
         if self.bash_session:
             try:
-                self.logger.debug(f"Executing via persistent session: {full_command}")
-                output, exitcode = self.bash_session.execute(full_command)
+                # PersistentBashSession already has PATH set by custom bashrc - don't prepend!
+                self.logger.debug(f"Executing via persistent session: {git_command}")
+                output, exitcode = self.bash_session.execute(git_command)
                 
                 return subprocess.CompletedProcess(
                     args=[self.bash_path, '-c', git_command],
@@ -841,8 +847,8 @@ class ExecutionEngine:
                         working_dir=str(self.working_dir)
                     )
                     self.logger.info("Recreated persistent bash session")
-                    # Retry command
-                    output, exitcode = self.bash_session.execute(full_command)
+                    # Retry command (no PATH prepend - bashrc handles it)
+                    output, exitcode = self.bash_session.execute(git_command)
                     return subprocess.CompletedProcess(
                         args=[self.bash_path, '-c', git_command],
                         returncode=exitcode,
@@ -854,23 +860,12 @@ class ExecutionEngine:
                     raise RuntimeError(f"Bash session failed: {e}") from e2
         # ==================================
 
-        # Fallback: old method (shouldn't happen)
-    
-        '''
-        # ===== DIAGNOSTIC HEADER =====
-        # Add diagnostic info BEFORE the actual command
-        diagnostic_header = """
-    echo "====== BASH DIAGNOSTIC INFO ======" >&2
-    echo "PATH: $PATH" >&2
-    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
-    echo "Working dir: $(pwd)" >&2
-    echo "Environment vars: HOME=$HOME USER=$USER" >&2
-    echo "===================================" >&2
-    """
-        '''
-    
-        self.logger.debug(f"Executing Git Bash: {git_command}")
+        # Fallback: subprocess.run() - need to prepend PATH
+        # IMPORTANT: Use double quotes to allow $PATH expansion!
+        path_prepend = f'export PATH="{env["PATH"]}:$PATH";\n'
+        full_command = path_prepend + git_command
+
+        self.logger.debug(f"Executing Git Bash (fallback): {git_command}")
         return subprocess.run(
             [self.bash_path, '-c', full_command],
             capture_output=True,
