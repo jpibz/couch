@@ -155,10 +155,13 @@ class BashCommandPreprocessor:
         if command.startswith('~/'):
             # Windows path separator!
             command = home_dir + '\\' + command[2:].replace('/', '\\')
-        
+
         # Expand in arguments
-        command = re.sub(r'\s~/', f' {home_dir}\\\\', command)
-        
+        # CRITICAL: Escape backslashes for regex replacement string
+        # Windows paths like C:\Users\Giovanni contain \U which Python interprets as Unicode escape!
+        escaped_home_dir = home_dir.replace('\\', '\\\\')
+        command = re.sub(r'\s~/', f' {escaped_home_dir}\\\\', command)
+
         return command
     
     def _expand_variables(self, command: str) -> str:
