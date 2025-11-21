@@ -39,10 +39,10 @@ command → check dangerous_commands → check system_directories →
 check path boundaries → check restricted commands → (True, "OK")
 
 INPUT FORMAT:
-Receives Unix commands with Windows paths (after PathTranslator):
-  Example: "rm -rf C:\\Users\\workspace\\file.txt"
+Receives pure Unix commands BEFORE path translation:
+  Example: "rm -rf /home/user/workspace/file.txt"
   - Unix syntax (rm -rf)
-  - Windows paths (C:\\...)
+  - Unix paths (/home/user/...)
 
 DESIGN PATTERN: Validator + Strategy (multiple validation strategies)
 """
