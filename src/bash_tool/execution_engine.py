@@ -153,56 +153,22 @@ class PersistentBashSession:
     MARKER = "<<<__EOF_b4sh_x9z_cmd_DONE_f7e3a2__>>>"
     
     def __init__(self, bash_path: str, env: dict, working_dir: Path):
-
+        
+        # ===== DIAGNOSTIC HEADER =====
+        # Add diagnostic info BEFORE the actual command
+        init_command = """
+    echo "====== BASH DIAGNOSTIC INFO ======" >&2
+    echo "PATH: $PATH" >&2
+    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Working dir: $(pwd)" >&2
+    echo "Environment vars: HOME=$HOME USER=$USER" >&2
+    echo "===================================" >&2
+    """
+        
         """Initialize persistent bash session"""
-        # STRATEGY: Use custom rcfile that loads ONLY essentials, no interactive output
-        # This avoids --norc --noprofile issues while maintaining control
-
-        import tempfile
-        import os
-
-        # Create minimal custom .bashrc that loads system essentials
-        # Source /etc/bash.bashrc (system-wide init) if exists
-        # Then add our custom PATH
-        # Build custom PATH - our bins first, then system PATH
-        custom_path = env.get('PATH', '')
-
-        custom_bashrc_content = f"""
-# Minimal bashrc for PersistentBashSession
-# Load system-wide bash initialization if it exists (contains essential inits)
-if [ -f /etc/bash.bashrc ]; then
-    . /etc/bash.bashrc
-fi
-if [ -f /etc/bashrc ]; then
-    . /etc/bashrc
-fi
-
-# Add custom PATH (our bins have priority)
-# IMPORTANT: Use double quotes to allow $PATH expansion!
-export PATH="{custom_path}:$PATH"
-
-# Diagnostic info
-echo "====== BASH SESSION INIT ======" >&2
-echo "Custom PATH added: {custom_path}" >&2
-echo "Final PATH: $PATH" >&2
-echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
-echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
-echo "Working dir: $(pwd)" >&2
-echo "===============================" >&2
-
-# Disable interactive features
-unset PROMPT_COMMAND
-PS1='$ '
-"""
-
-        # Write custom bashrc to temp file
-        self.custom_bashrc_fd, self.custom_bashrc_path = tempfile.mkstemp(suffix='.bashrc', text=True)
-        os.write(self.custom_bashrc_fd, custom_bashrc_content.encode('utf-8'))
-        os.close(self.custom_bashrc_fd)
-
-        # Use --rcfile to load our custom bashrc instead of user's ~/.bashrc
         self.process = subprocess.Popen(
-            [bash_path, '--rcfile', self.custom_bashrc_path],
+            [bash_path, '--noprofile'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr → stdout
@@ -212,8 +178,12 @@ PS1='$ '
             cwd=str(working_dir),
             env=env
         )
-
-        # Eat initial output (from custom bashrc) until ready
+        
+        # Setup PATH once
+        self.process.stdin.write(init_command)  
+        self.process.stdin.flush()
+        
+        # Eat initial output until ready
         self._eat_until_ready()
     
     def _eat_until_ready(self):
@@ -260,7 +230,7 @@ PS1='$ '
                     except (IndexError, ValueError):
                         exitcode = -1
                 break
-            
+
             output_lines.append(line)
         
         return ''.join(output_lines), exitcode
@@ -278,14 +248,6 @@ PS1='$ '
                     self.process.wait(timeout=2)
                 except:
                     self.process.kill()
-
-        # Cleanup temp bashrc file
-        if hasattr(self, 'custom_bashrc_path'):
-            try:
-                import os
-                os.unlink(self.custom_bashrc_path)
-            except:
-                pass
     
     def __del__(self):
         """Cleanup on garbage collection"""
@@ -526,75 +488,38 @@ class ExecutionEngine:
 
     def _build_bash_environment(self) -> dict:
         """
-        Build clean environment for Git Bash with Unix-style paths.
-
-        CRITICAL: Git Bash needs Unix-style PATH (/c/path NOT C:\\path)!
-
+        Build environment for Git Bash 
+        
         Process:
-        1. Take available bins (self.available_bins: {'python': 'C:\\Python\\python.exe'})
-        2. Convert Windows paths → Git Bash format (/c/Python)
-        3. Extract unique directories (not .exe files)
-        4. Build PATH with : separator (Unix-style)
-        5. Add essential environment variables
+            Take available bins (self.available_bins: {'python': 'C:\\Python\\python.exe'})
+  
 
         Returns:
-            Environment dict with Unix-style PATH for Git Bash
+            Environment dict with PATH for Git Bash
         """
         import os
 
-        # Start with minimal clean environment
-        env = {}
-
-        # Essential variables from current environment
-        essential_vars = ['HOME', 'USER', 'USERNAME', 'USERPROFILE', 'TEMP', 'TMP', 'SYSTEMROOT']
-        for var in essential_vars:
-            if var in os.environ:
-                env[var] = os.environ[var]
-
+        # Inhert environment
+        env = os.environ.copy()
+ 
         # Build PATH from available bins (convert Windows → Git Bash format)
-        unix_paths = []
+        paths = []
 
         for bin_name, bin_path_str in self.available_bins.items():
             # bin_path_str is like: C:\Python311\python.exe
             # We need directory: C:\Python311
             bin_path = Path(bin_path_str)
-            bin_dir = bin_path.parent
-
-            # Convert Windows path → Git Bash format
-            # C:\Python311 → /c/Python311
-            bin_dir_str = str(bin_dir)
-
-            if ':' in bin_dir_str:
-                # C:\path\to\dir → /c/path/to/dir
-                drive = bin_dir_str[0].lower()
-                rest = bin_dir_str[3:].replace('\\', '/')
-                unix_path = f'/{drive}/{rest}'
-            else:
-                # Just convert backslashes
-                unix_path = bin_dir_str.replace('\\', '/')
+            bin_dir = str(bin_path.parent)
 
             # Add to paths (avoid duplicates)
-            if unix_path not in unix_paths:
-                unix_paths.append(unix_path)
-                self.logger.debug(f"Added to PATH: {unix_path} (from {bin_name})")
+            if bin_dir not in paths:
+                paths.append(bin_dir)
+                self.logger.debug(f"Added to PATH: {bin_dir} (from {bin_name})")
 
-        # Add Git Bash's own bin directories (if bash_path is known)
-        if self.bash_path:
-            bash_bin_dir = Path(self.bash_path).parent
-            bash_dir_str = str(bash_bin_dir)
-
-            if ':' in bash_dir_str:
-                drive = bash_dir_str[0].lower()
-                rest = bash_dir_str[3:].replace('\\', '/')
-                bash_unix_path = f'/{drive}/{rest}'
-
-                if bash_unix_path not in unix_paths:
-                    unix_paths.append(bash_unix_path)
-                    self.logger.debug(f"Added Git Bash bin to PATH: {bash_unix_path}")
-
-        # Join with : (Unix-style PATH separator)
-        env['PATH'] = ':'.join(unix_paths)
-
+        # Join with ; 
+        env['PATH'] = ';'.join(paths)
+        env['MSYS2_PATH_TYPE'] = 'inherit'
+        
         self.logger.debug(f"Built Unix PATH for Git Bash: {env['PATH']}")
 
         return env
@@ -815,18 +740,15 @@ class ExecutionEngine:
                 stdout=stdout,
                 stderr=""
             )
-
+        
         # Convert Windows paths to Git Bash format (C:\path -> /c/path)
         git_command = self._windows_to_gitbash_paths(command)
 
-        # CRITICAL: Build clean environment for Git Bash with Unix-style PATH
-        # Git Bash needs /c/path NOT C:\path in PATH variable!
         env = self._build_bash_environment()
-
+        
         # ===== USE PERSISTENT SESSION =====
         if self.bash_session:
             try:
-                # PersistentBashSession already has PATH set by custom bashrc - don't prepend!
                 self.logger.debug(f"Executing via persistent session: {git_command}")
                 output, exitcode = self.bash_session.execute(git_command)
                 
@@ -847,7 +769,7 @@ class ExecutionEngine:
                         working_dir=str(self.working_dir)
                     )
                     self.logger.info("Recreated persistent bash session")
-                    # Retry command (no PATH prepend - bashrc handles it)
+                    # Retry command
                     output, exitcode = self.bash_session.execute(git_command)
                     return subprocess.CompletedProcess(
                         args=[self.bash_path, '-c', git_command],
@@ -860,14 +782,11 @@ class ExecutionEngine:
                     raise RuntimeError(f"Bash session failed: {e}") from e2
         # ==================================
 
-        # Fallback: subprocess.run() - need to prepend PATH
-        # IMPORTANT: Use double quotes to allow $PATH expansion!
-        path_prepend = f'export PATH="{env["PATH"]}:$PATH";\n'
-        full_command = path_prepend + git_command
-
-        self.logger.debug(f"Executing Git Bash (fallback): {git_command}")
+        # Fallback: old method (shouldn't happen)
+        
+        self.logger.debug(f"Executing NEW Git Bash: {git_command}")
         return subprocess.run(
-            [self.bash_path, '-c', full_command],
+            [self.bash_path, '-c', git_command],
             capture_output=True,
             text=True,
             cwd=str(self.working_dir),
