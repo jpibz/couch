@@ -100,7 +100,8 @@ class BashToolExecutor(ToolExecutor):
         super().__init__('bash_tool', enabled)
 
         # TESTMODE flag for testing purposes
-        TESTMODE = True  # Set to True for testing
+        # FALSE = PRODUCTION MODE - NO SHORTCUTS, EXPOSE ALL REAL BUGS!
+        TESTMODE = False
         self.TESTMODE = TESTMODE
         self.test_capabilities = test_capabilities
 

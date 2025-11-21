@@ -22,12 +22,10 @@ print("EXTREME FULL PATH TEST - Testing REAL execution flow")
 print("=" * 120)
 print()
 
-# Create executor with test_mode=True BUT it should still exercise full path
+# Create executor - NO test_mode parameter!
+# TESTMODE is hardcoded in BashToolExecutor.__init__
 workspace = Path(r'C:\Users\Test\workspace')
-executor = BashToolExecutor(
-    working_dir=workspace,
-    test_mode=True  # This should ONLY fake actual command execution, NOT skip validation/analysis
-)
+executor = BashToolExecutor(working_dir=workspace)
 
 def test(name, cmd):
     """Run test and show FULL TRACE"""
