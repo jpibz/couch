@@ -614,9 +614,11 @@ class CommandEmulator:
         
         if enable_escapes:
             # PowerShell for escape sequence support
-            # Replace \n, \t, etc with PowerShell backtick equivalents
+            # Replace both literal \n and actual newline characters with PowerShell backtick equivalents
+            # The bash parser may have already converted \n to newlines, or left them as \\n
             text = text.replace('\\n', '`n').replace('\\t', '`t').replace('\\r', '`r')
-            
+            text = text.replace('\n', '`n').replace('\t', '`t').replace('\r', '`r')
+
             if no_newline:
                 return f'powershell -Command "Write-Host -NoNewline \\"{text}\\""'
             else:
@@ -1003,16 +1005,19 @@ class CommandEmulator:
         
         if quiet:
             # Quiet mode: just exit code, no output
-            ps_cmd = f'if (Select-String -Pattern "{pattern}" -Path {files[0] if files else "*"} -Quiet) {{ exit 0 }} else {{ exit 1 }}'
+            if files:
+                ps_cmd = f'if (Select-String -Pattern "{pattern}" -Path {files[0]} -Quiet) {{ exit 0 }} else {{ exit 1 }}'
+            else:
+                ps_cmd = f'if ($input | Select-String -Pattern "{pattern}" -Quiet) {{ exit 0 }} else {{ exit 1 }}'
             return f'powershell -Command "{ps_cmd}"'
-        
+
         if line_numbers:
             # Select-String includes line numbers by default in output
             pass
-        
+
         if recursive:
             ps_flags.append('-Recurse')
-        
+
         # Extended regex (PowerShell uses .NET regex which is already extended)
         # So -E flag doesn't need special handling - just noted for completeness
         if extended_regex:
@@ -1021,49 +1026,59 @@ class CommandEmulator:
 
         if whole_word:
             pattern = f'\\b{pattern}\\b'
-        
+
         if exact_line:
             pattern = f'^{pattern}$'
-        
-        file_arg = files[0] if files else '*'
-        
-        # Build Select-String command
-        ps_cmd = f'Select-String -Pattern "{pattern}" -Path {file_arg} {" ".join(ps_flags)}'
-        
+
+        # Build Select-String command - handle stdin vs file differently
+        if files:
+            file_arg = files[0]
+            ps_cmd = f'Select-String -Pattern "{pattern}" -Path {file_arg} {" ".join(ps_flags)}'
+        else:
+            # Stdin - use $input | Select-String
+            ps_cmd = f'$input | Select-String -Pattern "{pattern}" {" ".join(ps_flags)}'
+
         # Post-processing
         post_process = []
-        
+
         if only_matching:
             post_process.append('ForEach-Object { $_.Matches.Value }')
-        
+
         if files_with_matches:
             post_process.append('Select-Object -Unique Path')
             post_process.append('ForEach-Object { $_.Path }')
-        
+
         if files_without_matches:
-            # Invert the logic
-            ps_cmd = f'$allFiles = Get-ChildItem {file_arg}; $matchFiles = {ps_cmd} | Select-Object -Unique Path; $allFiles | Where-Object {{ $matchFiles.Path -notcontains $_.FullName }} | ForEach-Object {{ $_.Name }}'
+            # Invert the logic (only works with files, not stdin)
+            if files:
+                ps_cmd = f'$allFiles = Get-ChildItem {file_arg}; $matchFiles = {ps_cmd} | Select-Object -Unique Path; $allFiles | Where-Object {{ $matchFiles.Path -notcontains $_.FullName }} | ForEach-Object {{ $_.Name }}'
+            else:
+                # For stdin, just use inverted match
+                ps_cmd = f'$input | Where-Object {{ $_ -notmatch "{pattern}" }}'
             return f'powershell -Command "{ps_cmd}"'
-        
+
         if count:
             post_process.append('Measure-Object')
             post_process.append('Select-Object -ExpandProperty Count')
-        
+
         if no_filename and len(files) == 1:
             post_process.append('ForEach-Object { $_.Line }')
         elif with_filename or len(files) > 1:
             post_process.append('ForEach-Object { "$($_.Filename):$($_.Line)" }')
-        
+
         if invert:
             # For invert, use different approach
-            ps_cmd = f'Get-Content {file_arg} | Where-Object {{ $_ -notmatch "{pattern}" }}'
-        
+            if files:
+                ps_cmd = f'Get-Content {file_arg} | Where-Object {{ $_ -notmatch "{pattern}" }}'
+            else:
+                ps_cmd = f'$input | Where-Object {{ $_ -notmatch "{pattern}" }}'
+
         if before_context or after_context:
             ps_cmd += f' -Context {before_context},{after_context}'
-        
+
         if post_process:
             ps_cmd += ' | ' + ' | '.join(post_process)
-        
+
         return f'powershell -Command "{ps_cmd}"'
     
     def _translate_find(self, cmd: str, parts):
@@ -2069,8 +2084,9 @@ class CommandEmulator:
         
         # Build sort command
         if not field_num and not numeric and not human:
-            # Simple sort - use native Windows sort
+            # Simple sort
             if files:
+                # For files, can use native Windows sort (compatible enough)
                 win_path = files[0]
                 cmd = f'sort "{win_path}"'
                 if reverse:
@@ -2079,12 +2095,13 @@ class CommandEmulator:
                     cmd += ' /unique'
                 return cmd
             else:
-                cmd = 'sort'
+                # For stdin, use PowerShell Sort-Object for better Unix compatibility
+                ps_cmd = '$input | Sort-Object'
                 if reverse:
-                    cmd += ' /r'
+                    ps_cmd += ' -Descending'
                 if unique:
-                    cmd += ' /unique'
-                return cmd
+                    ps_cmd += ' -Unique'
+                return f'powershell -Command "{ps_cmd}"'
         
         # Complex sort - PowerShell script
         # Default separator is whitespace
@@ -2369,6 +2386,18 @@ class CommandEmulator:
         return 'tasklist'
     
     def _translate_kill(self, cmd: str, parts):
+        # Handle -l flag (list signals)
+        if '-l' in parts:
+            # List common Unix signals
+            signals = [
+                ' 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL',
+                ' 5) SIGTRAP\t 6) SIGABRT\t 7) SIGBUS\t 8) SIGFPE',
+                ' 9) SIGKILL\t10) SIGUSR1\t11) SIGSEGV\t12) SIGUSR2',
+                '13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\t16) SIGSTKFLT',
+                '17) SIGCHLD\t18) SIGCONT\t19) SIGSTOP\t20) SIGTSTP'
+            ]
+            return 'echo ' + ' && echo '.join(signals)
+
         force = '-9' in parts or '-KILL' in parts
         pids = [p for p in parts[1:] if not p.startswith('-') and p.isdigit()]
         if pids:
@@ -2442,6 +2471,18 @@ class CommandEmulator:
           wget http://example.com/file.zip
           wget -O output.html http://example.com
         """
+        # Handle --help flag
+        if '--help' in parts or '-h' in parts:
+            help_text = [
+                'GNU Wget emulation - downloads files from the web',
+                'Usage: wget [OPTION]... [URL]...',
+                '',
+                'Common options:',
+                '  -O FILE    save to FILE',
+                '  --help     display this help'
+            ]
+            return 'echo ' + ' && echo '.join(f'"{line}"' for line in help_text)
+
         if len(parts) < 2:
             return 'echo Error: wget requires URL'
 
@@ -2475,7 +2516,7 @@ class CommandEmulator:
     def _translate_curl(self, cmd: str, parts):
         """
         Translate curl with COMPLETE flag support for API work.
-        
+
         Common flags:
         - -X METHOD: request method (GET, POST, PUT, DELETE, PATCH)
         - -H "Header: value": headers (multiple)
@@ -2496,6 +2537,22 @@ class CommandEmulator:
         - -A "agent": user agent
         - -F file=@path: multipart form upload
         """
+        # Handle --help flag
+        if '--help' in parts or '-h' in parts:
+            help_text = [
+                'curl emulation - transfer data with URLs',
+                'Usage: curl [options...] <url>',
+                '',
+                'Common options:',
+                '  -X METHOD   HTTP method (GET, POST, etc)',
+                '  -H HEADER   add header',
+                '  -d DATA     POST data',
+                '  -o FILE     save to file',
+                '  -L          follow redirects',
+                '  --help      display this help'
+            ]
+            return 'echo ' + ' && echo '.join(f'"{line}"' for line in help_text)
+
         if len(parts) < 2:
             return 'echo Error: curl requires URL'
         
@@ -2803,8 +2860,13 @@ class CommandEmulator:
         return 'echo %date% %time%'
     
     def _translate_sleep(self, cmd: str, parts):
-        if len(parts) > 1 and parts[1].isdigit():
-            return f'timeout /t {parts[1]} /nobreak'
+        if len(parts) > 1:
+            try:
+                seconds = float(parts[1])
+                # Use PowerShell Start-Sleep for decimal support (timeout only accepts integers)
+                return f'powershell -Command "Start-Sleep -Seconds {seconds}"'
+            except ValueError:
+                pass
         return 'echo Error: sleep requires seconds'
     
     def _translate_basename(self, cmd: str, parts):
@@ -3378,7 +3440,15 @@ class CommandEmulator:
                 i += 1
             elif not parts[i].startswith('-'):
                 if program is None:
+                    # Start building program - may span multiple parts if split incorrectly
                     program = parts[i]
+                    # If program starts with { but doesn't end with }, collect more parts
+                    if '{' in program and not program.endswith('}'):
+                        i += 1
+                        while i < len(parts) and not program.endswith('}'):
+                            program += ' ' + parts[i]
+                            i += 1
+                        i -= 1  # Back up one since we'll increment at end
                 else:
                     win_path = parts[i]  # Already translated
                     files.append(win_path)
@@ -3388,7 +3458,11 @@ class CommandEmulator:
         
         if not program:
             return 'echo Error: awk requires program'
-        
+
+        # Filter out invalid "files" that are actually parts of incorrectly split awk program
+        # If a "file" contains awk syntax characters ($, {, }), it's likely a parsing artifact
+        files = [f for f in files if not any(c in f for c in ['$', '{', '}'])]
+
         # Default field separator
         if not field_separator:
             field_separator = '\\s+'
@@ -3432,20 +3506,21 @@ class CommandEmulator:
             if block_match:
                 main_block = block_match.group(1).strip()
         
-        # Convert awk operations to PowerShell
-        file_arg = f'"{files[0]}"' if files else '$input'
-        
         # Build PowerShell fallback script
         ps_lines = []
-        
+
         # BEGIN block
         if begin_block:
             ps_begin = self._awk_to_ps_statement(begin_block)
             ps_lines.append(ps_begin)
-        
+
         # Main processing
         ps_main = []
-        ps_main.append(f'Get-Content {file_arg} | ForEach-Object {{')
+        # Handle stdin vs file differently
+        if files:
+            ps_main.append(f'Get-Content "{files[0]}" | ForEach-Object {{')
+        else:
+            ps_main.append('$input | ForEach-Object {')
         ps_main.append(f'  $F = $_ -split "{field_separator}"')
         ps_main.append('  $NF = $F.Length')
         
@@ -3565,41 +3640,42 @@ class CommandEmulator:
             else:
                 i += 1
         
-        file_arg = f'\\"{files[0]}\\"' if files else '$input'
-        
+        # Determine input source (stdin or file)
+        input_src = f'Get-Content \\"{files[0]}\\"' if files else '$input'
+
         # Field extraction with delimiter
         if fields and delimiter:
             # Parse field spec
             field_list = self._parse_cut_range(fields)
-            
+
             if complement:
                 # Complement: select all EXCEPT specified fields
-                ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ $F = $_ -split \\"{delimiter}\\"; $indices = 0..($F.Length-1) | Where-Object {{ {field_list} -notcontains $_ }}; ($F[$indices]) -join \\"{delimiter}\\" }}'
+                ps_cmd = f'{input_src} | ForEach-Object {{ $F = $_ -split \\"{delimiter}\\"; $indices = 0..($F.Length-1) | Where-Object {{ {field_list} -notcontains $_ }}; ($F[$indices]) -join \\"{delimiter}\\" }}'
             else:
-                ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ $F = $_ -split \\"{delimiter}\\"; ($F[{field_list}]) -join \\"{delimiter}\\" }}'
-            
+                ps_cmd = f'{input_src} | ForEach-Object {{ $F = $_ -split \\"{delimiter}\\"; ($F[{field_list}]) -join \\"{delimiter}\\" }}'
+
             return f'powershell -Command "{ps_cmd}"'
-        
+
         # Character extraction
         elif characters:
             char_list = self._parse_cut_range(characters)
-            
+
             if complement:
-                ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ $chars = $_.ToCharArray(); $indices = 0..($chars.Length-1) | Where-Object {{ {char_list} -notcontains $_ }}; -join $chars[$indices] }}'
+                ps_cmd = f'{input_src} | ForEach-Object {{ $chars = $_.ToCharArray(); $indices = 0..($chars.Length-1) | Where-Object {{ {char_list} -notcontains $_ }}; -join $chars[$indices] }}'
             else:
-                ps_cmd = f'Get-Content {file_arg} | ForEach-Object {{ -join $_.ToCharArray()[{char_list}] }}'
-            
+                ps_cmd = f'{input_src} | ForEach-Object {{ -join $_.ToCharArray()[{char_list}] }}'
+
             return f'powershell -Command "{ps_cmd}"'
-        
+
         # Byte extraction (similar to character but works on bytes)
         elif bytes_range:
             byte_list = self._parse_cut_range(bytes_range)
-            
+
             if complement:
-                ps_cmd = f'Get-Content {file_arg} -Encoding Byte | ForEach-Object {{ $bytes = $_; $indices = 0..($bytes.Length-1) | Where-Object {{ {byte_list} -notcontains $_ }}; $bytes[$indices] }}'
+                ps_cmd = f'{input_src} -Encoding Byte | ForEach-Object {{ $bytes = $_; $indices = 0..($bytes.Length-1) | Where-Object {{ {byte_list} -notcontains $_ }}; $bytes[$indices] }}'
             else:
-                ps_cmd = f'Get-Content {file_arg} -Encoding Byte | ForEach-Object {{ $_[{byte_list}] }}'
-            
+                ps_cmd = f'{input_src} -Encoding Byte | ForEach-Object {{ $_[{byte_list}] }}'
+
             return f'powershell -Command "{ps_cmd}"'
         
         return 'echo Error: cut requires -f (with -d), -c, or -b'
@@ -3783,28 +3859,50 @@ class CommandEmulator:
         # Unknown test format - fail
         return 'exit 1'
     
+    def _expand_tr_set(self, char_set: str) -> str:
+        """
+        Expand character ranges in tr set (e.g., 'a-z' -> 'abcd...xyz').
+        Handles ranges like a-z, A-Z, 0-9, etc.
+        """
+        result = []
+        i = 0
+        while i < len(char_set):
+            # Check for range pattern: X-Y
+            if i + 2 < len(char_set) and char_set[i + 1] == '-':
+                start_char = char_set[i]
+                end_char = char_set[i + 2]
+                # Expand range
+                for code in range(ord(start_char), ord(end_char) + 1):
+                    result.append(chr(code))
+                i += 3
+            else:
+                result.append(char_set[i])
+                i += 1
+        return ''.join(result)
+
     def _translate_tr(self, cmd: str, parts):
         """
         Translate tr (translate characters).
-        
+
         Usage: tr SET1 SET2
         Flags: -d (delete), -s (squeeze), -c (complement)
         """
         if len(parts) < 2:
             return 'echo Error: tr requires arguments'
-        
+
         delete_mode = '-d' in parts
         squeeze = '-s' in parts
         complement = '-c' in parts
-        
+
         # Remove flags
         sets = [p for p in parts[1:] if not p.startswith('-')]
-        
+
         if not sets:
             return 'echo Error: tr requires character sets'
-        
-        set1 = sets[0]
-        set2 = sets[1] if len(sets) > 1 else ''
+
+        # Expand character ranges (e.g., a-z -> abcd...xyz)
+        set1 = self._expand_tr_set(sets[0])
+        set2 = self._expand_tr_set(sets[1]) if len(sets) > 1 else ''
         
         # Handle complement flag
         if complement:
@@ -5612,14 +5710,22 @@ class CommandEmulator:
         
         if is_simple:
             # PowerShell fallback for simple patterns
+            jq_flags = []
+            if raw_output:
+                jq_flags.append('-r')
+            if compact:
+                jq_flags.append('-c')
+            jq_flags_str = ' '.join(jq_flags)
+            jq_cmd = f"& jq.exe {jq_flags_str} '{filter_expr}'" if jq_flags_str else f"& jq.exe '{filter_expr}'"
+
             ps_script = f'''
                 # Try jq.exe first
                 $jqExe = Get-Command jq.exe -ErrorAction SilentlyContinue
                 if ($jqExe) {{
-                    {file_input} | & jq.exe {'-r' if raw_output else ''} {'-c' if compact else ''} '{filter_expr}'
+                    {file_input} | {jq_cmd}
                     exit $LASTEXITCODE
                 }}
-                
+
                 # Fallback: PowerShell for simple patterns
                 $json = {file_input} | Out-String | ConvertFrom-Json
                 $result = $json
@@ -5654,10 +5760,18 @@ class CommandEmulator:
                 '''
         else:
             # Complex pattern - REQUIRES jq.exe
+            jq_flags = []
+            if raw_output:
+                jq_flags.append('-r')
+            if compact:
+                jq_flags.append('-c')
+            jq_flags_str = ' '.join(jq_flags)
+            jq_cmd = f"& jq.exe {jq_flags_str} '{filter_expr}'" if jq_flags_str else f"& jq.exe '{filter_expr}'"
+
             ps_script = f'''
                 $jqExe = Get-Command jq.exe -ErrorAction SilentlyContinue
                 if ($jqExe) {{
-                    {file_input} | & jq.exe {'-r' if raw_output else ''} {'-c' if compact else ''} '{filter_expr}'
+                    {file_input} | {jq_cmd}
                     exit $LASTEXITCODE
                 }} else {{
                     Write-Host "jq: complex filter requires jq.exe (install via Git for Windows, scoop, or chocolatey)"
