@@ -141,6 +141,120 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, List
 
+
+class PersistentBashSession:
+    """
+    Persistent bash session - ONE user, ONE marker, BRUTAL efficiency
+    
+    CRITICAL: Commands must NOT be interactive (no stdin required)
+    """
+    
+    # Marker improbabile - mix di caratteri che difficilmente appare in output
+    MARKER = "<<<__EOF_b4sh_x9z_cmd_DONE_f7e3a2__>>>"
+    
+    def __init__(self, bash_path: str, env: dict, working_dir: Path):
+        
+        # ===== DIAGNOSTIC HEADER =====
+        # Add diagnostic info BEFORE the actual command
+        init_command = f"""
+    export PATH='$PATH:{env['PATH']}';\n
+    echo "====== BASH DIAGNOSTIC INFO ======" >&2
+    echo "PATH: $PATH" >&2
+    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Working dir: $(pwd)" >&2
+    echo "Environment vars: HOME=$HOME USER=$USER" >&2
+    echo "===================================" >&2
+    """
+        
+        """Initialize persistent bash session"""
+        self.process = subprocess.Popen(
+            [bash_path, '--norc', '--noprofile'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr → stdout
+            text=True,
+            encoding='utf-8',
+            bufsize=1,  # Line buffered
+            cwd=str(working_dir),
+            env=env
+        )
+        
+        # Setup PATH once
+        self.process.stdin.write(init_command)  
+        self.process.stdin.flush()
+        
+        # Eat initial output until ready
+        self._eat_until_ready()
+    
+    def _eat_until_ready(self):
+        """Wait for bash to be ready"""
+        self.process.stdin.write(f"echo '{self.MARKER}'\n")
+        self.process.stdin.flush()
+        
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                raise RuntimeError("Bash process died during initialization")
+            if self.MARKER in line:
+                break
+    
+    def execute(self, command: str) -> tuple[str, int]:
+        """Execute command and return (stdout, exitcode)"""
+        full_cmd = (
+            f"{command}\n"
+            f"__EXITCODE=$?\n"
+            f"echo '{self.MARKER}'\n"
+            f"echo 'EXITCODE:'$__EXITCODE\n"
+        )
+        
+        self.process.stdin.write(full_cmd)
+        self.process.stdin.flush()
+        
+        output_lines = []
+        exitcode = 0
+        
+        while True:
+            line = self.process.stdout.readline()
+            
+            if not line:
+                raise RuntimeError("Bash process died during command execution")
+            
+            if self.MARKER in line:
+                exitcode_line = self.process.stdout.readline()
+                if not exitcode_line:
+                    raise RuntimeError("Missing exitcode line after marker")
+                    
+                if exitcode_line.startswith("EXITCODE:"):
+                    try:
+                        exitcode = int(exitcode_line.split(":")[1].strip())
+                    except (IndexError, ValueError):
+                        exitcode = -1
+                break
+            
+            output_lines.append(line)
+        
+        return ''.join(output_lines), exitcode
+    
+    def close(self):
+        """Close bash session gracefully"""
+        if hasattr(self, 'process') and self.process.poll() is None:
+            try:
+                self.process.stdin.write("exit\n")
+                self.process.stdin.flush()
+                self.process.wait(timeout=5)
+            except:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except:
+                    self.process.kill()
+    
+    def __del__(self):
+        """Cleanup on garbage collection"""
+        self.close()
+        
+
 class ExecutionEngine:
     """
     UNICO PUNTO di esecuzione subprocess.
@@ -217,12 +331,30 @@ class ExecutionEngine:
             self._setup_test_environment()
             self.virtual_env = None
             self.environment = os.environ.copy()
+            self.bash_session = None  # No persistent session in test mode
         else:
             # Setup virtual environment
             self.virtual_env = self._setup_virtual_env(None)
 
             # Setup execution environment
             self.environment = self._setup_environment()
+
+        # ===== CREATE PERSISTENT BASH SESSION =====
+        if self.bash_available:
+            try:
+                env = self._build_bash_environment()
+                self.bash_session = PersistentBashSession(
+                    bash_path=self.bash_path,
+                    env=env,
+                    working_dir=self.working_dir
+                )
+                self.logger.info("Persistent bash session created")
+            except Exception as e:
+                self.logger.error(f"Failed to create persistent bash session: {e}")
+                self.bash_session = None
+        else:
+            self.bash_session = None
+        # ==========================================
 
         # Execution statistics
         self.stats = {
@@ -433,22 +565,16 @@ class ExecutionEngine:
     def _simulate_command_output(self, command: str, stdin: str = None) -> str:
         """
         Simulate realistic command output for test mode
-
+        
         Args:
             command: Command string
             stdin: Optional stdin data
-
+            
         Returns:
             Simulated output
         """
-        # Parse command respecting quotes
-        import shlex
-        try:
-            parts = shlex.split(command)
-        except ValueError:
-            # Fallback to simple split if shlex fails
-            parts = command.split()
-
+        # Parse command
+        parts = command.split()
         if not parts:
             return ""
         
@@ -457,39 +583,8 @@ class ExecutionEngine:
         
         # Simulate common commands
         if cmd == 'echo':
-            # Handle echo flags: -e (enable escapes), -n (no newline)
-            interpret_escapes = False
-            no_newline = False
-            output_args = []
-
-            for arg in args:
-                if arg == '-e':
-                    interpret_escapes = True
-                elif arg == '-n':
-                    no_newline = True
-                elif arg == '-ne' or arg == '-en':
-                    interpret_escapes = True
-                    no_newline = True
-                elif arg.startswith('-'):
-                    # Unknown flag, treat as literal
-                    output_args.append(arg)
-                else:
-                    output_args.append(arg)
-
-            output = ' '.join(output_args)
-
-            # Interpret escape sequences if -e flag
-            if interpret_escapes:
-                output = output.replace('\\n', '\n')
-                output = output.replace('\\t', '\t')
-                output = output.replace('\\r', '\r')
-                output = output.replace('\\\\', '\\')
-
-            # Add newline unless -n flag
-            if not no_newline:
-                output += '\n'
-
-            return output
+            # Echo just returns the arguments
+            return ' '.join(args) + '\n'
         
         elif cmd == 'cat':
             # Cat returns stdin or file marker
@@ -691,9 +786,69 @@ class ExecutionEngine:
         # Git Bash needs /c/path NOT C:\path in PATH variable!
         env = self._build_bash_environment()
 
+        # ===== FIXED HEADER: PREPEND our paths to existing PATH =====
+        # Bash loads .bashrc which sets PATH, we APPEND our bins to it!
+        path_prepend = f"export PATH='$PATH:{env['PATH']}';\n"
+
+        # Prepend diagnostic to actual command
+        full_command = path_prepend + git_command
+        # =============================
+        
+        # ===== USE PERSISTENT SESSION =====
+        if self.bash_session:
+            try:
+                self.logger.debug(f"Executing via persistent session: {full_command}")
+                output, exitcode = self.bash_session.execute(full_command)
+                
+                return subprocess.CompletedProcess(
+                    args=[self.bash_path, '-c', git_command],
+                    returncode=exitcode,
+                    stdout=output,
+                    stderr=""  # Already merged in stdout
+                )
+            except RuntimeError as e:
+                self.logger.error(f"Persistent bash session died: {e}")
+                # Session died - try to recreate
+                try:
+
+                    self.bash_session = PersistentBashSession(
+                        bash_path=self.bash_path,
+                        env=env,
+                        working_dir=str(self.working_dir)
+                    )
+                    self.logger.info("Recreated persistent bash session")
+                    # Retry command
+                    output, exitcode = self.bash_session.execute(full_command)
+                    return subprocess.CompletedProcess(
+                        args=[self.bash_path, '-c', git_command],
+                        returncode=exitcode,
+                        stdout=output,
+                        stderr=""
+                    )
+                except Exception as e2:
+                    self.logger.error(f"Failed to recreate session: {e2}")
+                    raise RuntimeError(f"Bash session failed: {e}") from e2
+        # ==================================
+
+        # Fallback: old method (shouldn't happen)
+    
+        '''
+        # ===== DIAGNOSTIC HEADER =====
+        # Add diagnostic info BEFORE the actual command
+        diagnostic_header = """
+    echo "====== BASH DIAGNOSTIC INFO ======" >&2
+    echo "PATH: $PATH" >&2
+    echo "Python location: $(which python 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Python3 location: $(which python3 2>&1 || echo 'NOT FOUND')" >&2
+    echo "Working dir: $(pwd)" >&2
+    echo "Environment vars: HOME=$HOME USER=$USER" >&2
+    echo "===================================" >&2
+    """
+        '''
+    
         self.logger.debug(f"Executing Git Bash: {git_command}")
         return subprocess.run(
-            [self.bash_path, '-c', git_command],  # CRITICAL: Use git_command NOT command!
+            [self.bash_path, '-c', full_command],
             capture_output=True,
             text=True,
             cwd=str(self.working_dir),
@@ -862,3 +1017,13 @@ class ExecutionEngine:
         
         return env
 
+    def close(self):
+        """Close persistent bash session"""
+        if hasattr(self, 'bash_session') and self.bash_session:
+            self.bash_session.close()
+            self.bash_session = None
+            self.logger.info("Persistent bash session closed")
+    
+    def __del__(self):
+        """Cleanup on destruction"""
+        self.close()
