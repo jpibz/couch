@@ -18,7 +18,7 @@ from typing import List, Tuple, Set
 from dataclasses import dataclass
 
 # AST node types
-from bash_pipeline_parser import (
+from .bash_pipeline_parser import (
     SimpleCommand, Pipeline, AndList, OrList, Sequence,
     Subshell, CommandGroup, Background, ProcessSubstitution
 )

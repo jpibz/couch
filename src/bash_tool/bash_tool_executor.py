@@ -61,10 +61,10 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict
 import subprocess
-from tool_executor import ToolExecutor
-from sandbox_validator import SandboxValidator
-from command_executor import CommandExecutor
-from path_translator import PathTranslator
+from .tool_executor import ToolExecutor
+from .sandbox_validator import SandboxValidator
+from .command_executor import CommandExecutor
+from .path_translator import PathTranslator
 
 class BashToolExecutor(ToolExecutor):
     """
@@ -85,20 +85,24 @@ class BashToolExecutor(ToolExecutor):
     """
 
     def __init__(self, working_dir: str, enabled: bool = False,
+                 test_capabilities: dict = None,
                  **kwargs):
         """
         Initialize BashToolExecutor
-        
+
         Args:
             working_dir: Tool working directory (from ConfigurationManager)
             enabled: Tool enabled state
-            
+            test_capabilities: Dict to override capability detection in test mode
+                Example: {'bash': False, 'grep': True} forces manual emulation
+
         """
         super().__init__('bash_tool', enabled)
 
         # TESTMODE flag for testing purposes
         TESTMODE = True  # Set to True for testing
         self.TESTMODE = TESTMODE
+        self.test_capabilities = test_capabilities
 
         self.working_dir = Path(working_dir)
 
@@ -117,7 +121,8 @@ class BashToolExecutor(ToolExecutor):
         self.command_executor = CommandExecutor(
             working_dir=self.working_dir,
             logger=self.logger,
-            test_mode=self.TESTMODE
+            test_mode=self.TESTMODE,
+            test_capabilities=self.test_capabilities  # PROPAGATE test_capabilities!
         )
 
         self.logger.info(
