@@ -2502,7 +2502,12 @@ class CommandEmulator:
             return 'echo Error: wget requires URL'
 
         # Convert to curl command
-        if output:
+        if output == '-':
+            # -O- means output to stdout (don't save to file)
+            curl_cmd = f'curl "{urls[0]}"'
+            curl_parts = ['curl', urls[0]]
+        elif output:
+            # -O filename: save to specific file
             curl_cmd = f'curl -o "{output}" "{urls[0]}"'
             curl_parts = ['curl', '-o', output, urls[0]]
         else:
@@ -4429,10 +4434,26 @@ class CommandEmulator:
         """
         check_mode = '-c' in parts or '--check' in parts
         files = [p for p in parts[1:] if not p.startswith('-')]
-        
-        if not files:
-            return f'echo Error: {cmd_name} requires filename'
-        
+
+        # Check mode requires file
+        if check_mode and not files:
+            return f'echo Error: {cmd_name} --check requires filename'
+
+        # Stdin support: if no files, hash from stdin
+        if not files and not check_mode:
+            ps_script = f'''
+                $stream = [System.IO.StreamReader]::new([Console]::OpenStandardInput())
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($stream.ReadToEnd())
+                $stream.Close()
+
+                $hasher = [System.Security.Cryptography.{algorithm}]::Create()
+                $hash = $hasher.ComputeHash($bytes)
+                $hashString = [System.BitConverter]::ToString($hash).Replace('-','').ToLower()
+
+                Write-Output ($hashString + "  -")
+            '''
+            return f'powershell -Command "{ps_script}"'
+
         if check_mode:
             # Check mode: verify checksums from file
             checksum_file = files[0]
@@ -4833,23 +4854,31 @@ class CommandEmulator:
         
         if not command:
             return 'echo Error: watch requires command'
-        
-        # Translate Unix command to Windows if needed
-        # For now, assume command is already valid for Windows
-        # TODO: Could recursively translate the watched command
-        
+
+        # Translate Unix command to Windows recursively
+        # Strip quotes if command is quoted
+        if (command.startswith('"') and command.endswith('"')) or \
+           (command.startswith("'") and command.endswith("'")):
+            command = command[1:-1]
+
+        # Recursively translate the watched command
+        translated_command = self.emulate_command(command)
+
+        # Escape quotes for PowerShell
+        translated_command = translated_command.replace('"', '`"')
+
         ps_script = f'''
             while ($true) {{
                 Clear-Host
                 Write-Host "Every {interval}s: {command}"
                 Write-Host ""
-                
+
                 try {{
-                    Invoke-Expression "{command}"
+                    Invoke-Expression "{translated_command}"
                 }} catch {{
                     Write-Error $_.Exception.Message
                 }}
-                
+
                 Start-Sleep -Seconds {interval}
             }}
         '''

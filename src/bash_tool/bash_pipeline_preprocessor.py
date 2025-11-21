@@ -272,11 +272,16 @@ class BashPipelinePreprocessor:
             # Strip tabs if <<-
             if strip_tabs:
                 content = '\n'.join(line.lstrip('\t') for line in content_lines)
-            
-            # Variable expansion in heredoc (if unquoted)
-            # TODO: This could use BashCommandPreprocessor for variable expansion
-            # For now, skip (bash will expand if we pass to bash)
-            
+
+            # Variable expansion in heredoc (if unquoted delimiter)
+            # If delimiter is quoted (<<"EOF" or <<'EOF'), don't expand
+            # If delimiter is unquoted (<<EOF), expand variables
+            if not quote_char:
+                # Unquoted delimiter - expand variables using BashCommandPreprocessor
+                # Access via self.executor.command_preprocessor
+                if hasattr(self.executor, 'command_preprocessor'):
+                    content = self.executor.command_preprocessor._expand_variables(content)
+
             # Create temp file (WINDOWS PATH!)
             temp_file = self.temp_dir / f'heredoc_{nesting_level}_{threading.get_ident()}_{len(temp_files)}.tmp'
             

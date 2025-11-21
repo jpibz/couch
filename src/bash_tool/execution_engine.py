@@ -743,6 +743,11 @@ class ExecutionEngine:
         # Convert Windows paths to Git Bash format (C:\path -> /c/path)
         git_command = self._windows_to_gitbash_paths(command)
 
+        # Replace 'python' with 'python3' for Git Bash
+        # Git Bash on Windows typically has python3, not python
+        # Use word boundaries to avoid replacing inside strings/paths
+        git_command = re.sub(r'\bpython\b', 'python3', git_command)
+
         env = self._build_bash_environment()
         
         # ===== USE PERSISTENT SESSION =====

@@ -33,16 +33,18 @@ class BashCommandPreprocessor:
     2. DANGEROUS translation (only for emulation) - translates syntax
     """
 
-    def __init__(self, logger=None, context: Optional[BashVariableContext] = None):
+    def __init__(self, logger=None, context: Optional[BashVariableContext] = None, working_dir=None):
         """
         Initialize preprocessor
 
         Args:
             logger: Logger instance
             context: Bash variable context for local variables
+            working_dir: Working directory for tilde expansion (defaults to ~)
         """
         self.logger = logger or logging.getLogger('BashCommandPreprocessor')
         self.context = context or BashVariableContext()
+        self.working_dir = working_dir
     
     # ========================================================================
     # CATEGORIA 1: SAFE EXPANSION (SEMPRE!)
@@ -147,13 +149,12 @@ class BashCommandPreprocessor:
         Example: ~/docs → C:\\Users\\User\\working_dir\\docs
         """
         # Get working directory (WINDOWS PATH!)
-        # This should be passed from BashToolExecutor's working dir
-        # For now, use a placeholder that can be configured
-        home_dir = os.path.expanduser('~')  # Windows home
-        
-        # TODO: Should use actual Claude working dir from config
-        # home_dir = self.working_dir if hasattr(self, 'working_dir') else os.path.expanduser('~')
-        
+        # Use working_dir if provided, otherwise fallback to user home
+        if self.working_dir:
+            home_dir = str(self.working_dir)  # Working dir (Windows path)
+        else:
+            home_dir = os.path.expanduser('~')  # User home (Windows path)
+
         # Expand ~/
         if command.startswith('~/'):
             # Windows path separator!
