@@ -231,46 +231,67 @@ class PipelineAnalyzer:
     def _decide_strategy(self, ast, commands: List[CommandInfo]) -> Tuple[str, str]:
         """
         Decide execution strategy based on analysis
-        
+
         DECISION TREE:
         1. Complex structure (subshell, background)? → BASH_FULL (let bash handle)
         2. No bash.exe available? → MANUAL
-        3. ALL commands available (builtin or native)? → BASH_FULL (passthrough!)
-        4. SOME commands need emulation? → MANUAL (for now, HYBRID in future)
-        
+        3. Has NATIVE binaries? → MANUAL (prefer native execution, like ExecuteUnixSingleCommand)
+        4. ALL commands available (builtin only)? → BASH_FULL (passthrough!)
+        5. SOME commands need emulation? → MANUAL (for now, HYBRID in future)
+
+        FILOSOFIA "BINS NATIVI":
+        - Se pipeline contiene bins nativi (grep.exe, awk.exe, etc.)
+        - PREFERIRE esecuzione MANUALE per eseguirli DIRETTAMENTE
+        - Replica logica di ExecuteUnixSingleCommand: Native Bin > Bash Git
+        - Performance: native .exe diretto > bash.exe che chiama .exe
+
         Args:
             ast: Root AST node
             commands: List of CommandInfo
-            
+
         Returns:
             (strategy, reason)
         """
         # Check if bash.exe is available
         if not self.engine.bash_available:
             return ('manual', 'bash.exe not available')
-        
+
         # Check for complex structures that bash should handle
         if self._has_complex_structure(ast):
             return ('bash_full', 'complex structure (subshell/background/etc)')
-        
+
+        # NEW: Check if there are NATIVE binaries
+        # If yes, prefer MANUAL execution to run them directly
+        has_native_bins = any(cmd.is_native for cmd in commands)
+
         # Check command availability
         all_available = all(
-            cmd.is_builtin or cmd.is_native 
+            cmd.is_builtin or cmd.is_native
             for cmd in commands
         )
-        
+
+        # DECISION FACTOR: NATIVE BINS
+        # If native bins present, prefer MANUAL execution
+        # This follows ExecuteUnixSingleCommand philosophy: Native > Bash
+        if has_native_bins and all_available:
+            native_names = [cmd.name for cmd in commands if cmd.is_native]
+            return (
+                'manual',
+                f'prefer native execution for bins: {", ".join(native_names[:3])}'
+            )
+
+        # Only BUILTINS available → PASSTHROUGH to bash.exe
         if all_available:
-            # ALL commands available! PASSTHROUGH!
-            return ('bash_full', f'all {len(commands)} commands available (builtin or native)')
-        
+            return ('bash_full', f'all {len(commands)} commands available (builtin only)')
+
         # Some commands need emulation
         missing_count = sum(1 for cmd in commands if cmd.needs_emulation)
         missing_names = [cmd.name for cmd in commands if cmd.needs_emulation]
-        
+
         # For now: MANUAL
         # Future: HYBRID (split pipeline at emulation points)
         return (
-            'manual', 
+            'manual',
             f'{missing_count} commands need emulation: {", ".join(missing_names[:3])}'
         )
     
