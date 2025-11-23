@@ -280,15 +280,83 @@ class PathTranslator:
             raise ValueError(f"Invalid direction: {direction}")
     
     def _translate_unix_paths_to_windows(self, text: str) -> str:
-        """Find and translate Unix absolute paths → Windows"""
+        """
+        Find and translate Unix absolute paths → Windows
+
+        STRATEGY (TWO-PASS WITH MARKERS):
+        1. First pass: Translate known paths (home/claude, uploads, outputs) → MARKER
+        2. Second pass: Translate other Unix absolute paths as relative to /home/claude/
+        3. Final: Replace all markers with actual paths
+
+        EXAMPLES:
+        - /home/claude/file.txt → workspace_root/claude/file.txt (known path)
+        - /mnt/user-data/uploads/data.csv → workspace_root/uploads/data.csv (known path)
+        - /tmp/file.txt → workspace_root/claude/tmp/file.txt (relative path, DEFAULT)
+        - /var/log/app.log → workspace_root/claude/var/log/app.log (relative path, DEFAULT)
+        """
+
+        # Marker for translated paths (prevents double-translation)
+        MARKER_PREFIX = "<<<TRANSLATED_PATH_"
+        MARKER_SUFFIX = ">>>"
+        translated_paths = {}  # marker_id → actual_path
+        marker_counter = [0]  # Use list for mutable counter in closure
+
+        # PASS 1: Known paths (home/claude, uploads, outputs)
         # Pattern: Unix absolute path for home/uploads/outputs
         # Matches: /home/claude/..., /mnt/user-data/uploads/..., /mnt/user-data/outputs/...
-        pattern = r'(/(?:home/claude|mnt/user-data/(?:uploads|outputs))(?:/[\w\-\.]+)*)'
-        
-        def replace_path(match):
+        pattern_known = r'(/(?:home/claude|mnt/user-data/(?:uploads|outputs))(?:/[\w\-\.]+)*)'
+
+        def replace_known_path(match):
             unix_path = match.group(1)
             try:
                 windows_path = self.to_windows(unix_path)
+                # Quote if contains spaces
+                if ' ' in str(windows_path):
+                    windows_path_str = f'"{windows_path}"'
+                else:
+                    windows_path_str = str(windows_path)
+
+                # Use marker to prevent double-translation
+                marker_id = marker_counter[0]
+                marker_counter[0] += 1
+                marker = f"{MARKER_PREFIX}{marker_id}{MARKER_SUFFIX}"
+                translated_paths[marker] = windows_path_str
+                return marker
+            except Exception:
+                # Keep original if translation fails
+                return unix_path
+
+        text = re.sub(pattern_known, replace_known_path, text)
+
+        # PASS 2: Other Unix absolute paths (DEFAULT: relative to /home/claude/)
+        # Pattern: Unix absolute path that is NOT already translated
+        # Matches: /tmp/..., /var/..., /etc/..., etc.
+        # Excludes: Known paths (home/claude, mnt/user-data) and markers
+        pattern_relative = r'(/(?!home/claude|mnt/user-data/)[\w\-\.]+(?:/[\w\-\.]+)*)'
+
+        def replace_relative_path(match):
+            unix_path = match.group(1)
+
+            # Skip if INSIDE a marker (between PREFIX and SUFFIX)
+            # Check if there's an unclosed PREFIX before this match
+            match_start = match.start()
+            context_before = text[max(0, match_start-50):match_start]
+
+            # Count PREFIX and SUFFIX in context_before
+            prefix_count = context_before.count(MARKER_PREFIX)
+            suffix_count = context_before.count(MARKER_SUFFIX)
+
+            # If more PREFIXes than SUFFIXes, we're inside a marker
+            if prefix_count > suffix_count:
+                # Inside a marker, skip
+                return unix_path
+
+            # Translate as relative to /home/claude/
+            # /tmp/file.txt → /home/claude/tmp/file.txt
+            relative_unix_path = f"{self.unix_home}{unix_path}"
+
+            try:
+                windows_path = self.to_windows(relative_unix_path)
                 # Quote if contains spaces
                 if ' ' in str(windows_path):
                     return f'"{windows_path}"'
@@ -296,8 +364,14 @@ class PathTranslator:
             except Exception:
                 # Keep original if translation fails
                 return unix_path
-        
-        return re.sub(pattern, replace_path, text)
+
+        text = re.sub(pattern_relative, replace_relative_path, text)
+
+        # FINAL: Replace all markers with actual translated paths
+        for marker, path in translated_paths.items():
+            text = text.replace(marker, path)
+
+        return text
     
     def _translate_windows_paths_to_unix(self, text: str) -> str:
         """Find and translate Windows paths → Unix (only workspace paths)"""
