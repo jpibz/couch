@@ -65,7 +65,7 @@ class BaseAgentHandler(ABC):
         pass
     
     @abstractmethod
-    def parse_sse_event(self, data: Dict, is_multi_call_session: bool = False) -> Optional[StreamEvent]:
+    def parse_sse_raw_data(self, data: Dict, context: StreamContext) -> Optional[StreamEvent]:
         """Parse SSE event"""
         pass
     
@@ -335,7 +335,7 @@ class ClaudeHandler(BaseAgentHandler):
             'error': error_message
         }
     
-    def parse_sse_event(self, data: Dict, is_multi_call_session: bool = False) -> Optional[StreamEvent]:
+    def parse_sse_raw_data(self, data: Dict, context: StreamContext) -> Optional[StreamEvent]:
         data_type = data.get('type', '')
         
         try:
@@ -343,8 +343,14 @@ class ClaudeHandler(BaseAgentHandler):
         except ValueError:
             event_type = StreamEventType.ERROR
         
-        if event_type == StreamEventType.MESSAGE_START and not is_multi_call_session:
+        if event_type == StreamEventType.MESSAGE_START and not context.is_multi_call_session:
             self._emit_event_simple('new_stream')
+
+        if event_type == StreamEventType.MESSAGE_DELTA:
+            context_mgmt = data.get('context_management')
+            if context_mgmt:
+                self._handle_context_management_event(context_mgmt)
+                return None
         
         return StreamEvent(
             type=event_type,
@@ -355,6 +361,41 @@ class ClaudeHandler(BaseAgentHandler):
             message=data.get('message', ''),
             error=data.get('error', '')
         )
+
+    def _handle_context_management_event(self, context_mgmt: Dict, context: StreamContext):
+        """
+        Handle context_management from MESSAGE_DELTA event.
+        
+        Accumula tool pairs clearati per skippare nei continuation payloads.
+        """
+        applied_edits = context_mgmt.get('applied_edits', [])
+        
+        for edit in applied_edits:
+            edit_type = edit.get('type')
+            
+            if edit_type == 'clear_tool_uses_20250919':
+                removed_count = edit.get('content_removed_count', 0)
+                tokens_cleared = edit.get('input_tokens_cleared', 0)
+                
+                context.total_cleared_tool_pairs += removed_count
+                
+                self.logger.info(
+                    f"Context Management: Cleared {removed_count} tool pairs "
+                    f"({tokens_cleared} tokens). Total cleared: {context.total_cleared_tool_pairs}"
+                )
+                
+                '''
+                # ═══ EMIT for Debug UI ═══
+                self.event_system.emit_event('stream_output_batch', {
+                    'outputs': [{
+                        'type': 'context_cleared',
+                        'edit_type': edit_type,
+                        'removed_count': removed_count,
+                        'tokens_cleared': tokens_cleared,
+                        'total_cleared': context.total_cleared_tool_pairs
+                    }]
+                })
+                '''
     
     def update_response_from_event(self, standard_response: Dict, data: Dict) -> None:
         data_type = data.get('type')
@@ -395,7 +436,7 @@ class ClaudeHandler(BaseAgentHandler):
         pass
     
     def process_chunk(self, data: Dict, standard_response: Dict, first_chunk: bool) -> tuple[bool, Optional[str]]:
-        # Claude usa parse_sse_event + StreamingProcessor nel daemon
+        # Claude usa parse_sse_raw_data + StreamingProcessor nel daemon
         # Questo metodo non è usato per Claude, ma deve esistere per il contratto
         return first_chunk, None
     
@@ -850,16 +891,17 @@ class ClaudeHandler(BaseAgentHandler):
                     
                     try:
                         data = json.loads(data_str)
-                        event = self.parse_sse_event(data, context.is_multi_call_session)
-                        stream_output = processor.process_event(event)
-                        if stream_output:
-                            stream_outputs_batch.append(stream_output)
-                            self.logger.info(f"Stream_output generated: {stream_output}. New outputs batch size: {len(stream_outputs_batch)}. Target flush size: {context.chunk_batch_size} ")
-
-                            if len(stream_outputs_batch) >= context.chunk_batch_size:
-                                # Aggiorna GUI batch
-                                context.emit_stream_output(stream_outputs_batch)
-                                stream_outputs_batch.clear()
+                        event = self.parse_sse_raw_data(data, context)
+                        if event:
+                            stream_output = processor.process_event(event)
+                            if stream_output:
+                                stream_outputs_batch.append(stream_output)
+                                self.logger.info(f"Stream_output generated: {stream_output}. New outputs batch size: {len(stream_outputs_batch)}. Target flush size: {context.chunk_batch_size} ")
+    
+                                if len(stream_outputs_batch) >= context.chunk_batch_size:
+                                    # Aggiorna GUI batch
+                                    context.emit_stream_output(stream_outputs_batch)
+                                    stream_outputs_batch.clear()
                                 
                         self.update_response_from_event(standard_response, data)
                         
@@ -1588,7 +1630,7 @@ class GptHandler(BaseAgentHandler):
             'error': error_message
         }
     
-    def parse_sse_event(self, data: Dict, is_multi_call_session: bool = False) -> Optional[StreamEvent]:
+    def parse_sse_raw_data(self, data: Dict, context: StreamContext) -> Optional[StreamEvent]:
         # GPT usa processing inline, non StreamEvent
         return None
     
@@ -2379,7 +2421,7 @@ class HfHandler(BaseAgentHandler):
             'error': error_message
         }
     
-    def parse_sse_event(self, data: Dict, is_multi_call_session: bool = False) -> Optional[StreamEvent]:
+    def parse_sse_raw_data(self, data: Dict, context: StreamContext) -> Optional[StreamEvent]:
         # HF usa processing inline come GPT
         return None
     
@@ -2824,9 +2866,9 @@ class AgentStreamingHandler:
         """Create error response"""
         return self._impl.create_error_response(error_message)
     
-    def parse_sse_event(self, data: Dict, is_multi_call_session: bool = False) -> Optional[StreamEvent]:
+    def parse_sse_raw_data(self, data: Dict, context: StreamContext) -> Optional[StreamEvent]:
         """Parse SSE event"""
-        return self._impl.parse_sse_event(data, is_multi_call_session)
+        return self._impl.parse_sse_raw_data(data, context)
     
     def update_response_from_event(self, standard_response: Dict, data: Dict) -> None:
         """Update response from SSE event"""
