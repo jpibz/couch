@@ -374,13 +374,37 @@ class PathTranslator:
         return text
     
     def _translate_windows_paths_to_unix(self, text: str) -> str:
-        """Find and translate Windows paths → Unix (only workspace paths)"""
-        workspace_str = str(self.workspace_root).replace('\\', '\\\\')
-        
-        # Pattern: Windows absolute path within workspace claude/uploads/outputs
-        # Matches: C:\workspace\claude\..., C:\workspace\uploads\..., C:\workspace\outputs\...
-        pattern = f'{workspace_str}\\\\(?:claude|uploads|outputs)(?:[\\\\\\w\\-\\.]+)*'
-        
+        """
+        Find and translate Windows paths → Unix (only workspace paths)
+
+        STRATEGY (TWO-PASS):
+        1. First pass: Translate workspace paths to Unix paths
+           - workspace_root/claude/... → /home/claude/...
+           - workspace_root/uploads/... → /mnt/user-data/uploads/...
+           - workspace_root/outputs/... → /mnt/user-data/outputs/...
+        2. Second pass: Reverse relative path translation
+           - /home/claude/tmp/... → /tmp/... (INVERSE of Unix→Windows)
+           - /home/claude/var/... → /var/...
+           - Maintains bidirectional symmetry
+
+        EXAMPLES:
+        - workspace_root/claude/tmp/file.txt → /home/claude/tmp/file.txt → /tmp/file.txt
+        - workspace_root/uploads/data.csv → /mnt/user-data/uploads/data.csv (unchanged)
+        """
+        # PASS 1: Translate workspace paths to Unix paths
+        # Pattern: workspace path (supports both Windows \ and Unix / separators)
+        # Matches:
+        #   - C:\workspace\claude\... (Windows)
+        #   - /path/to/workspace/claude/... (Unix/Linux)
+        workspace_str = str(self.workspace_root)
+
+        # Escape special regex chars and create pattern for both separators
+        # Replace both / and \ with [/\\] to match either
+        workspace_pattern = re.escape(workspace_str).replace('\\\\', '[/\\\\]').replace('/', '[/\\\\]')
+
+        # Match workspace_root/claude, workspace_root/uploads, workspace_root/outputs
+        pattern = f'{workspace_pattern}[/\\\\](?:claude|uploads|outputs)(?:[/\\\\][\\w\\-\\.]+)*'
+
         def replace_path(match):
             windows_path_str = match.group(0)
             try:
@@ -390,7 +414,25 @@ class PathTranslator:
             except Exception:
                 # Keep original if translation fails
                 return windows_path_str
-        
-        return re.sub(pattern, replace_path, text)
+
+        text = re.sub(pattern, replace_path, text)
+
+        # PASS 2: Reverse relative path translation
+        # Convert /home/claude/DIRNAME to /DIRNAME for common relative paths
+        # This is the INVERSE of the Unix→Windows translation
+        # Common Unix directories that should be treated as absolute
+        relative_dirs = [
+            'tmp', 'var', 'etc', 'opt', 'usr', 'srv', 'run', 'sys', 'proc',
+            'dev', 'bin', 'sbin', 'lib', 'lib64', 'boot', 'root'
+        ]
+
+        for dirname in relative_dirs:
+            # Pattern: /home/claude/DIRNAME/... or /home/claude/DIRNAME (end)
+            # Replace with: /DIRNAME/... or /DIRNAME
+            pattern_relative = f'{self.unix_home}/{dirname}(/[\\w\\-\\.]+|(?=[\\s"\']|$))'
+            replacement = f'/{dirname}\\1'
+            text = re.sub(pattern_relative, replacement, text)
+
+        return text
 
 
