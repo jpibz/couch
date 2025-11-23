@@ -648,6 +648,8 @@ class ExecutionEngine:
             ['cmd', '/c', command],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             cwd=str(self.working_dir),
             timeout=self.default_timeout,
             **kwargs
@@ -793,6 +795,8 @@ class ExecutionEngine:
             [self.bash_path, '-c', git_command],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             cwd=str(self.working_dir),
             env=env,
             **kwargs
@@ -848,6 +852,8 @@ class ExecutionEngine:
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             **kwargs
         )
 
