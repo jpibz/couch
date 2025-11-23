@@ -548,10 +548,19 @@ class ClaudeHandler(BaseAgentHandler):
         # Flags per sync requests
         self._tool_definitions_received = False
         self._system_prompt_received = False
-        
+
         # Subscribe to responses
         self.event_system.subscribe('enabled_tools_response', self._on_enabled_tools_response)
         self.event_system.subscribe('tool_system_prompt_response', self._on_tool_system_prompt_response)
+
+        # ═══ TOOL EXECUTION VIA EVENTS ═══
+        # Response data for tool execution
+        self._tool_execution_response = None
+        # Flag per sync requests
+        self._tool_execution_received = False
+
+        # Subscribe to tool execution response
+        self.event_system.subscribe('tool_execution_response', self._on_tool_execution_response)
         
         # ═══ SESSION STATE - ITERAZIONE #5 ═══
         # Multi-call tracking - gestito internamente
@@ -586,7 +595,18 @@ class ClaudeHandler(BaseAgentHandler):
         self._system_prompt_response = data.get('system_prompt', '')
         self._system_prompt_received = True
         self.logger.debug(f"Received system prompt ({len(self._system_prompt_response)} chars)")
-    
+
+    def _on_tool_execution_response(self, data: Dict):
+        """
+        Handler per risposta tool execution da ToolRegistry.
+
+        Args:
+            data: {'result': '...', 'success': bool}
+        """
+        self._tool_execution_response = data.get('result', '')
+        self._tool_execution_received = True
+        self.logger.debug(f"Received tool execution result")
+
     def _request_tool_definitions(self) -> List[Dict]:
         """
         Request tool definitions da ToolRegistry via event (SYNC).
@@ -652,7 +672,47 @@ class ClaudeHandler(BaseAgentHandler):
             return ""
         
         return self._system_prompt_response or ""
-    
+
+    def _execute_tool_via_event(self, tool_name: str, tool_input: Dict) -> str:
+        """
+        Execute tool via event_system (SYNC).
+
+        Args:
+            tool_name: Nome del tool da eseguire
+            tool_input: Input per il tool
+
+        Returns:
+            Risultato dell'esecuzione (stringa)
+        """
+        import time
+
+        # Reset flag e response
+        self._tool_execution_received = False
+        self._tool_execution_response = None
+
+        # Emit execute_tool_request event
+        self.event_system.emit_event('execute_tool_request', {
+            'tool_name': tool_name,
+            'tool_input': tool_input
+        })
+
+        # Wait for response (max 30 seconds - tools possono essere lenti)
+        max_wait = 30.0
+        elapsed = 0.0
+        sleep_interval = 0.01
+
+        while not self._tool_execution_received and elapsed < max_wait:
+            time.sleep(sleep_interval)
+            # Keep GUI responsive
+            self.event_system.emit_event('gui_update_request', {})
+            elapsed += sleep_interval
+
+        if not self._tool_execution_received:
+            self.logger.error(f"Timeout executing tool: {tool_name}")
+            return f"ERROR: Timeout executing {tool_name} after {max_wait}s"
+
+        return self._tool_execution_response
+
     # ═══════════════════════════════════════════════════════════════════════════
     # SIMULATION MODE - Claude-specific (ITERAZIONE #5)
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1086,8 +1146,7 @@ class ClaudeHandler(BaseAgentHandler):
         continue_request = StreamingRequest(
             request_id=str(uuid.uuid4()),
             payload=continue_payload,
-            progress_callback=None,
-            extended_mode=True  # Manteniamo thinking mode attivo
+            progress_callback=None
         )
         
         result = context.make_request(continue_request)
@@ -1113,9 +1172,9 @@ class ClaudeHandler(BaseAgentHandler):
         
         self.logger.info(f"Executing tool: {tool_name} (id: {tool_id})")
         
-        # ═══ EXECUTE TOOL ═══
+        # ═══ EXECUTE TOOL VIA EVENT ═══
         try:
-            tool_result = context.tool_registry.execute_tool(tool_call.tool_name, tool_call.tool_input)
+            tool_result = self._execute_tool_via_event(tool_call.tool_name, tool_call.tool_input)
             execution_success = True
         
         except Exception as e:
