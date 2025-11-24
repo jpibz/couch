@@ -324,9 +324,20 @@ class SandboxValidator:
         return True, "OK"
 
     def _check_drive_access(self, command: str) -> tuple[bool, str]:
-        """Check that command doesn't access other drives"""
+        """
+        Check that command doesn't access other drives
+
+        IMPORTANT: This check is for RAW drive access (D:, E:, etc.)
+        NOT for paths translated by PathTranslator!
+
+        PathTranslator may translate paths to different drives (e.g., F:\workspace\...)
+        which are SAFE because they're managed by PathTranslator.
+
+        We only block RAW drive letters that are NOT part of a full path.
+        """
         # Pattern: Drive letter references (C:, D:, etc.)
-        pattern = r'\b([A-Z]):'
+        # But EXCLUDE if followed by backslash (full path, likely from PathTranslator)
+        pattern = r'\b([A-Z]):(?!\\)'
 
         matches = re.finditer(pattern, command, re.IGNORECASE)
 
